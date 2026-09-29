@@ -31,10 +31,11 @@ LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
 
 EXTENSIONS_SUPPORTED_DATASTORES = ['mysql', 'mariadb', 'postgresql',
-                                   'keydb', 'valkey', 'redis']
+                                   'keydb', 'valkey', 'redis', 'percona']
 
 # List of datastores supporting CRUD operations for databases
-SCHEMA_MANAGEMENT_SUPPORTED_DATASTORES = ['mysql', 'mariadb', 'postgresql']
+SCHEMA_MANAGEMENT_SUPPORTED_DATASTORES = ['mysql', 'mariadb', 'postgresql',
+                                          'percona']
 SCHEMA_VIEW_SUPPORTED_DATASTORES = EXTENSIONS_SUPPORTED_DATASTORES
 
 

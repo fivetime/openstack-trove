@@ -29,6 +29,8 @@ REGISTRY_EXT_DEFAULTS = {
         'trove.guestagent.datastore.mysql.manager.Manager',
     'mariadb':
         'trove.guestagent.datastore.mariadb.manager.Manager',
+    'percona':
+        'trove.guestagent.datastore.percona.manager.Manager',
     'postgresql':
         'trove.guestagent.datastore.postgres.manager.PostgresManager',
     'keydb':

@@ -643,73 +643,36 @@ mysql_opts = [
 percona_group = cfg.OptGroup(
     'percona', title='Percona options',
     help="Oslo option group designed for Percona datastore")
-percona_opts = [
-    cfg.StrOpt('database_service_uname', default='database',
-               help='The name of database service user.'),
-    cfg.StrOpt('database_service_uid',
-               help='The UID of database service user.'),
-    cfg.StrOpt('database_service_gid',
-               help='The GID of database service user.'),
-    cfg.BoolOpt('icmp', default=False,
-                help='Whether to permit ICMP.',
-                deprecated_for_removal=True),
-    cfg.ListOpt('tcp_ports', default=["3306"], item_type=ListOfPortsType,
-                help='List of TCP ports and/or port ranges to open '
-                     'in the security group (only applicable '
-                     'if trove_security_groups_support is True).'),
-    cfg.ListOpt('udp_ports', default=[], item_type=ListOfPortsType,
-                help='List of UDP ports and/or port ranges to open '
-                     'in the security group (only applicable '
-                     'if trove_security_groups_support is True).'),
-    cfg.StrOpt('backup_strategy', default='InnoBackupEx',
-               help='Default strategy to perform backups.',
-               deprecated_name='backup_strategy',
-               deprecated_group='DEFAULT'),
-    cfg.StrOpt('replication_strategy', default='MysqlGTIDReplication',
-               help='Default strategy for replication.'),
-    cfg.StrOpt('replication_namespace',
-               default='trove.guestagent.strategies.replication.mysql_gtid',
-               help='Namespace to load replication strategies from.'),
-    cfg.StrOpt('mount_point', default='/var/lib/mysql',
-               help="Filesystem path for mounting "
-                    "volumes if volume support is enabled."),
-    cfg.BoolOpt('root_on_create', default=False,
-                help='Enable the automatic creation of the root user for the '
-                'service during instance-create. The generated password for '
-                'the root user is immediately returned in the response of '
-                "instance-create as the 'password' field."),
-    cfg.IntOpt('usage_timeout', default=450,
-               help='Maximum time (in seconds) to wait for a Guest to become '
-                    'active.'),
-    cfg.BoolOpt('volume_support', default=True,
-                help='Whether to provision a Cinder volume for datadir.'),
-    cfg.StrOpt('device_path', default='/dev/vdb',
-               help='Device path for volume if volume support is enabled.'),
-    cfg.StrOpt('root_controller',
-               default='trove.extensions.common.service.DefaultRootController',
-               help='Root controller implementation for percona.'),
-    cfg.ListOpt('ignore_users', default=['os_admin', 'root'],
-                help='Users to exclude when listing users.',
-                deprecated_name='ignore_users',
-                deprecated_group='DEFAULT'),
-    cfg.ListOpt('ignore_dbs',
-                default=['mysql', 'information_schema', 'performance_schema'],
-                help='Databases to exclude when listing databases.',
-                deprecated_name='ignore_dbs',
-                deprecated_group='DEFAULT'),
-    cfg.ListOpt('guest_log_exposed_logs', default=['general', 'slow_query'],
-                item_type=types.String(ignore_case=True),
-                help='List of Guest Logs to expose for publishing.'),
-    cfg.IntOpt('guest_log_long_query_time', default=1000,
-               help='The time in milliseconds that a statement must take in '
-                    'in order to be logged in the slow_query log.',
-               deprecated_for_removal=True,
-               deprecated_reason='Will be replaced by a configuration group '
-               'option: long_query_time'),
-    cfg.IntOpt('default_password_length',
-               default='${mysql.default_password_length}',
-               help='Character length of generated passwords.')
-]
+
+
+def _build_mysql_family_datastore_opts(datastore_name, docker_image):
+    """The MySQL options, for a datastore that runs on the MySQL manager.
+
+    The MySQL guest agent code reads its options from the group named after
+    the datastore manager, so such a datastore needs every MySQL option.
+    Only where the images come from differs.
+    """
+    opts = [opt for opt in mysql_opts
+            if opt.name not in ('docker_image', 'backup_docker_image')]
+    opts += [
+        cfg.StrOpt(
+            'docker_image', default=docker_image,
+            help='Database docker image.'
+        ),
+        cfg.StrOpt(
+            'backup_docker_image',
+            sample_default=(
+                'your-registry/your-repo/db-backup-%s' % datastore_name),
+            help='The docker image used for backup and restore.'
+        ),
+    ]
+    return opts
+
+
+percona_opts = _build_mysql_family_datastore_opts(
+    datastore_name='percona',
+    docker_image='percona/percona-server',
+)
 
 # Percona XtraDB Cluster
 pxc_group = cfg.OptGroup(

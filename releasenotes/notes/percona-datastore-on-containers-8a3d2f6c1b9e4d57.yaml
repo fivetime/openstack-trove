@@ -1,0 +1,19 @@
+---
+features:
+  - |
+    The ``percona`` datastore runs on the container based guest agent. It
+    runs Percona Server from the image named by ``[percona] docker_image``
+    (``percona/percona-server`` by default) on the MySQL implementation, so
+    it has what MySQL has: replication, users and databases, configuration
+    groups and backups with Percona XtraBackup.
+upgrade:
+  - |
+    The ``percona`` datastore replaces the former experimental Percona
+    implementation, whose guest agent side was removed with the move to
+    containers. ``[percona]`` now has the options and defaults of
+    ``[mysql]``, apart from the images. Remove overrides that point at the
+    experimental backup and replication classes.
+  - |
+    The Percona configuration templates are now the MySQL ones. The former
+    templates configured the query cache, which Percona Server 8.0 removed:
+    the server refuses to start with ``unknown variable 'query_cache_type'``.

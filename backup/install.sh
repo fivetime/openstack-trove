@@ -13,7 +13,7 @@ usage() {
 	echo "Usage : $(basename $0) [--datastore datastore] [--datastore-version datastore-version]"
 	echo ""
 	echo " Command parameters:"
-	echo "  'datastore' is the datastore. The options are: 'mariadb', 'mysql', 'postgresql', 'keydb', 'valkey', 'redis'"
+	echo "  'datastore' is the datastore. The options are: 'mariadb', 'mysql', 'postgresql', 'keydb', 'valkey', 'redis', 'percona'"
 	echo "  'datastore-version' is the datastore version of the datastore."
 	echo ""
 	exit 1
@@ -64,7 +64,8 @@ else
 	done
 fi
 
-if [ "${OPT_DATASTORE}" = "mysql" ]; then
+# Percona Server is backed up with the same Percona XtraBackup as MySQL.
+if [ "${OPT_DATASTORE}" = "mysql" ] || [ "${OPT_DATASTORE}" = "percona" ]; then
 	curl -sSL https://repo.percona.com/apt/percona-release_latest.${OS_RELEASE_CODENAME}_all.deb -o percona-release.deb
 	dpkg -i percona-release.deb
 	percona-release enable-only tools release
