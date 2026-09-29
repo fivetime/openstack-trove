@@ -19,6 +19,8 @@ from trove.common import cfg
 from trove.common import exception
 from trove.common.strategies.cluster.experimental.galera_common import (
     guestagent as galera_guest_api)
+from trove.common.strategies.cluster.experimental.galera_common import (
+    taskmanager as galera_tasks)
 from trove.common import stream_codecs
 from trove.common import utils
 from trove.guestagent import api as guest_api
@@ -462,6 +464,14 @@ class TestMariaDB(trove_testtools.TestCase):
             healthcheck['test'])
         self.assertEqual(single['interval'], healthcheck['interval'])
         self.assertEqual(single, mariadb_service.MariaDBApp.HEALTHCHECK)
+
+    def test_the_cluster_account_is_hidden_from_users(self):
+        # It would otherwise be listed by the user API, where its password
+        # can be changed and the account deleted. Members log in with it
+        # for their health check.
+        self.assertIn(
+            galera_tasks.GaleraCommonClusterTasks.CLUSTER_REPLICATION_USER,
+            CONF.mariadb.ignore_users)
 
     def test_wsrep_options_are_read_from_their_section(self):
         self.assertEqual('galera',

@@ -1492,7 +1492,10 @@ mariadb_opts = [
     cfg.StrOpt('root_controller',
                default='trove.extensions.common.service.DefaultRootController',
                help='Root controller implementation for mysql.'),
-    cfg.ListOpt('ignore_users', default=['os_admin', 'root'],
+    # clusterrepuser is the account Galera cluster members are given by the
+    # task manager; their health check logs in with it.
+    cfg.ListOpt('ignore_users',
+                default=['os_admin', 'root', 'clusterrepuser'],
                 help='Users to exclude when listing users.',
                 deprecated_name='ignore_users',
                 deprecated_group='DEFAULT'),

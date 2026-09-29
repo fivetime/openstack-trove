@@ -1,0 +1,31 @@
+---
+features:
+  - |
+    MariaDB Galera clusters work on the container based guest agent:
+    creating a cluster, growing it, shrinking it and restarting its
+    members. Every member accepts writes.
+fixes:
+  - |
+    Creating a MariaDB cluster no longer fails at the first call to the
+    guest agent. ``[mariadb] cluster_support`` had stayed enabled after the
+    guest agent side of clustering was removed with the move to containers.
+  - |
+    ``clusterrepuser``, the account that the task manager gives to the
+    members of a Galera cluster, is no longer listed among the users of a
+    MariaDB instance, where it could be changed or deleted.
+issues:
+  - |
+    Backups cannot be taken from an instance that is a member of a cluster;
+    the API refuses with 501.
+  - |
+    A Galera cluster whose members were all stopped does not start again on
+    its own. One member has to form the cluster again, which the guest
+    agent does not do.
+security:
+  - |
+    The members of a Galera cluster reach each other on ports 4444, 4567
+    and 4568, and Galera does not authenticate a member that joins. Trove
+    opens the ports of a datastore to ``trove_security_group_rule_cidr``,
+    ``0.0.0.0/0`` by default, unless the instances are created with
+    ``allowed_cidrs``. Restrict one of the two to the network of the
+    cluster.
