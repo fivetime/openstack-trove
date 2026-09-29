@@ -24,6 +24,7 @@ from trove.guestagent.datastore import service as base_service
 from trove.guestagent.utils import docker as docker_utils
 
 
+from trove.guestagent.datastore.galera_common import manager as galera_manager
 from trove.guestagent.datastore.mariadb import service
 from trove.guestagent.datastore.mysql_common import manager
 
@@ -33,7 +34,7 @@ LOG = logging.getLogger(__name__)
 DEFAULTS_FILE = '/etc/mysql/my.cnf'
 
 
-class Manager(manager.MySqlManager):
+class Manager(galera_manager.GaleraManagerMixin, manager.MySqlManager):
     def __init__(self):
         status = base_service.BaseDbStatus(self.docker_client)
         app = service.MariaDBApp(status, self.docker_client)

@@ -21,6 +21,7 @@ from trove.common import cfg
 from trove.common import constants
 from trove.common import exception
 from trove.common import utils
+from trove.guestagent.datastore.galera_common import service as galera_service
 from trove.guestagent.datastore.mysql_common import service as mysql_service
 from trove.guestagent.utils import docker as docker_util
 from trove.guestagent.utils import mysql as mysql_util
@@ -30,7 +31,10 @@ CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
 
 
-class MariaDBApp(mysql_service.BaseMySqlApp):
+class MariaDBApp(galera_service.GaleraAppMixin, mysql_service.BaseMySqlApp):
+
+    # MariaDB reads the wsrep options from their own section.
+    CLUSTER_CONF_SECTION = 'galera'
 
     HEALTHCHECK = {
         "test": ["CMD", "healthcheck.sh", "--defaults-file",
@@ -48,6 +52,15 @@ class MariaDBApp(mysql_service.BaseMySqlApp):
 
     def __init__(self, status, docker_client):
         super(MariaDBApp, self).__init__(status, docker_client)
+
+    @property
+    def cluster_healthcheck(self):
+        healthcheck = dict(MariaDBApp.HEALTHCHECK)
+        healthcheck["test"] = [
+            "CMD", "healthcheck.sh", "--defaults-file",
+            self.cluster_healthcheck_file,
+            "--connect", "--innodb_initialized", "--galera_online"]
+        return healthcheck
 
     def wait_for_slave_status(self, status, client, max_time):
         def verify_slave_status():
