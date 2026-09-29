@@ -12,6 +12,15 @@ Instead, Trove exposes the available Redis ACL command categories through the
 Database and User API. These categories can be assigned to users to control
 which categories of Redis commands they are allowed to execute.
 
+The ``redis`` datastore shares this implementation, so everything on this page
+applies to Redis instances as well.
+
+.. note::
+
+    Redis 7.4 and later are not published under the BSD license that Redis
+    7.2 and earlier, and Valkey, use. Operators who offer Redis to other
+    parties should check the license of the version they register.
+
 Manage users
 ~~~~~~~~~~~~
 

@@ -138,6 +138,12 @@ class TestClusterController(trove_testtools.TestCase):
                              mock_get_datastore_version,
                              mock_id_from_href,
                              mock_cluster_create):
+        # Clustering is off by default until the guest agent side is ported
+        # to the container guest agent; this is the controller with it on.
+        cfg.CONF.set_override('cluster_support', True, group='redis')
+        self.addCleanup(cfg.CONF.clear_override, 'cluster_support',
+                        group='redis')
+
         body = self.cluster
         tenant_id = Mock()
         context = trove_testtools.TroveTestContext(self)

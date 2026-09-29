@@ -35,4 +35,6 @@ REGISTRY_EXT_DEFAULTS = {
         'trove.guestagent.datastore.keydb.manager.Manager',
     'valkey':
         'trove.guestagent.datastore.valkey.manager.Manager',
+    'redis':
+        'trove.guestagent.datastore.redis.manager.Manager',
 }

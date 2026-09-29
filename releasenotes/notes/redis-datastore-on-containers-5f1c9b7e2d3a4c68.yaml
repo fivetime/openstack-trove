@@ -1,0 +1,24 @@
+---
+features:
+  - |
+    The ``redis`` datastore runs on the container based guest agent. It is a
+    third member of the Redis family next to KeyDB and Valkey and shares
+    their implementation: single instances, replication, ACL based users and
+    backups. The database runs from the image named by ``[redis]
+    docker_image`` (``redis`` by default), tagged with the datastore version.
+upgrade:
+  - |
+    The ``redis`` datastore replaces the former experimental Redis
+    implementation, whose guest agent side was removed with the move to
+    containers. Its ``[redis]`` options now match ``[keydb]`` and
+    ``[valkey]``: ``backup_strategy`` defaults to ``redisbackup``,
+    ``replication_strategy`` to ``RedisSyncReplication`` in
+    ``trove.guestagent.strategies.replication.redis``, ``root_controller``
+    to the default root controller, and ``tcp_ports`` to ``6379, 6380``.
+    Remove overrides of these options that point at the experimental
+    classes.
+  - |
+    ``[redis] cluster_support`` now defaults to ``False``. The API and task
+    manager parts of Redis clustering are still present, but the guest agent
+    cannot build a cluster yet, so creating one is refused instead of
+    failing part way.

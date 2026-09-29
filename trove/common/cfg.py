@@ -797,74 +797,7 @@ pxc_opts = [
 ]
 
 
-# Redis
-redis_group = cfg.OptGroup(
-    'redis', title='Redis options',
-    help="Oslo option group designed for Redis datastore")
-redis_opts = [
-    cfg.StrOpt('database_service_uname', default='database',
-               help='The name of database service user.'),
-    cfg.StrOpt('database_service_uid',
-               help='The UID of database service user.'),
-    cfg.StrOpt('database_service_gid',
-               help='The GID of database service user.'),
-    cfg.BoolOpt('icmp', default=False,
-                help='Whether to permit ICMP.',
-                deprecated_for_removal=True),
-    cfg.ListOpt('tcp_ports', default=["6379", "16379"],
-                item_type=ListOfPortsType,
-                help='List of TCP ports and/or port ranges to open '
-                     'in the security group (only applicable '
-                     'if trove_security_groups_support is True).'),
-    cfg.ListOpt('udp_ports', default=[], item_type=ListOfPortsType,
-                help='List of UDP ports and/or port ranges to open '
-                     'in the security group (only applicable '
-                     'if trove_security_groups_support is True).'),
-    cfg.StrOpt('backup_strategy', default='RedisBackup',
-               help='Default strategy to perform backups.',
-               deprecated_name='backup_strategy',
-               deprecated_group='DEFAULT'),
-    cfg.StrOpt('replication_strategy', default='RedisSyncReplication',
-               help='Default strategy for replication.'),
-    cfg.StrOpt('replication_namespace',
-               default='trove.guestagent.strategies.replication.experimental.'
-                       'redis_sync',
-               help='Namespace to load replication strategies from.'),
-    cfg.StrOpt('mount_point', default='/var/lib/redis',
-               help="Filesystem path for mounting "
-               "volumes if volume support is enabled."),
-    cfg.BoolOpt('volume_support', default=True,
-                help='Whether to provision a Cinder volume for datadir.'),
-    cfg.StrOpt('device_path', default='/dev/vdb',
-               help='Device path for volume if volume support is enabled.'),
-    cfg.BoolOpt('cluster_support', default=True,
-                help='Enable clusters to be created and managed.'),
-    cfg.StrOpt('api_strategy',
-               default='trove.common.strategies.cluster.experimental.'
-               'redis.api.RedisAPIStrategy',
-               help='Class that implements datastore-specific API logic.'),
-    cfg.StrOpt('taskmanager_strategy',
-               default='trove.common.strategies.cluster.experimental.redis.'
-               'taskmanager.RedisTaskManagerStrategy',
-               help='Class that implements datastore-specific task manager '
-                    'logic.'),
-    cfg.StrOpt('guestagent_strategy',
-               default='trove.common.strategies.cluster.experimental.'
-               'redis.guestagent.RedisGuestAgentStrategy',
-               help='Class that implements datastore-specific Guest Agent API '
-                    'logic.'),
-    cfg.StrOpt('root_controller',
-               default='trove.extensions.redis.service.RedisRootController',
-               help='Root controller implementation for redis.'),
-    cfg.ListOpt('guest_log_exposed_logs', default=[],
-                item_type=types.String(ignore_case=True),
-                help='List of Guest Logs to expose for publishing.'),
-    cfg.IntOpt('default_password_length', default=36,
-               help='Character length of generated passwords.')
-]
-
-
-# KeyDB / Valkey
+# KeyDB / Valkey / Redis
 def _build_redis_family_datastore_opts(
     datastore_name,
     backup_strategy,
@@ -1010,6 +943,38 @@ valkey_group, valkey_opts = _build_redis_family_datastore_opts(
     ),
     docker_image='valkey/valkey',
 )
+
+redis_group, redis_opts = _build_redis_family_datastore_opts(
+    datastore_name='redis',
+    backup_strategy='redisbackup',
+    replication_strategy='RedisSyncReplication',
+    replication_namespace=(
+        'trove.guestagent.strategies.replication.redis'
+    ),
+    docker_image='redis',
+)
+
+# The API and taskmanager halves of Redis clustering are still in the tree,
+# but the guest agent half went with the pre-container guest agent. Keep
+# the strategies loadable and the feature off until the guest side is back.
+redis_opts += [
+    cfg.BoolOpt('cluster_support', default=False,
+                help='Enable clusters to be created and managed.'),
+    cfg.StrOpt('api_strategy',
+               default='trove.common.strategies.cluster.experimental.'
+               'redis.api.RedisAPIStrategy',
+               help='Class that implements datastore-specific API logic.'),
+    cfg.StrOpt('taskmanager_strategy',
+               default='trove.common.strategies.cluster.experimental.redis.'
+               'taskmanager.RedisTaskManagerStrategy',
+               help='Class that implements datastore-specific task manager '
+                    'logic.'),
+    cfg.StrOpt('guestagent_strategy',
+               default='trove.common.strategies.cluster.experimental.'
+               'redis.guestagent.RedisGuestAgentStrategy',
+               help='Class that implements datastore-specific Guest Agent API '
+                    'logic.'),
+]
 
 # Cassandra
 cassandra_group = cfg.OptGroup(
