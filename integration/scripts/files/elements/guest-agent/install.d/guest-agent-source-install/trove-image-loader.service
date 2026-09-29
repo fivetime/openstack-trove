@@ -7,7 +7,8 @@ Requires=docker.service
 Type=oneshot
 User=root
 Group=root
-EnvironmentFile=/etc/trove/controller.conf
+# Only written when controller_address is set, which is for development.
+EnvironmentFile=-/etc/trove/controller.conf
 ExecStart=/usr/local/sbin/trove-image-loader
 
 [Install]
