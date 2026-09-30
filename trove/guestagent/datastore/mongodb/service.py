@@ -436,16 +436,21 @@ class MongoDBApp(service.BaseDbApp):
     # Cluster actions
     ##################
 
-    def prep_primary(self):
+    def prep_primary(self, host=None):
         """Turn this member into the primary of a replica set of one and
         give it the admin user.
 
         The replica set name is in the configuration file; initiating the
-        set is allowed under the localhost exception.
+        set is allowed under the localhost exception. The server has to
+        find the host among its own addresses, and with the user's network
+        interface handed to the container those are not the addresses the
+        guest agent sees: the taskmanager gives the address.
         """
-        LOG.info("Initiating replica set %s.", self.replica_set_name)
+        host = host or self.instance_ip
+        LOG.info("Initiating replica set %s on %s.", self.replica_set_name,
+                 host)
         self.adm.rs_initiate(self.replica_set_name,
-                             '%s:%s' % (self.instance_ip, self.port))
+                             '%s:%s' % (host, self.port))
         utils.poll_until(self.adm.is_primary, sleep_time=3,
                          time_out=CONF.mongodb.add_members_timeout)
         self.secure()

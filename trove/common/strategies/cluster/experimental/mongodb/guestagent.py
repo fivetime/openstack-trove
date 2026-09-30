@@ -88,12 +88,12 @@ class MongoDbGuestAgentAPI(guest_api.API):
         return self._call("get_key", self.agent_low_timeout,
                           version=version)
 
-    def prep_primary(self):
+    def prep_primary(self, host=None):
         LOG.debug("Preparing member to be primary member.")
         version = guest_api.API.API_BASE_VERSION
 
         return self._call("prep_primary", self.agent_high_timeout,
-                          version=version)
+                          version=version, host=host)
 
     def create_admin_user(self, password):
         LOG.debug("Creating admin user")

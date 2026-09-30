@@ -180,8 +180,8 @@ class Manager(manager.Manager):
         self._cluster_action('add_shard', self.app.add_shard,
                              replica_set_name, replica_set_member)
 
-    def prep_primary(self, context):
-        self._cluster_action('prep_primary', self.app.prep_primary)
+    def prep_primary(self, context, host=None):
+        self._cluster_action('prep_primary', self.app.prep_primary, host)
 
     def get_key(self, context):
         return self.app.get_key()

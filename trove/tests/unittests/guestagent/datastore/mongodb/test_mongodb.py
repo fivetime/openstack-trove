@@ -401,10 +401,12 @@ class TestMongoDBAppLifecycle(MongoDBGuestTestCase):
         order.attach_mock(app.adm.rs_initiate, 'rs_initiate')
         order.attach_mock(app.adm.create_admin_user, 'create_admin_user')
 
+        # The address comes from the taskmanager: the guest agent sees the
+        # management network, the server the user's.
         with mock.patch.object(mongodb_service.MongoDBApp, 'instance_ip',
                                new_callable=mock.PropertyMock,
-                               return_value='10.0.0.5'):
-            app.prep_primary()
+                               return_value='172.31.240.9'):
+            app.prep_primary('10.0.0.5')
 
         self.assertEqual('rs_initiate', order.mock_calls[0][0])
         self.assertEqual(('rs1', '10.0.0.5:27017'),

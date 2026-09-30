@@ -318,7 +318,10 @@ class MongoDbClusterTasks(task_models.ClusterTasks):
         other_members_ips = [self.get_ip(member) for member in other_members]
         try:
             primary_guest = self.get_guest(primary_member)
-            primary_guest.prep_primary()
+            # The member is told its own address: the one the others
+            # reach it at. The guest agent cannot tell, it sits on the
+            # management network and the database on the user's.
+            primary_guest.prep_primary(self.get_ip(primary_member))
             primary_guest.add_members(other_members_ips)
             # The members take the users of the primary with its data, so
             # the admin password of the primary is the one that works on

@@ -208,7 +208,7 @@ class MongoDbClusterTasksTest(trove_testtools.TestCase):
                                InstanceServiceStatus(ServiceStatuses.NEW))
         primary_member = member1
         other_members = [member2]
-        mock_ip.side_effect = ["10.0.0.3"]
+        mock_ip.side_effect = ["10.0.0.3", "10.0.0.2"]
         mock_guest().prep_primary.return_value = Mock()
         mock_guest().add_members.return_value = Mock()
 
@@ -233,13 +233,15 @@ class MongoDbClusterTasksTest(trove_testtools.TestCase):
                                InstanceServiceStatus(ServiceStatuses.NEW))
         primary_member = member1
         other_members = [member2]
-        mock_ip.side_effect = ["10.0.0.3"]
+        mock_ip.side_effect = ["10.0.0.3", "10.0.0.2"]
         mock_guest().prep_primary.return_value = Mock()
         mock_guest().add_members.return_value = Mock()
         mock_guest().get_admin_password.return_value = "pwd"
 
         ret_val = self.clustertasks._init_replica_set(primary_member,
                                                       other_members)
+        # The primary is told the address the others reach it at.
+        mock_guest.return_value.prep_primary.assert_called_with("10.0.0.2")
         mock_guest.return_value.add_members.assert_called_with(
             ["10.0.0.3"]
         )
