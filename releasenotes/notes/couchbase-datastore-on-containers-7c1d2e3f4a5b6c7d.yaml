@@ -1,0 +1,18 @@
+---
+features:
+  - |
+    The ``couchbase`` datastore runs on the container based guest agent
+    from the image named by ``[couchbase] docker_image`` (``couchbase`` by
+    default), as single node instances. Databases are buckets, users are
+    local users with full access to their buckets, root is a local user
+    with the admin role, and the memory quotas and the settings of new
+    buckets are configuration parameters.
+upgrade:
+  - |
+    The ``couchbase`` datastore replaces the former experimental
+    implementation, whose guest agent side was removed with the move to
+    containers. ``[couchbase] backup_strategy`` is now ``couchbasebackup``,
+    a copy of the var directory of the node; the database service user is
+    the ``couchbase`` user of the image (uid 1000); and the ports opened
+    are those of the REST, views, query and data services, in clear and
+    over TLS.

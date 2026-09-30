@@ -1,0 +1,18 @@
+# Couchbase settings decided by Trove for an instance with
+# {{ flavor['ram'] }} MB of memory. The server reads no file: the guest
+# agent tells it these over its API when it starts and whenever they
+# change. Quotas are in MB. The server refuses a data quota below 256 MB,
+# an index quota below 256 MB, and a total above the memory of the
+# instance less 1024 MB.
+memory_quota={{ [256, [flavor['ram'] // 2, flavor['ram'] * 9 // 10 - 1280]|min]|max }}
+index_memory_quota=256
+# What a new bucket is created with: its quota, its replicas, which are
+# none on a single node, and whether values or whole documents are
+# evicted from memory.
+bucket_ramsize=100
+bucket_replicas=0
+bucket_eviction_policy=valueOnly
+# The fragmentation, in percent, at which the server compacts its data
+# and its views.
+compaction_database_threshold=30
+compaction_view_threshold=30

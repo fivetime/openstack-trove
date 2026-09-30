@@ -1,0 +1,48 @@
+{
+    "configuration-parameters": [
+        {
+            "name": "memory_quota",
+            "restart_required": false,
+            "min": 256,
+            "type": "integer"
+        },
+        {
+            "name": "index_memory_quota",
+            "restart_required": false,
+            "min": 256,
+            "type": "integer"
+        },
+        {
+            "name": "bucket_ramsize",
+            "restart_required": false,
+            "min": 100,
+            "type": "integer"
+        },
+        {
+            "name": "bucket_replicas",
+            "restart_required": false,
+            "min": 0,
+            "max": 3,
+            "type": "integer"
+        },
+        {
+            "name": "bucket_eviction_policy",
+            "restart_required": false,
+            "type": "string"
+        },
+        {
+            "name": "compaction_database_threshold",
+            "restart_required": false,
+            "min": 2,
+            "max": 100,
+            "type": "integer"
+        },
+        {
+            "name": "compaction_view_threshold",
+            "restart_required": false,
+            "min": 2,
+            "max": 100,
+            "type": "integer"
+        }
+    ]
+}
