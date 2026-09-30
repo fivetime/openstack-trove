@@ -45,4 +45,6 @@ REGISTRY_EXT_DEFAULTS = {
         'trove.guestagent.datastore.mongodb.manager.Manager',
     'cassandra':
         'trove.guestagent.datastore.cassandra.manager.Manager',
+    'couchdb':
+        'trove.guestagent.datastore.couchdb.manager.Manager',
 }

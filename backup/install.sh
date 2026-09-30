@@ -13,7 +13,7 @@ usage() {
 	echo "Usage : $(basename $0) [--datastore datastore] [--datastore-version datastore-version]"
 	echo ""
 	echo " Command parameters:"
-	echo "  'datastore' is the datastore. The options are: 'mariadb', 'mysql', 'postgresql', 'keydb', 'valkey', 'redis', 'percona', 'pxc', 'mongodb', 'cassandra'"
+	echo "  'datastore' is the datastore. The options are: 'mariadb', 'mysql', 'postgresql', 'keydb', 'valkey', 'redis', 'percona', 'pxc', 'mongodb', 'cassandra', 'couchdb'"
 	echo "  'datastore-version' is the datastore version of the datastore."
 	echo ""
 	exit 1
@@ -139,6 +139,9 @@ elif [ "${OPT_DATASTORE}" = "mongodb" ]; then
 elif [ "${OPT_DATASTORE}" = "cassandra" ]; then
 	# A backup is a snapshot the server takes, packed with tar. Nothing of
 	# Cassandra is needed for it.
+	:
+elif [ "${OPT_DATASTORE}" = "couchdb" ]; then
+	# A backup is a copy of the database files, packed with tar.
 	:
 fi
 

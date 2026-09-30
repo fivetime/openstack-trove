@@ -1240,9 +1240,9 @@ couchdb_group = cfg.OptGroup(
 couchdb_opts = [
     cfg.StrOpt('database_service_uname', default='database',
                help='The name of database service user.'),
-    cfg.StrOpt('database_service_uid',
+    cfg.StrOpt('database_service_uid', default='5984',
                help='The UID of database service user.'),
-    cfg.StrOpt('database_service_gid',
+    cfg.StrOpt('database_service_gid', default='5984',
                help='The GID of database service user.'),
     cfg.BoolOpt('icmp', default=False,
                 help='Whether to permit ICMP.',
@@ -1263,7 +1263,7 @@ couchdb_opts = [
                 help='Whether to provision a Cinder volume for datadir.'),
     cfg.StrOpt('device_path', default='/dev/vdb',
                help='Device path for volume if volume support is enabled.'),
-    cfg.StrOpt('backup_strategy', default='CouchDBBackup',
+    cfg.StrOpt('backup_strategy', default='couchdbbackup',
                help='Default strategy to perform backups.'),
     cfg.StrOpt('replication_strategy', default=None,
                help='Default strategy for replication.'),
@@ -1283,12 +1283,24 @@ couchdb_opts = [
                 deprecated_name='ignore_users',
                 deprecated_group='DEFAULT'),
     cfg.ListOpt('ignore_dbs',
-                default=['_users', '_replicator'],
+                default=['_users', '_replicator', '_global_changes'],
                 help='Databases to exclude when listing databases.',
                 deprecated_name='ignore_dbs',
                 deprecated_group='DEFAULT'),
     cfg.IntOpt('default_password_length', default=36,
-               help='Character length of generated passwords.')
+               help='Character length of generated passwords.'),
+    cfg.StrOpt(
+        'docker_image', default='couchdb',
+        help='Database docker image.'
+    ),
+    cfg.StrOpt(
+        'backup_docker_image',
+        sample_default='your-registry/your-repo/db-backup-couchdb',
+        help='The docker image used for backup and restore. Trove will uses'
+             'datastore version as the image tag, for example: '
+             'your-registry/your-repo/db-backup-couchdb:3.5 is used for '
+             'couchdb datastore with version 3.5'
+    ),
 ]
 
 # Vertica

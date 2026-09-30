@@ -1,0 +1,6 @@
+; CouchDB settings rendered by Trove. The guest agent adds the data
+; directory, the listener and the single node setting on top, in files
+; that sort after this one; the server keeps what it is told at runtime,
+; the admins among it, in a file that sorts after all of them.
+[couchdb]
+max_document_size = 8000000

@@ -181,6 +181,8 @@ function configure_docker_images {
     iniset $TROVE_GUESTAGENT_CONF mongodb backup_docker_image ${TROVE_DATABASE_BACKUP_IMAGE_MONGODB}
     iniset $TROVE_GUESTAGENT_CONF cassandra docker_image ${TROVE_DATABASE_IMAGE_CASSANDRA}
     iniset $TROVE_GUESTAGENT_CONF cassandra backup_docker_image ${TROVE_DATABASE_BACKUP_IMAGE_CASSANDRA}
+    iniset $TROVE_GUESTAGENT_CONF couchdb docker_image ${TROVE_DATABASE_IMAGE_COUCHDB}
+    iniset $TROVE_GUESTAGENT_CONF couchdb backup_docker_image ${TROVE_DATABASE_BACKUP_IMAGE_COUCHDB}
 }
 
 function configure_cloudinit {
@@ -223,7 +225,7 @@ ${ETC_HOSTS_APPEND}
 EOF
 
     # NOTE(lxkong): Remove this when we support common cloud-init file for all datastores.
-    for datastore in "mysql" "mariadb" "postgresql" "keydb" "valkey" "redis" "percona" "pxc" "mongodb" "cassandra"
+    for datastore in "mysql" "mariadb" "postgresql" "keydb" "valkey" "redis" "percona" "pxc" "mongodb" "cassandra" "couchdb"
     do
         sudo cp ${common_cloudinit} /etc/trove/cloudinit/${datastore}.cloudinit
     done
@@ -727,6 +729,7 @@ function config_network_isolation {
         TROVE_DATABASE_IMAGE_PXC="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/percona-xtradb-cluster"
         TROVE_DATABASE_IMAGE_MONGODB="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/mongo"
         TROVE_DATABASE_IMAGE_CASSANDRA="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/cassandra"
+        TROVE_DATABASE_IMAGE_COUCHDB="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/couchdb"
         TROVE_DATABASE_BACKUP_IMAGE_MYSQL="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-mysql"
         TROVE_DATABASE_BACKUP_IMAGE_MARIADB="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-mariadb"
         TROVE_DATABASE_BACKUP_IMAGE_POSTGRESQL="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-postgresql"
@@ -737,6 +740,7 @@ function config_network_isolation {
         TROVE_DATABASE_BACKUP_IMAGE_PXC="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-pxc"
         TROVE_DATABASE_BACKUP_IMAGE_MONGODB="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-mongodb"
         TROVE_DATABASE_BACKUP_IMAGE_CASSANDRA="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-cassandra"
+        TROVE_DATABASE_BACKUP_IMAGE_COUCHDB="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-couchdb"
 
         configure_docker_images
     fi

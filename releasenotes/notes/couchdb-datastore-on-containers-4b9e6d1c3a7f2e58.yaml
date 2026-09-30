@@ -1,0 +1,21 @@
+---
+features:
+  - |
+    The ``couchdb`` datastore runs on the container based guest agent from
+    the image named by ``[couchdb] docker_image`` (``couchdb`` by
+    default), as single instances with users, databases, root and backups.
+upgrade:
+  - |
+    The ``couchdb`` datastore replaces the former experimental
+    implementation, whose guest agent side was removed with the move to
+    containers. ``[couchdb] backup_strategy`` is now ``couchdbbackup`` and
+    the database service user is the ``couchdb`` user of the image (uid
+    5984).
+security:
+  - |
+    Granting a ``couchdb`` user access to a database no longer takes it
+    from the users who had it, and a database whose last user is revoked
+    or deleted stays closed. The former implementation wrote the members
+    of a database anew for every grant, and wrote a database without
+    members in a way that CouchDB reads as open to everybody, without
+    authentication.
