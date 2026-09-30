@@ -233,6 +233,35 @@ class TestInstallCluster(trove_testtools.TestCase):
         self.assertEqual(('start_cluster_node', COMMAND, True), calls[-1])
 
 
+class TestHealthcheckFile(trove_testtools.TestCase):
+
+    @mock.patch.object(galera_service, 'operating_system')
+    def test_file(self, mock_os):
+        app = FakeApp()
+        app.database_service_uid = '1001'
+        app.database_service_gid = '1001'
+
+        with mock.patch.object(
+                FakeApp, 'cluster_healthcheck_file',
+                new_callable=mock.PropertyMock,
+                return_value='/var/lib/mysql/conf.d/x.cnf'):
+            app._write_cluster_healthcheck_file(REPLICATION_USER)
+
+        path, content = mock_os.write_file.call_args[0][:2]
+        self.assertEqual('/var/lib/mysql/conf.d/x.cnf', path)
+        self.assertEqual(
+            {'client': {'user': 'clusterrepuser', 'password': 'rep-pw',
+                        'host': '127.0.0.1', 'protocol': 'tcp'}},
+            content)
+        # The check runs in the container, as the database user, and the
+        # file holds a password.
+        mock_os.chown.assert_called_once_with(
+            '/var/lib/mysql/conf.d/x.cnf', '1001', '1001', as_root=True)
+        mock_os.chmod.assert_called_once_with(
+            '/var/lib/mysql/conf.d/x.cnf', mock_os.FileMode.SET_USR_RW,
+            as_root=True)
+
+
 class TestLeaveBootstrap(trove_testtools.TestCase):
 
     def test_started_with_bootstrap(self):

@@ -8,22 +8,25 @@ socket = /var/run/mysqld/mysqld.sock
 nice = 0
 
 [mysqld]
-user = mysql
 port = 3306
 basedir = /usr
 datadir = /var/lib/mysql/data
+secure-file-priv = NULL
 tmpdir = /var/tmp
 pid-file = /var/run/mysqld/mysqld.pid
 socket = /var/run/mysqld/mysqld.sock
+{% if datastore.semantic_version.major < 8 %}
+default_authentication_plugin = mysql_native_password
+{% endif %}
+{% if datastore.semantic_version.major == 8 and datastore.semantic_version.minor < 4 %}
+default_authentication_plugin = mysql_native_password
+{% endif %}
 skip-external-locking = 1
 key_buffer_size = {{ (50 * flavor['ram']/512)|int }}M
 max_allowed_packet = {{ (1024 * flavor['ram']/512)|int }}K
 thread_stack = 192K
 thread_cache_size = {{ (4 * flavor['ram']/512)|int }}
 myisam-recover-options = BACKUP,FORCE
-query_cache_type = 1
-query_cache_limit = 1M
-query_cache_size = {{ (8 * flavor['ram']/512)|int }}M
 innodb_data_file_path = ibdata1:10M:autoextend
 innodb_buffer_pool_size = {{ (150 * flavor['ram']/512)|int }}M
 innodb_file_per_table = 1
@@ -46,6 +49,18 @@ max_connections = {{ (100 * flavor['ram']/512)|int }}
 default_storage_engine = innodb
 local-infile = 0
 server_id = {{server_id}}
+performance_schema = ON
+
+# Every instance is a Galera node, and a single instance is a cluster of
+# one. The image waits for the node to be synced when it initializes the data
+# directory, which a server without Galera never is.
+wsrep_provider = /usr/lib64/galera4/libgalera_smm.so
+wsrep_cluster_address = gcomm://
+wsrep_sst_method = xtrabackup-v2
+# Members would need certificates from one authority; each generates its own.
+pxc_encrypt_cluster_traffic = OFF
+binlog_format = ROW
+innodb_autoinc_lock_mode = 2
 
 [mysqldump]
 quick = 1

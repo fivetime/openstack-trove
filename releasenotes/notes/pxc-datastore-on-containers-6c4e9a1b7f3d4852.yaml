@@ -1,0 +1,28 @@
+---
+features:
+  - |
+    The ``pxc`` datastore, Percona XtraDB Cluster, runs on the container
+    based guest agent from the image named by ``[pxc] docker_image``
+    (``percona/percona-xtradb-cluster`` by default): single instances and
+    Galera clusters whose members all accept writes, with what the MySQL
+    datastore has for users, databases, configuration groups and backups.
+  - |
+    Every ``pxc`` instance is a Galera node, and a single instance is a
+    cluster of one. ``pxc_strict_mode`` is therefore in force on single
+    instances too.
+upgrade:
+  - |
+    The ``pxc`` datastore replaces the former experimental implementation,
+    whose guest agent side was removed with the move to containers.
+    ``[pxc]`` now has the options and defaults of ``[mysql]`` apart from the
+    images, the ports and the accounts hidden from users. Remove overrides
+    that point at the experimental backup and replication classes.
+security:
+  - |
+    Traffic between the members of a ``pxc`` cluster is not encrypted:
+    ``pxc_encrypt_cluster_traffic`` is off. Encrypting it needs certificates
+    from one authority on every member, and each member generates its own.
+  - |
+    The accounts the Percona XtraDB Cluster image creates for its own
+    tools, ``xtrabackup``, ``monitor`` and ``clustercheck``, are given random
+    passwords instead of the image's well known ones.

@@ -645,15 +645,18 @@ percona_group = cfg.OptGroup(
     help="Oslo option group designed for Percona datastore")
 
 
-def _build_mysql_family_datastore_opts(datastore_name, docker_image):
+def _build_mysql_family_datastore_opts(datastore_name, docker_image,
+                                       replace=()):
     """The MySQL options, for a datastore that runs on the MySQL manager.
 
     The MySQL guest agent code reads its options from the group named after
     the datastore manager, so such a datastore needs every MySQL option.
-    Only where the images come from differs.
+    Where the images come from differs, and what ``replace`` names.
     """
-    opts = [opt for opt in mysql_opts
-            if opt.name not in ('docker_image', 'backup_docker_image')]
+    replaced = {'docker_image', 'backup_docker_image'}
+    replaced.update(opt.name for opt in replace)
+    opts = [opt for opt in mysql_opts if opt.name not in replaced]
+    opts += list(replace)
     opts += [
         cfg.StrOpt(
             'docker_image', default=docker_image,
@@ -678,52 +681,23 @@ percona_opts = _build_mysql_family_datastore_opts(
 pxc_group = cfg.OptGroup(
     'pxc', title='Percona XtraDB Cluster options',
     help="Oslo option group designed for Percona XtraDB Cluster datastore")
-pxc_opts = [
-    cfg.StrOpt('database_service_uname', default='database',
-               help='The name of database service user.'),
-    cfg.StrOpt('database_service_uid',
-               help='The UID of database service user.'),
-    cfg.StrOpt('database_service_gid',
-               help='The GID of database service user.'),
-    cfg.BoolOpt('icmp', default=False,
-                help='Whether to permit ICMP.',
-                deprecated_for_removal=True),
-    cfg.ListOpt('tcp_ports', default=["3306", "4444", "4567", "4568"],
-                item_type=ListOfPortsType,
-                help='List of TCP ports and/or port ranges to open '
-                     'in the security group (only applicable '
-                     'if trove_security_groups_support is True).'),
-    cfg.ListOpt('udp_ports', default=[], item_type=ListOfPortsType,
-                help='List of UDP ports and/or port ranges to open '
-                     'in the security group (only applicable '
-                     'if trove_security_groups_support is True).'),
-    cfg.StrOpt('backup_strategy', default='InnoBackupEx',
-               help='Default strategy to perform backups.'),
-    cfg.StrOpt('replication_strategy', default='MysqlGTIDReplication',
-               help='Default strategy for replication.'),
-    cfg.StrOpt('replication_namespace',
-               default='trove.guestagent.strategies.replication.mysql_gtid',
-               help='Namespace to load replication strategies from.'),
-    cfg.StrOpt('mount_point', default='/var/lib/mysql',
-               help="Filesystem path for mounting "
-                    "volumes if volume support is enabled."),
-    cfg.BoolOpt('root_on_create', default=False,
-                help='Enable the automatic creation of the root user for the '
-                'service during instance-create. The generated password for '
-                'the root user is immediately returned in the response of '
-                "instance-create as the 'password' field."),
-    cfg.IntOpt('usage_timeout', default=450,
-               help='Maximum time (in seconds) to wait for a Guest to become '
-                    'active.'),
-    cfg.BoolOpt('volume_support', default=True,
-                help='Whether to provision a Cinder volume for datadir.'),
-    cfg.StrOpt('device_path', default='/dev/vdb',
-               help='Device path for volume if volume support is enabled.'),
-    cfg.ListOpt('ignore_users', default=['os_admin', 'root', 'clusterrepuser'],
-                help='Users to exclude when listing users.'),
-    cfg.ListOpt('ignore_dbs',
-                default=['mysql', 'information_schema', 'performance_schema'],
-                help='Databases to exclude when listing databases.'),
+pxc_opts = _build_mysql_family_datastore_opts(
+    datastore_name='pxc',
+    docker_image='percona/percona-xtradb-cluster',
+    replace=[
+        cfg.ListOpt('tcp_ports', default=["3306", "4444", "4567", "4568"],
+                    item_type=ListOfPortsType,
+                    help='List of TCP ports and/or port ranges to open '
+                         'in the security group (only applicable '
+                         'if trove_security_groups_support is True).'),
+        # clusterrepuser is the account cluster members are given by the
+        # task manager; the others are created by the image.
+        cfg.ListOpt('ignore_users',
+                    default=['os_admin', 'root', 'clusterrepuser',
+                             'clustercheck', 'monitor', 'xtrabackup'],
+                    help='Users to exclude when listing users.'),
+    ],
+) + [
     cfg.BoolOpt('cluster_support', default=True,
                 help='Enable clusters to be created and managed.'),
     cfg.IntOpt('min_cluster_member_count', default=3,
@@ -742,21 +716,6 @@ pxc_opts = [
                'galera_common.guestagent.GaleraCommonGuestAgentStrategy',
                help='Class that implements datastore-specific Guest Agent API '
                     'logic.'),
-    cfg.StrOpt('root_controller',
-               default='trove.extensions.pxc.service.PxcRootController',
-               help='Root controller implementation for pxc.'),
-    cfg.ListOpt('guest_log_exposed_logs', default=['general', 'slow_query'],
-                item_type=types.String(ignore_case=True),
-                help='List of Guest Logs to expose for publishing.'),
-    cfg.IntOpt('guest_log_long_query_time', default=1000,
-               help='The time in milliseconds that a statement must take in '
-                    'in order to be logged in the slow_query log.',
-               deprecated_for_removal=True,
-               deprecated_reason='Will be replaced by a configuration group '
-               'option: long_query_time'),
-    cfg.IntOpt('default_password_length',
-               default='${mysql.default_password_length}',
-               help='Character length of generated passwords.')
 ]
 
 

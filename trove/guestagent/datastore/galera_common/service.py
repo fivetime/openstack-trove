@@ -120,8 +120,12 @@ class GaleraAppMixin(object):
         path = self.cluster_healthcheck_file
         operating_system.write_file(
             path,
+            # Over TCP: a server started only to initialize or upgrade the
+            # data directory listens on the socket alone.
             {'client': {'user': replication_user['name'],
-                        'password': replication_user['password']}},
+                        'password': replication_user['password'],
+                        'host': '127.0.0.1',
+                        'protocol': 'tcp'}},
             codec=self.CFG_CODEC, as_root=True)
         # The health check runs in the container as the database user.
         operating_system.chown(

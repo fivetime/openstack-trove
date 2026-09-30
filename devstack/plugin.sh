@@ -175,6 +175,8 @@ function configure_docker_images {
     iniset $TROVE_GUESTAGENT_CONF redis backup_docker_image ${TROVE_DATABASE_BACKUP_IMAGE_REDIS}
     iniset $TROVE_GUESTAGENT_CONF percona docker_image ${TROVE_DATABASE_IMAGE_PERCONA}
     iniset $TROVE_GUESTAGENT_CONF percona backup_docker_image ${TROVE_DATABASE_BACKUP_IMAGE_PERCONA}
+    iniset $TROVE_GUESTAGENT_CONF pxc docker_image ${TROVE_DATABASE_IMAGE_PXC}
+    iniset $TROVE_GUESTAGENT_CONF pxc backup_docker_image ${TROVE_DATABASE_BACKUP_IMAGE_PXC}
 }
 
 function configure_cloudinit {
@@ -217,7 +219,7 @@ ${ETC_HOSTS_APPEND}
 EOF
 
     # NOTE(lxkong): Remove this when we support common cloud-init file for all datastores.
-    for datastore in "mysql" "mariadb" "postgresql" "keydb" "valkey" "redis" "percona"
+    for datastore in "mysql" "mariadb" "postgresql" "keydb" "valkey" "redis" "percona" "pxc"
     do
         sudo cp ${common_cloudinit} /etc/trove/cloudinit/${datastore}.cloudinit
     done
@@ -716,6 +718,7 @@ function config_network_isolation {
         TROVE_DATABASE_IMAGE_VALKEY="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/valkey"
         TROVE_DATABASE_IMAGE_REDIS="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/redis"
         TROVE_DATABASE_IMAGE_PERCONA="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/percona-server"
+        TROVE_DATABASE_IMAGE_PXC="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/percona-xtradb-cluster"
         TROVE_DATABASE_BACKUP_IMAGE_MYSQL="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-mysql"
         TROVE_DATABASE_BACKUP_IMAGE_MARIADB="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-mariadb"
         TROVE_DATABASE_BACKUP_IMAGE_POSTGRESQL="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-postgresql"
@@ -723,6 +726,7 @@ function config_network_isolation {
         TROVE_DATABASE_BACKUP_IMAGE_VALKEY="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-valkey"
         TROVE_DATABASE_BACKUP_IMAGE_REDIS="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-redis"
         TROVE_DATABASE_BACKUP_IMAGE_PERCONA="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-percona"
+        TROVE_DATABASE_BACKUP_IMAGE_PXC="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-pxc"
 
         configure_docker_images
     fi
