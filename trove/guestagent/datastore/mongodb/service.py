@@ -364,8 +364,11 @@ class MongoDBApp(service.BaseDbApp):
         """
         LOG.info("Starting a temporary database service without access "
                  "control.")
+        # The configuration file is not read, so the socket needs its mode
+        # here too or the guest agent cannot use it.
         command = (f'mongod --dbpath {self.datadir} --bind_ip 127.0.0.1 '
-                   f'--port {self.port} --unixSocketPrefix {SOCKET_DIR}')
+                   f'--port {self.port} --unixSocketPrefix {SOCKET_DIR} '
+                   f'--filePermissions 0777')
         self.start_db(ds_version=ds_version, command=command)
 
     def stop_temporary_db(self):

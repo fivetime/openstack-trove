@@ -369,6 +369,8 @@ class TestMongoDBAppLifecycle(MongoDBGuestTestCase):
         self.assertIn('--dbpath /var/lib/mongodb/data', command)
         self.assertIn(f'--unixSocketPrefix {mongodb_service.SOCKET_DIR}',
                       command)
+        # No configuration file, so the socket mode has to be given here.
+        self.assertIn('--filePermissions 0777', command)
 
         with mock.patch.object(mongodb_service.MongoDBApp, 'stop_db') as s:
             app.stop_temporary_db()
