@@ -164,6 +164,10 @@ class MongoDBApp(service.BaseDbApp):
                 'unixDomainSocket': {
                     'enabled': True,
                     'pathPrefix': SOCKET_DIR,
+                    # The guest agent is not the database user; the
+                    # socket is only reachable from the instance, like
+                    # the MySQL socket that has the same mode.
+                    'filePermissions': 0o777,
                 },
             },
         }

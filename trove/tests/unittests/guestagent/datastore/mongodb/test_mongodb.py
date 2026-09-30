@@ -205,6 +205,9 @@ class TestMongoDBAppConfiguration(MongoDBGuestTestCase):
         self.assertEqual(27017, config['net']['port'])
         self.assertEqual(mongodb_service.SOCKET_DIR,
                          config['net']['unixDomainSocket']['pathPrefix'])
+        # The guest agent connects as its own user, not the database's.
+        self.assertEqual(0o777,
+                         config['net']['unixDomainSocket']['filePermissions'])
         self.assertEqual('/var/lib/mongodb/data', config['storage']['dbPath'])
         self.assertEqual('enabled', config['security']['authorization'])
         self.assertNotIn('replication', config)
