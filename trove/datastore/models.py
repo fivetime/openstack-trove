@@ -610,6 +610,21 @@ def update_datastore(name, default_version):
     db_api.save(datastore)
 
 
+def _default_repl_strategy(manager):
+    """The replication strategy the guest agent of a datastore loads.
+
+    A datastore without replication, mongodb for one, has neither option.
+    """
+    try:
+        namespace = CONF.get(manager).replication_namespace
+        strategy = CONF.get(manager).replication_strategy
+    except cfg.NoSuchOptError:
+        return None
+    if not (namespace and strategy):
+        return None
+    return "%s.%s" % (namespace, strategy)
+
+
 def update_datastore_version(datastore, name, manager, image_id, image_tags,
                              packages, active, registry_ext=None,
                              repl_strategy=None, version=None, new_name=None):
@@ -639,10 +654,7 @@ def update_datastore_version(datastore, name, manager, image_id, image_tags,
     ds_version.registry_ext = registry_ext
 
     if not repl_strategy:
-        repl_strategy = "%(repl_namespace)s.%(repl_strategy)s" % {
-            'repl_namespace': CONF.get(manager).replication_namespace,
-            'repl_strategy': CONF.get(manager).replication_strategy
-        }
+        repl_strategy = _default_repl_strategy(manager)
     ds_version.repl_strategy = repl_strategy
 
     db_api.save(ds_version)

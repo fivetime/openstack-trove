@@ -12,6 +12,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from trove.datastore import models as datastore_models
 from trove.datastore.models import DatastoreVersion
 from trove.tests.unittests.datastore.base import TestDatastoreBase
 
@@ -47,3 +48,11 @@ class TestDatastoreVersions(TestDatastoreBase):
         self.assertIn(self.cap2.name, self.datastore_version.capabilities)
         self.assertNotIn("non-existent", self.datastore_version.capabilities)
         self.assertIn(self.cap1.name, self.datastore_version.capabilities)
+
+    def test_default_repl_strategy(self):
+        self.assertEqual(
+            'trove.guestagent.strategies.replication.mysql_gtid.'
+            'MysqlGTIDReplication',
+            datastore_models._default_repl_strategy('mysql'))
+        # A datastore without replication has neither option.
+        self.assertIsNone(datastore_models._default_repl_strategy('mongodb'))
