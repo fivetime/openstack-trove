@@ -218,7 +218,7 @@ class MongoDbCluster(models.Cluster):
                 )
             value = item.get(key, None)
             # python-troveclient sends the type as a list of one.
-            if isinstance(value, list) and len(value) == 1:
+            if key == 'type' and isinstance(value, list) and len(value) == 1:
                 value = value[0]
             if valid_values and value not in valid_values:
                 raise exception.TroveError(

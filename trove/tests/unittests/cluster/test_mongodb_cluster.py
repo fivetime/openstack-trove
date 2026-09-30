@@ -419,11 +419,14 @@ class MongoDBClusterTest(trove_testtools.TestCase):
     def test_parse_grow_item_as_the_client_sends_it(self):
         # python-troveclient: the type is a list of one and related_to is
         # null when it is not given.
+        nics = [{'network_id': 'net-1'}]
         item = self.cluster._parse_grow_item(
             {'flavorRef': '7', 'volume': {'size': 2},
-             'type': ['query_router'], 'related_to': None})
+             'type': ['query_router'], 'related_to': None, 'nics': nics})
         self.assertEqual('query_router', item['instance_type'])
         self.assertNotIn('related_to', item)
+        # Only the type is unwrapped: the networks are a list of one too.
+        self.assertEqual(nics, item['nics'])
         self.assertRaises(exception.TroveError,
                           self.cluster._parse_grow_item,
                           {'flavorRef': '7', 'volume': {'size': 2},
