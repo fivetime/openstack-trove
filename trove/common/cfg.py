@@ -905,14 +905,14 @@ cassandra_group = cfg.OptGroup(
 cassandra_opts = [
     cfg.StrOpt('database_service_uname', default='database',
                help='The name of database service user.'),
-    cfg.StrOpt('database_service_uid',
+    cfg.StrOpt('database_service_uid', default='999',
                help='The UID of database service user.'),
-    cfg.StrOpt('database_service_gid',
+    cfg.StrOpt('database_service_gid', default='999',
                help='The GID of database service user.'),
     cfg.BoolOpt('icmp', default=False,
                 help='Whether to permit ICMP.',
                 deprecated_for_removal=True),
-    cfg.ListOpt('tcp_ports', default=["7000", "7001", "7199", "9042", "9160"],
+    cfg.ListOpt('tcp_ports', default=["7000", "7001", "9042"],
                 item_type=ListOfPortsType,
                 help='List of TCP ports and/or port ranges to open '
                      'in the security group (only applicable '
@@ -921,7 +921,7 @@ cassandra_opts = [
                 help='List of UDP ports and/or port ranges to open '
                      'in the security group (only applicable '
                      'if trove_security_groups_support is True).'),
-    cfg.StrOpt('backup_strategy', default="NodetoolSnapshot",
+    cfg.StrOpt('backup_strategy', default="nodetoolsnapshot",
                help='Default strategy to perform backups.',
                deprecated_name='backup_strategy',
                deprecated_group='DEFAULT'),
@@ -940,9 +940,11 @@ cassandra_opts = [
     cfg.ListOpt('ignore_users', default=['os_admin'],
                 help='Users to exclude when listing users.'),
     cfg.ListOpt('ignore_dbs', default=['system', 'system_auth',
-                                       'system_traces'],
+                                       'system_schema', 'system_traces',
+                                       'system_distributed', 'system_views',
+                                       'system_virtual_schema'],
                 help='Databases to exclude when listing databases.'),
-    cfg.ListOpt('guest_log_exposed_logs', default=['system'],
+    cfg.ListOpt('guest_log_exposed_logs', default=[],
                 item_type=types.String(ignore_case=True),
                 help='List of Guest Logs to expose for publishing.'),
     cfg.StrOpt('system_log_level',
@@ -972,21 +974,21 @@ cassandra_opts = [
                 help='Allows backup of single instance in the cluster.'),
     cfg.BoolOpt('enable_saslauthd', default=False,
                 help='Enable the saslauth daemon.'),
-    cfg.StrOpt('user_controller',
-               default='trove.extensions.cassandra.service.'
-               'CassandraUserController',
-               help='User controller implementation.'),
-    cfg.StrOpt('database_controller',
-               default='trove.extensions.cassandra.service.'
-               'CassandraDatabaseController',
-               help='Database controller implementation.'),
-    cfg.StrOpt('user_access_controller',
-               default='trove.extensions.cassandra.service.'
-               'CassandraUserAccessController',
-               help='User access controller implementation.'),
     cfg.IntOpt('node_sync_time', default=60,
                help='Time (in seconds) given to a node after a state change '
                'to finish rejoining the cluster.'),
+    cfg.StrOpt(
+        'docker_image', default='cassandra',
+        help='Database docker image.'
+    ),
+    cfg.StrOpt(
+        'backup_docker_image',
+        sample_default='your-registry/your-repo/db-backup-cassandra',
+        help='The docker image used for backup and restore. Trove will uses'
+             'datastore version as the image tag, for example: '
+             'your-registry/your-repo/db-backup-cassandra:5.0 is used for '
+             'cassandra datastore with version 5.0'
+    ),
 ]
 
 # Couchbase

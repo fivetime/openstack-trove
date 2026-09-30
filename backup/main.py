@@ -39,7 +39,7 @@ cli_opts = [
         default='innobackupex',
         choices=['innobackupex', 'mariabackup', 'pg_basebackup', 'xtrabackup',
                  'keydbbackup', 'valkeybackup', 'redisbackup',
-                 'mongodump']
+                 'mongodump', 'nodetoolsnapshot']
     ),
     cfg.BoolOpt('backup'),
     cfg.StrOpt('swift-url'),
@@ -97,6 +97,7 @@ driver_mapping = {
     'valkeybackup': 'backup.drivers.valkey.ValkeyBackup',
     'redisbackup': 'backup.drivers.redis.RedisBackup',
     'mongodump': 'backup.drivers.mongodump.MongoDump',
+    'nodetoolsnapshot': 'backup.drivers.cassandra.NodetoolSnapshot',
 }
 storage_mapping = {
     'swift': 'backup.storage.swift.SwiftStorage',

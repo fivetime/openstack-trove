@@ -13,7 +13,7 @@ usage() {
 	echo "Usage : $(basename $0) [--datastore datastore] [--datastore-version datastore-version]"
 	echo ""
 	echo " Command parameters:"
-	echo "  'datastore' is the datastore. The options are: 'mariadb', 'mysql', 'postgresql', 'keydb', 'valkey', 'redis', 'percona', 'pxc', 'mongodb'"
+	echo "  'datastore' is the datastore. The options are: 'mariadb', 'mysql', 'postgresql', 'keydb', 'valkey', 'redis', 'percona', 'pxc', 'mongodb', 'cassandra'"
 	echo "  'datastore-version' is the datastore version of the datastore."
 	echo ""
 	exit 1
@@ -136,6 +136,10 @@ elif [ "${OPT_DATASTORE}" = "mongodb" ]; then
 	echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server.gpg ] https://repo.mongodb.org/apt/ubuntu ${OS_RELEASE_CODENAME}/mongodb-org/${MONGODB_SERIES} multiverse" > /etc/apt/sources.list.d/mongodb-org.list
 	apt-get update
 	apt-get install ${APTOPTS} mongodb-database-tools
+elif [ "${OPT_DATASTORE}" = "cassandra" ]; then
+	# A backup is a snapshot the server takes, packed with tar. Nothing of
+	# Cassandra is needed for it.
+	:
 fi
 
 apt-get clean

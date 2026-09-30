@@ -43,4 +43,6 @@ REGISTRY_EXT_DEFAULTS = {
         'trove.guestagent.datastore.redis.manager.Manager',
     'mongodb':
         'trove.guestagent.datastore.mongodb.manager.Manager',
+    'cassandra':
+        'trove.guestagent.datastore.cassandra.manager.Manager',
 }

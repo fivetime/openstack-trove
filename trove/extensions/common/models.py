@@ -32,11 +32,12 @@ CONF = cfg.CONF
 
 EXTENSIONS_SUPPORTED_DATASTORES = ['mysql', 'mariadb', 'postgresql',
                                    'keydb', 'valkey', 'redis', 'percona',
-                                   'pxc', 'mongodb']
+                                   'pxc', 'mongodb', 'cassandra']
 
 # List of datastores supporting CRUD operations for databases
 SCHEMA_MANAGEMENT_SUPPORTED_DATASTORES = ['mysql', 'mariadb', 'postgresql',
-                                          'percona', 'pxc', 'mongodb']
+                                          'percona', 'pxc', 'mongodb',
+                                          'cassandra']
 SCHEMA_VIEW_SUPPORTED_DATASTORES = EXTENSIONS_SUPPORTED_DATASTORES
 
 

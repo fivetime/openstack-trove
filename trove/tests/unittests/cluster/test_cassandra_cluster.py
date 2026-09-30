@@ -65,6 +65,51 @@ class ClusterTest(trove_testtools.TestCase):
         self.assertEqual(num_instances, inst_create.call_count,
                          "Unexpected number of instances created.")
 
+    @patch.object(inst_models.Instance, 'create')
+    @patch.object(quota.QUOTAS, 'check_quotas')
+    @patch.object(models, 'assert_homogeneous_cluster')
+    @patch.object(models, 'validate_instance_nics')
+    @patch.object(models, 'validate_instance_flavors')
+    @patch.object(models, 'get_required_volume_size', return_value=3)
+    def test_instances_get_the_image_resolved_from_tags(
+            self, get_vol_size, _, mock_validate_nics,
+            mock_homogeneous_cluster, check_quotas, inst_create):
+        # A datastore version registered with image tags has no image_id;
+        # the cluster controller resolves the tags and passes the image.
+        datastore = Mock(manager='cassandra')
+        datastore_version = Mock(manager='cassandra', image_id=None)
+
+        with patch.object(CassandraClusterTasks, 'find_cluster_node_ids',
+                          return_value=[]):
+            CassandraCluster._create_cluster_instances(
+                self.context, 'test_cluster_id', 'test_cluster',
+                datastore, datastore_version,
+                [MagicMock(), MagicMock()], None, None, None,
+                image_id='image-from-tags')
+
+        self.assertEqual(['image-from-tags'] * 2,
+                         [call[0][3] for call in inst_create.call_args_list])
+
+    def test_grow_takes_the_image_the_controller_passes(self):
+        # Cluster.action calls grow(instances, image_id).
+        cluster = CassandraCluster.__new__(CassandraCluster)
+        cluster.context = self.context
+        cluster.db_info = Mock()
+        cluster.ds = Mock()
+        cluster.ds_version = Mock(manager='cassandra')
+        with patch.object(CassandraCluster, 'validate_cluster_available'), \
+                patch.object(CassandraCluster, 'server_group', None,
+                             create=True), \
+                patch('trove.common.server_group.ServerGroup.'
+                      'convert_to_hint'), \
+                patch.object(CassandraCluster, '_create_cluster_instances',
+                             return_value=[]) as create, \
+                patch('trove.taskmanager.api.load'), \
+                patch.object(CassandraCluster, '__init__',
+                             return_value=None):
+            cluster.grow([MagicMock()], 'image-from-tags')
+        self.assertEqual('image-from-tags', create.call_args[1]['image_id'])
+
     def test_choose_seed_nodes(self):
         nodes = self._build_mock_nodes(3)
 

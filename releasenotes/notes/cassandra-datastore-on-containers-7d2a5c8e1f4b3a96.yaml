@@ -1,0 +1,35 @@
+---
+features:
+  - |
+    The ``cassandra`` datastore runs on the container based guest agent
+    from the image named by ``[cassandra] docker_image`` (``cassandra`` by
+    default): single instances with users, keyspaces, root, configuration
+    groups and backups, and clusters that can be grown and shrunk.
+  - |
+    The roles of a ``cassandra`` cluster are kept on up to three of its
+    members, and so is a keyspace created through Trove on a cluster.
+    With the one replica they had before, a cluster with any member down
+    could not authenticate anybody and lost the rows of that member.
+upgrade:
+  - |
+    The ``cassandra`` datastore replaces the former experimental
+    implementation, whose guest agent side was removed with the move to
+    containers. ``[cassandra] backup_strategy`` is now
+    ``nodetoolsnapshot`` and ``tcp_ports`` opens 7000, 7001 and 9042: the
+    JMX port, which takes no credentials, and the thrift port, which
+    Cassandra no longer has, are not opened. The database service user is
+    the ``cassandra`` user of the image (uid 999). The options
+    ``user_controller``, ``database_controller`` and
+    ``user_access_controller`` named a module that was removed long ago
+    and were read by nothing; they are gone.
+  - |
+    The configuration template of ``cassandra`` names only what Trove
+    decides and leaves the rest to the defaults of the server, and the
+    configuration group parameters are the ones Cassandra 5.0 still has,
+    without those that give an instance its identity or its security.
+fixes:
+  - |
+    A ``cassandra`` cluster could not be grown: the strategy did not take
+    the image the cluster controller passes. Clusters of ``cassandra`` and
+    their growth now also use the image the tags of the datastore version
+    name.

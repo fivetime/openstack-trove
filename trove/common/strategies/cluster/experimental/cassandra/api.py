@@ -95,7 +95,7 @@ class CassandraCluster(models.Cluster):
         cls._create_cluster_instances(
             context, db_info.id, db_info.name,
             datastore, datastore_version, instances, extended_properties,
-            locality, configuration)
+            locality, configuration, image_id=image_id)
 
         # Calling taskmanager to further proceed for cluster-configuration.
         task_api.load(context, datastore_version.manager).create_cluster(
@@ -107,7 +107,11 @@ class CassandraCluster(models.Cluster):
     def _create_cluster_instances(
             cls, context, cluster_id, cluster_name,
             datastore, datastore_version, instances, extended_properties,
-            locality, configuration_id):
+            locality, configuration_id, image_id=None):
+        # The datastore version names its image by tags since Victoria;
+        # the caller resolved them to an image.
+        image_id = datastore_version.image_id or image_id
+
         LOG.debug("Processing a request for new cluster instances.")
 
         cassandra_conf = CONF.get(datastore_version.manager)
@@ -153,7 +157,7 @@ class CassandraCluster(models.Cluster):
             new_instance = inst_models.Instance.create(
                 context, instance_name,
                 instance['flavor_id'],
-                datastore_version.image_id,
+                image_id,
                 [], [],
                 datastore, datastore_version,
                 instance['volume_size'], None,
@@ -174,7 +178,7 @@ class CassandraCluster(models.Cluster):
     def _build_instance_name(cls, cluster_name, dc, rack, instance_idx):
         return "%s-member-%s-%s-%d" % (cluster_name, dc, rack, instance_idx)
 
-    def grow(self, instances):
+    def grow(self, instances, image_id=None):
         LOG.debug("Processing a request for growing cluster: %s", self.id)
 
         self.validate_cluster_available()
@@ -191,7 +195,7 @@ class CassandraCluster(models.Cluster):
 
         new_instances = self._create_cluster_instances(
             context, db_info.id, db_info.name, datastore, datastore_version,
-            instances, None, locality, configuration_id)
+            instances, None, locality, configuration_id, image_id=image_id)
 
         task_api.load(context, datastore_version.manager).grow_cluster(
             db_info.id, [instance.id for instance in new_instances])
