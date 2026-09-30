@@ -129,6 +129,20 @@ class TestClusterController(trove_testtools.TestCase):
         validator = jsonschema.Draft4Validator(schema)
         self.assertTrue(validator.is_valid(body))
 
+    def test_validate_grow_as_the_client_sends_it(self):
+        # python-troveclient: the type is a list, related_to is null when
+        # it is not given.
+        body = {'grow': [{'flavorRef': '7', 'volume': {'size': 2},
+                          'type': ['query_router'], 'related_to': None}]}
+        schema = self.controller.get_schema('action', body)
+        validator = jsonschema.Draft4Validator(schema)
+        self.assertEqual([], [e.message for e in
+                              validator.iter_errors(body)])
+        body['grow'][0]['type'] = 'query_router'
+        self.assertTrue(validator.is_valid(body))
+        body['grow'][0]['type'] = 7
+        self.assertFalse(validator.is_valid(body))
+
     def test_validate_shrink(self):
         body = self.shrink
         schema = self.controller.get_schema('action', body)

@@ -416,6 +416,19 @@ class MongoDBClusterTest(trove_testtools.TestCase):
             self.cluster_id, ['id1', 'id2', 'id3', 'id4']
         )
 
+    def test_parse_grow_item_as_the_client_sends_it(self):
+        # python-troveclient: the type is a list of one and related_to is
+        # null when it is not given.
+        item = self.cluster._parse_grow_item(
+            {'flavorRef': '7', 'volume': {'size': 2},
+             'type': ['query_router'], 'related_to': None})
+        self.assertEqual('query_router', item['instance_type'])
+        self.assertNotIn('related_to', item)
+        self.assertRaises(exception.TroveError,
+                          self.cluster._parse_grow_item,
+                          {'flavorRef': '7', 'volume': {'size': 2},
+                           'type': ['query_router', 'replica']})
+
     @mock.patch.object(api.MongoDbCluster, '_prep_resize')
     @mock.patch.object(api.MongoDbCluster, '_check_quotas')
     def test_grow_invalid_type(self, mock_check_quotas, mock_prep_resize):

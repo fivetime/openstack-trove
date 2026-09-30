@@ -334,8 +334,20 @@ cluster = {
                             "nics": nics,
                             "availability_zone": non_empty_string,
                             "modules": module_list,
-                            "related_to": non_empty_string,
-                            "type": non_empty_string,
+                            # python-troveclient sends the type as a
+                            # list and a related_to of null when none
+                            # is given.
+                            "related_to": {
+                                "oneOf": [non_empty_string,
+                                          {"type": "null"}]
+                            },
+                            "type": {
+                                "oneOf": [
+                                    non_empty_string,
+                                    {"type": "array",
+                                     "items": non_empty_string}
+                                ]
+                            },
                             "region_name": non_empty_string
                         }
                     }
