@@ -177,6 +177,8 @@ function configure_docker_images {
     iniset $TROVE_GUESTAGENT_CONF percona backup_docker_image ${TROVE_DATABASE_BACKUP_IMAGE_PERCONA}
     iniset $TROVE_GUESTAGENT_CONF pxc docker_image ${TROVE_DATABASE_IMAGE_PXC}
     iniset $TROVE_GUESTAGENT_CONF pxc backup_docker_image ${TROVE_DATABASE_BACKUP_IMAGE_PXC}
+    iniset $TROVE_GUESTAGENT_CONF mongodb docker_image ${TROVE_DATABASE_IMAGE_MONGODB}
+    iniset $TROVE_GUESTAGENT_CONF mongodb backup_docker_image ${TROVE_DATABASE_BACKUP_IMAGE_MONGODB}
 }
 
 function configure_cloudinit {
@@ -219,7 +221,7 @@ ${ETC_HOSTS_APPEND}
 EOF
 
     # NOTE(lxkong): Remove this when we support common cloud-init file for all datastores.
-    for datastore in "mysql" "mariadb" "postgresql" "keydb" "valkey" "redis" "percona" "pxc"
+    for datastore in "mysql" "mariadb" "postgresql" "keydb" "valkey" "redis" "percona" "pxc" "mongodb"
     do
         sudo cp ${common_cloudinit} /etc/trove/cloudinit/${datastore}.cloudinit
     done
@@ -290,6 +292,7 @@ function configure_trove {
     iniset $TROVE_CONF percona tcp_ports 3306
     iniset $TROVE_CONF postgresql tcp_ports 5432
     iniset $TROVE_CONF pxc tcp_ports 3306,4444,4567,4568
+    iniset $TROVE_CONF mongodb tcp_ports 27017,27019
     iniset $TROVE_CONF redis tcp_ports 6379,16379
     iniset $TROVE_CONF keydb tcp_ports 6379,6380
     iniset $TROVE_CONF valkey tcp_ports 6379,6380
@@ -719,6 +722,7 @@ function config_network_isolation {
         TROVE_DATABASE_IMAGE_REDIS="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/redis"
         TROVE_DATABASE_IMAGE_PERCONA="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/percona-server"
         TROVE_DATABASE_IMAGE_PXC="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/percona-xtradb-cluster"
+        TROVE_DATABASE_IMAGE_MONGODB="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/mongo"
         TROVE_DATABASE_BACKUP_IMAGE_MYSQL="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-mysql"
         TROVE_DATABASE_BACKUP_IMAGE_MARIADB="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-mariadb"
         TROVE_DATABASE_BACKUP_IMAGE_POSTGRESQL="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-postgresql"
@@ -727,6 +731,7 @@ function config_network_isolation {
         TROVE_DATABASE_BACKUP_IMAGE_REDIS="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-redis"
         TROVE_DATABASE_BACKUP_IMAGE_PERCONA="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-percona"
         TROVE_DATABASE_BACKUP_IMAGE_PXC="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-pxc"
+        TROVE_DATABASE_BACKUP_IMAGE_MONGODB="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-mongodb"
 
         configure_docker_images
     fi

@@ -38,7 +38,8 @@ cli_opts = [
         'driver',
         default='innobackupex',
         choices=['innobackupex', 'mariabackup', 'pg_basebackup', 'xtrabackup',
-                 'keydbbackup', 'valkeybackup', 'redisbackup']
+                 'keydbbackup', 'valkeybackup', 'redisbackup',
+                 'mongodump']
     ),
     cfg.BoolOpt('backup'),
     cfg.StrOpt('swift-url'),
@@ -95,6 +96,7 @@ driver_mapping = {
     'keydbbackup': 'backup.drivers.keydb.KeyDBBackup',
     'valkeybackup': 'backup.drivers.valkey.ValkeyBackup',
     'redisbackup': 'backup.drivers.redis.RedisBackup',
+    'mongodump': 'backup.drivers.mongodump.MongoDump',
 }
 storage_mapping = {
     'swift': 'backup.storage.swift.SwiftStorage',

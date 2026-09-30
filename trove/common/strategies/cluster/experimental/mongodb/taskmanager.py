@@ -101,8 +101,18 @@ class MongoDbClusterTasks(task_models.ClusterTasks):
                                  for instance in config_servers]
             LOG.debug("config server ips: %s", config_server_ips)
 
+            # The config servers are a replica set of their own, and the
+            # users of the cluster live on it: the query routers get the
+            # admin user its primary created.
+            if not self._init_replica_set(config_servers[0],
+                                          config_servers[1:]):
+                return
+            admin_password = self.get_guest(
+                config_servers[0]).get_admin_password()
+
             if not self._add_query_routers(query_routers,
-                                           config_server_ips):
+                                           config_server_ips,
+                                           admin_password=admin_password):
                 return
 
             if not self._create_shard(query_routers[0], members):
@@ -305,13 +315,17 @@ class MongoDbClusterTasks(task_models.ClusterTasks):
         add_members.
         """
         LOG.debug('initializing replica set on %s', primary_member.id)
-        other_members_ips = []
+        other_members_ips = [self.get_ip(member) for member in other_members]
         try:
+            primary_guest = self.get_guest(primary_member)
+            primary_guest.prep_primary()
+            primary_guest.add_members(other_members_ips)
+            # The members take the users of the primary with its data, so
+            # the admin password of the primary is the one that works on
+            # all of them.
+            admin_password = primary_guest.get_admin_password()
             for member in other_members:
-                other_members_ips.append(self.get_ip(member))
-                self.get_guest(member).restart()
-            self.get_guest(primary_member).prep_primary()
-            self.get_guest(primary_member).add_members(other_members_ips)
+                self.get_guest(member).store_admin_password(admin_password)
         except Exception:
             LOG.exception("error initializing replica set")
             self.update_statuses_on_failure(self.id,
@@ -343,12 +357,16 @@ class MongoDbClusterTasks(task_models.ClusterTasks):
         return True
 
     def _get_running_query_router_id(self):
-        """Get a query router in this cluster that is in the RUNNING state."""
+        """Get a query router in this cluster that is running.
+
+        The container based guest agent reports HEALTHY for a running
+        service, the earlier one reported RUNNING.
+        """
         for instance_id in [db_instance.id for db_instance in self.db_instances
                             if db_instance.type == 'query_router']:
             status = models.InstanceServiceStatus.find_by(
                 instance_id=instance_id).get_status()
-            if status == ServiceStatuses.RUNNING:
+            if status in (ServiceStatuses.RUNNING, ServiceStatuses.HEALTHY):
                 return instance_id
         LOG.exception("no query routers ready to accept requests")
         self.update_statuses_on_failure(self.id)
@@ -357,9 +375,13 @@ class MongoDbClusterTasks(task_models.ClusterTasks):
     def _add_query_routers(self, query_routers, config_server_ips,
                            admin_password=None):
         """Configure the given query routers for the cluster.
-        If this is a new_cluster an admin user will be created with a randomly
-        generated password, else the password needs to be retrieved from
-        and existing query router.
+
+        The admin user of a cluster is the one of the config server
+        replica set; the routers only store its password. It is retrieved
+        from the config server primary for a new cluster and from a running
+        query router when routers are added. Without a password the routers
+        create the user themselves, which works only while the config
+        servers have no users.
         """
         LOG.debug('adding new query router(s) %(routers)s with config server '
                   'ips %(ips)s', {'routers': [i.id for i in query_routers],

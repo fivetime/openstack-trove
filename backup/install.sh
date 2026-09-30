@@ -13,7 +13,7 @@ usage() {
 	echo "Usage : $(basename $0) [--datastore datastore] [--datastore-version datastore-version]"
 	echo ""
 	echo " Command parameters:"
-	echo "  'datastore' is the datastore. The options are: 'mariadb', 'mysql', 'postgresql', 'keydb', 'valkey', 'redis', 'percona', 'pxc'"
+	echo "  'datastore' is the datastore. The options are: 'mariadb', 'mysql', 'postgresql', 'keydb', 'valkey', 'redis', 'percona', 'pxc', 'mongodb'"
 	echo "  'datastore-version' is the datastore version of the datastore."
 	echo ""
 	exit 1
@@ -117,6 +117,25 @@ elif [ "${OPT_DATASTORE}" = "postgresql" ]; then
 		exit 1
 	fi
 	apt-get install ${APTOPTS} postgresql-client-${DATASTORE_CLIENT_PKG_VERSION}
+elif [ "${OPT_DATASTORE}" = "mongodb" ]; then
+	# The database tools are published per server series, the datastore
+	# version names the series.
+	# https://www.mongodb.com/docs/database-tools/installation/installation-linux/
+	MONGODB_SERIES=$(echo ${OPT_DATASTORE_VERSION} | awk -F'.' '{print $1 "." $2}')
+	MONGODB_MAJOR=$(echo ${OPT_DATASTORE_VERSION} | awk -F'.' '{print $1}')
+	# The signing key is not published per series: 8.2 is signed with the
+	# 8.0 key and 9.x with server-9.asc.
+	for key in server-${MONGODB_SERIES}.asc server-${MONGODB_MAJOR}.0.asc server-${MONGODB_MAJOR}.asc; do
+		if curl -fsSL https://pgp.mongodb.com/${key} -o /tmp/mongodb-server.asc; then
+			echo "signing key: ${key}"
+			gpg --dearmor -o /usr/share/keyrings/mongodb-server.gpg /tmp/mongodb-server.asc
+			rm -f /tmp/mongodb-server.asc
+			break
+		fi
+	done
+	echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server.gpg ] https://repo.mongodb.org/apt/ubuntu ${OS_RELEASE_CODENAME}/mongodb-org/${MONGODB_SERIES} multiverse" > /etc/apt/sources.list.d/mongodb-org.list
+	apt-get update
+	apt-get install ${APTOPTS} mongodb-database-tools
 fi
 
 apt-get clean

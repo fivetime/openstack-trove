@@ -1,4 +1,8 @@
-# mongodb.conf
-
-storage.mmapv1.smallFiles: false
-storage.journal.enabled: true
+# MongoDB configuration rendered by Trove for an instance with
+# {{ flavor['ram'] }} MB of memory.
+#
+# The guest agent adds the network, storage, security and cluster
+# settings on top of this file. Logging goes to the standard output of
+# the container.
+systemLog:
+  verbosity: 0

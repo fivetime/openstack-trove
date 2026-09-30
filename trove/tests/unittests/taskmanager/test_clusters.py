@@ -236,11 +236,16 @@ class MongoDbClusterTasksTest(trove_testtools.TestCase):
         mock_ip.side_effect = ["10.0.0.3"]
         mock_guest().prep_primary.return_value = Mock()
         mock_guest().add_members.return_value = Mock()
+        mock_guest().get_admin_password.return_value = "pwd"
 
         ret_val = self.clustertasks._init_replica_set(primary_member,
                                                       other_members)
         mock_guest.return_value.add_members.assert_called_with(
             ["10.0.0.3"]
+        )
+        # The other members took the users of the primary with its data.
+        mock_guest.return_value.store_admin_password.assert_called_with(
+            "pwd"
         )
         self.assertTrue(ret_val)
 
@@ -419,8 +424,8 @@ class MongoDbClusterTasksTest(trove_testtools.TestCase):
 
     @patch.object(ClusterTasks, 'reset_task')
     @patch.object(ClusterTasks, '_create_shard')
+    @patch.object(ClusterTasks, '_init_replica_set')
     @patch.object(ClusterTasks, 'get_guest')
-    @patch.object(utils, 'generate_random_password', return_value='pwd')
     @patch.object(ClusterTasks, 'get_ip')
     @patch.object(Instance, 'load')
     @patch.object(ClusterTasks, '_all_instances_ready')
@@ -434,8 +439,8 @@ class MongoDbClusterTasksTest(trove_testtools.TestCase):
                             mock_all_instances_ready,
                             mock_load,
                             mock_ip,
-                            mock_password,
                             mock_guest,
+                            mock_init_replica_set,
                             mock_create_shard,
                             mock_reset_task):
         mock_find_all.return_value.all.return_value = [self.dbinst1,
@@ -457,12 +462,18 @@ class MongoDbClusterTasksTest(trove_testtools.TestCase):
         )
         mock_load.side_effect = [member1, member2, query_router, config_server]
         mock_ip.side_effect = ["10.0.0.5"]
+        mock_init_replica_set.return_value = True
         mock_create_shard.return_value = True
+        mock_guest().get_admin_password.return_value = "pwd"
 
         self.clustertasks.create_cluster(Mock(), self.cluster_id)
 
+        # The config servers are a replica set and hold the users of the
+        # cluster; the query routers get the admin user of its primary.
+        mock_init_replica_set.assert_called_with(config_server, [])
         mock_guest().add_config_servers.assert_called_with(["10.0.0.5"])
-        mock_guest().create_admin_user.assert_called_with("pwd")
+        mock_guest().create_admin_user.assert_not_called()
+        mock_guest().store_admin_password.assert_called_with("pwd")
         mock_create_shard.assert_called_with(
             query_router, [member1, member2]
         )
@@ -510,6 +521,27 @@ class MongoDbClusterTasksTest(trove_testtools.TestCase):
         mock_guest().add_config_servers.assert_called_with(['10.0.0.5'])
         mock_guest().store_admin_password.assert_called_with(password)
         self.assertTrue(ret_val)
+
+    @patch.object(ClusterTasks, 'update_statuses_on_failure')
+    @patch.object(InstanceServiceStatus, 'find_by')
+    @patch.object(datastore_models.Datastore, 'load')
+    @patch.object(datastore_models.DatastoreVersion, 'load_by_uuid')
+    def test_get_running_query_router_id(self, mock_dv, mock_ds,
+                                         mock_find_by, mock_update):
+        self.clustertasks._db_instances = [self.dbinst1, self.dbinst2,
+                                           self.dbinst3, self.dbinst4]
+        # The container based guest agent reports HEALTHY, not RUNNING.
+        for status in (ServiceStatuses.HEALTHY, ServiceStatuses.RUNNING):
+            mock_find_by.return_value.get_status.return_value = status
+            self.assertEqual(
+                self.dbinst3.id,
+                self.clustertasks._get_running_query_router_id())
+            mock_find_by.assert_called_with(instance_id=self.dbinst3.id)
+
+        mock_find_by.return_value.get_status.return_value = (
+            ServiceStatuses.SHUTDOWN)
+        self.assertFalse(self.clustertasks._get_running_query_router_id())
+        mock_update.assert_called_with(self.cluster_id)
 
     @patch.object(ClusterTasks, 'get_guest')
     @patch.object(utils, 'generate_random_password')

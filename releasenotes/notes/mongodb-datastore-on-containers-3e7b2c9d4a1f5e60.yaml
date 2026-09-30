@@ -1,0 +1,31 @@
+---
+features:
+  - |
+    The ``mongodb`` datastore runs on the container based guest agent
+    from the image named by ``[mongodb] docker_image`` (``mongo`` by
+    default): single instances with users, databases, root, configuration
+    groups and backups with mongodump, and sharded clusters with a config
+    server replica set, query routers and shard replica sets, including
+    growing and shrinking them.
+  - |
+    Backups of ``mongodb`` instances are mongodump archives of the whole
+    server, users included, made with the ``mongodump`` strategy. A
+    restored instance keeps the users of the backup and gets its own
+    admin user.
+upgrade:
+  - |
+    The ``mongodb`` datastore replaces the former experimental
+    implementation, whose guest agent side was removed with the move to
+    containers. ``[mongodb] backup_strategy`` is now ``mongodump``,
+    ``tcp_ports`` opens 27017 and 27019 only, and the database service
+    user is the ``mongodb`` user of the image (uid 999). Config servers
+    run as a replica set and shard members as ``shardsvr``, as MongoDB
+    has required since 3.4; the configuration template and the
+    configuration group parameters no longer name options the server
+    removed (``storage.mmapv1``, ``storage.journal.enabled``,
+    ``net.http``) or options that would let a user disable access
+    control or change the role of an instance.
+issues:
+  - |
+    MongoDB 8.0 refuses to start on Linux 6.19 and newer; the guest image
+    kernel decides which versions can be registered.
