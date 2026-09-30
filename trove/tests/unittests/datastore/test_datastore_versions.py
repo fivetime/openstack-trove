@@ -55,4 +55,4 @@ class TestDatastoreVersions(TestDatastoreBase):
             'MysqlGTIDReplication',
             datastore_models._default_repl_strategy('mysql'))
         # A datastore without replication has neither option.
-        self.assertIsNone(datastore_models._default_repl_strategy('mongodb'))
+        self.assertEqual('', datastore_models._default_repl_strategy('mongodb'))

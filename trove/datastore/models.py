@@ -613,15 +613,16 @@ def update_datastore(name, default_version):
 def _default_repl_strategy(manager):
     """The replication strategy the guest agent of a datastore loads.
 
-    A datastore without replication, mongodb for one, has neither option.
+    A datastore without replication, mongodb for one, has neither option
+    and gets an empty strategy: the column does not take NULL.
     """
     try:
         namespace = CONF.get(manager).replication_namespace
         strategy = CONF.get(manager).replication_strategy
     except cfg.NoSuchOptError:
-        return None
+        return ''
     if not (namespace and strategy):
-        return None
+        return ''
     return "%s.%s" % (namespace, strategy)
 
 
