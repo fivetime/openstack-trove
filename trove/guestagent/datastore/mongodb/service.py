@@ -304,6 +304,9 @@ class MongoDBApp(service.BaseDbApp):
                  extra_volumes=None):
         """Start and wait for the database service."""
         docker_image = CONF.get(CONF.datastore_manager).docker_image
+        # A query router is started by add_config_servers, long after
+        # prepare, and has to be the version of the rest of the cluster.
+        ds_version = ds_version or CONF.datastore_version
         image = (f'{docker_image}:latest' if not ds_version else
                  f'{docker_image}:{ds_version}')
         if not command:
@@ -803,8 +806,14 @@ class MongoDBAdmin(object):
         return self._run('replSetGetStatus')
 
     def is_primary(self):
+        """Whether this member is the primary of its replica set.
+
+        Asked with hello, which needs no authentication: this is what a
+        member waits for before it has an admin user.
+        """
         try:
-            return self.get_repl_status().get('myState') == 1
+            return bool(self._run('hello', authenticate=False).get(
+                'isWritablePrimary'))
         except pymongo_errors.PyMongoError as e:
             LOG.debug("Replica set status not available yet: %s", e)
             return False

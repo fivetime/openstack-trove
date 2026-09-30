@@ -346,11 +346,15 @@ class TestMongoDBAppLifecycle(MongoDBGuestTestCase):
         app.set_config_servers(['10.0.0.1'])
         app.status.wait_for_status.return_value = True
 
+        # add_config_servers starts the router without naming a version.
+        self.patch_conf_property('datastore_version', '8.2')
         app.start_db()
 
         kwargs = mock_docker.start_container.call_args[1]
         self.assertEqual('mongos --config /etc/mongodb/mongod.conf',
                          kwargs['command'])
+        self.assertEqual('mongo:8.2',
+                         mock_docker.start_container.call_args[0][1])
 
     @mock.patch.object(mongodb_service, 'docker_util')
     @mock.patch.object(mongodb_service, 'operating_system')
@@ -582,6 +586,19 @@ class TestMongoDBAdmin(MongoDBGuestTestCase):
             adm.delete_database({'_name': 'appdb'})
         self.assertEqual(['appdb'], [d['_name'] for d in databases[0]])
         client.drop_database.assert_called_once_with('appdb')
+
+    def test_is_primary_needs_no_admin_user(self):
+        # A member waits to become primary before its admin user exists.
+        adm, client = self._adm()
+        client['admin'].command.return_value = {'isWritablePrimary': True}
+        with mock.patch.object(adm, '_client', return_value=client) as c:
+            self.assertTrue(adm.is_primary())
+        c.assert_called_once_with(False)
+        client['admin'].command.assert_called_once_with('hello', 1)
+
+        client['admin'].command.return_value = {'isWritablePrimary': False}
+        with mock.patch.object(adm, '_client', return_value=client):
+            self.assertFalse(adm.is_primary())
 
     def test_replica_set(self):
         adm, client = self._adm()
