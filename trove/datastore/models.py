@@ -610,7 +610,7 @@ def update_datastore(name, default_version):
     db_api.save(datastore)
 
 
-def _default_repl_strategy(manager):
+def default_repl_strategy(manager):
     """The replication strategy the guest agent of a datastore loads.
 
     A datastore without replication, mongodb for one, has neither option
@@ -655,7 +655,7 @@ def update_datastore_version(datastore, name, manager, image_id, image_tags,
     ds_version.registry_ext = registry_ext
 
     if not repl_strategy:
-        repl_strategy = _default_repl_strategy(manager)
+        repl_strategy = default_repl_strategy(manager)
     ds_version.repl_strategy = repl_strategy
 
     db_api.save(ds_version)

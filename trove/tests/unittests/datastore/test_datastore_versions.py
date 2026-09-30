@@ -49,10 +49,10 @@ class TestDatastoreVersions(TestDatastoreBase):
         self.assertNotIn("non-existent", self.datastore_version.capabilities)
         self.assertIn(self.cap1.name, self.datastore_version.capabilities)
 
-    def test_default_repl_strategy(self):
+    def testdefault_repl_strategy(self):
         self.assertEqual(
             'trove.guestagent.strategies.replication.mysql_gtid.'
             'MysqlGTIDReplication',
-            datastore_models._default_repl_strategy('mysql'))
+            datastore_models.default_repl_strategy('mysql'))
         # A datastore without replication has neither option.
-        self.assertEqual('', datastore_models._default_repl_strategy('mongodb'))
+        self.assertEqual('', datastore_models.default_repl_strategy('mongodb'))

@@ -1039,10 +1039,7 @@ class BaseInstance(SimpleInstance):
         if self.ds_version.repl_strategy:
             return self.ds_version.repl_strategy
 
-        return "%s.%s" % (
-            CONF.get(self.ds_version.manager).replication_namespace,
-            CONF.get(self.ds_version.manager).replication_strategy
-        )
+        return datastore_models.default_repl_strategy(self.ds_version.manager)
 
     def get_injected_files(self,
                            datastore_manager,
