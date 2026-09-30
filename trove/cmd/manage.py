@@ -17,6 +17,7 @@ import inspect
 import sys
 
 from novaclient import api_versions
+from novaclient import exceptions as nova_exceptions
 from oslo_log import log as logging
 
 from trove.common import cfg
@@ -231,15 +232,24 @@ class Commands(object):
         return clients.create_nova_client(admin_context)
 
     def _check_nova_tags_exists(self):
+        """Whether the servers of the instances carry the Trove tags.
+
+        One server is the sample: the first that still exists. An instance
+        whose server is gone, left behind by a delete that did not finish
+        for one, says nothing about the tags and must not stop db_sync.
+        """
         self.db_api.configure_db()
-        check_instance = DBInstance.find_first(
-            filters=[DBInstance.compute_instance_id.isnot(None)],
-            deleted=False)
-        if check_instance and check_instance.compute_instance_id:
-            server = self._get_nova_client().servers.get(
-                check_instance.compute_instance_id)
-            if 'trove_instance' in server.tags:
-                return True
+        nova_client = self._get_nova_client()
+        for instance in DBInstance.find_all(deleted=False).all():
+            if not instance.compute_instance_id:
+                continue
+            try:
+                server = nova_client.servers.get(instance.compute_instance_id)
+            except nova_exceptions.NotFound:
+                print('Server %s of instance %s does not exist, skipping.' %
+                      (instance.compute_instance_id, instance.id))
+                continue
+            return 'trove_instance' in server.tags
         return False
 
     def set_nova_tags(self, force=None):
@@ -276,7 +286,7 @@ class Commands(object):
                           (server.id, instance.id))
                 except Exception as e:
                     print('Error occurred while setting nova tags for server '
-                          '%s', server.id)
+                          '%s' % instance.compute_instance_id)
                     print(e)
 
     def params_of(self, command_name):
