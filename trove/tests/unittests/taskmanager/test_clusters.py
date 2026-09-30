@@ -169,6 +169,34 @@ class MongoDbClusterTasksTest(trove_testtools.TestCase):
     @patch.object(DBInstance, 'find_by')
     @patch.object(InstanceServiceStatus, 'find_by')
     @patch('trove.taskmanager.models.LOG')
+    @patch('trove.common.utils.poll_until')
+    def test_all_instances_ready_with_any_build_error(
+            self, mock_poll, mock_logging, mock_find, mock_db_find,
+            mock_update):
+        # An instance whose security group, port or volume could not be
+        # created has no server and never reports; waiting for it used to
+        # end only with the timeout.
+        mock_poll.side_effect = (
+            lambda retriever, condition, **kw: self.assertTrue(
+                condition(retriever())))
+        (mock_find.return_value.
+         get_status.return_value) = ServiceStatuses.NEW
+        for task in (InstanceTasks.BUILDING_ERROR_SEC_GROUP,
+                     InstanceTasks.BUILDING_ERROR_PORT,
+                     InstanceTasks.BUILDING_ERROR_VOLUME,
+                     InstanceTasks.BUILDING_ERROR_DNS):
+            mock_update.reset_mock()
+            (mock_db_find.return_value.
+             get_task_status.return_value) = task
+            ret_val = self.clustertasks._all_instances_ready(
+                ["1", "2", "3", "4"], self.cluster_id)
+            mock_update.assert_called_with(self.cluster_id, None)
+            self.assertFalse(ret_val)
+
+    @patch.object(ClusterTasks, 'update_statuses_on_failure')
+    @patch.object(DBInstance, 'find_by')
+    @patch.object(InstanceServiceStatus, 'find_by')
+    @patch('trove.taskmanager.models.LOG')
     def test_all_instances_ready_bad_status(self, mock_logging,
                                             mock_find, mock_db_find,
                                             mock_update):

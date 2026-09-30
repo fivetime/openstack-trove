@@ -249,6 +249,21 @@ class ClusterTasks(Cluster):
                     ((status == fast_fail_statuses) or
                      (status in fast_fail_statuses)))
 
+        # An instance that could not be built never reports a status, so
+        # waiting for one only ends with the timeout. That holds for every
+        # build error, not just for a server Nova refused: a security
+        # group, a port or a volume that could not be created leaves the
+        # instance without a server just the same.
+        build_errors = (
+            InstanceTasks.BUILDING_ERROR_DNS,
+            InstanceTasks.BUILDING_ERROR_SERVER,
+            InstanceTasks.BUILDING_ERROR_VOLUME,
+            InstanceTasks.BUILDING_ERROR_SEC_GROUP,
+            InstanceTasks.BUILDING_ERROR_REPLICA,
+            InstanceTasks.BUILDING_ERROR_TIMEOUT_GA,
+            InstanceTasks.BUILDING_ERROR_PORT,
+        )
+
         def _all_have_status(ids):
             for instance_id in ids:
                 status = InstanceServiceStatus.find_by(
@@ -256,7 +271,7 @@ class ClusterTasks(Cluster):
                 task_status = DBInstance.find_by(
                     id=instance_id).get_task_status()
                 if (_is_fast_fail_status(status) or
-                        (task_status == InstanceTasks.BUILDING_ERROR_SERVER)):
+                        (task_status in build_errors)):
                     # if one has failed, no need to continue polling
                     LOG.debug("Instance %(id)s has acquired a fast-fail "
                               "status %(status)s and"
@@ -281,7 +296,7 @@ class ClusterTasks(Cluster):
                 task_status = DBInstance.find_by(
                     id=instance_id).get_task_status()
                 if (_is_fast_fail_status(status) or
-                        (task_status == InstanceTasks.BUILDING_ERROR_SERVER)):
+                        (task_status in build_errors)):
                     failed_instance_ids.append(instance_id)
             return failed_instance_ids
 
