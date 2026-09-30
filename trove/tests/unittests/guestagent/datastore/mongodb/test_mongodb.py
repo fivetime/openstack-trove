@@ -487,8 +487,10 @@ class TestMongoDBAdmin(MongoDBGuestTestCase):
                                return_value='pw'):
             adm._client()
         kwargs = mock_client.call_args[1]
-        self.assertEqual('/var/run/mongodb/mongodb-27017.sock',
-                         kwargs['host'])
+        # A bare socket path is refused: "URI must begin with mongodb://".
+        self.assertEqual(
+            'mongodb://%2Fvar%2Frun%2Fmongodb%2Fmongodb-27017.sock',
+            kwargs['host'])
         self.assertEqual('os_admin', kwargs['username'])
         self.assertEqual('admin', kwargs['authSource'])
         self.assertTrue(kwargs['directConnection'])

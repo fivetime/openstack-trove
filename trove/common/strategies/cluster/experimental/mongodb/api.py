@@ -22,6 +22,7 @@ from trove.cluster.views import ClusterView
 from trove.common import cfg
 from trove.common import clients
 from trove.common import exception
+from trove.common import glance as common_glance
 from trove.common.i18n import _
 from trove.common.notification import DBaaSClusterGrow
 from trove.common.notification import StartNotification
@@ -126,6 +127,10 @@ class MongoDbCluster(models.Cluster):
             datastore_version_id=datastore_version.id,
             task_status=ClusterTasks.BUILDING_INITIAL)
 
+        # The datastore version names its image by tags since Victoria;
+        # the caller resolved them to an image.
+        image_id = datastore_version.image_id or image_id
+
         replica_set_name = "rs1"
 
         member_config = {"id": db_info.id,
@@ -149,7 +154,7 @@ class MongoDbCluster(models.Cluster):
             instance_name = "%s-%s-%s" % (name, replica_set_name, str(i + 1))
             inst_models.Instance.create(context, instance_name,
                                         flavor_id,
-                                        datastore_version.image_id,
+                                        image_id,
                                         [], [], datastore,
                                         datastore_version,
                                         volume_size, None,
@@ -166,7 +171,7 @@ class MongoDbCluster(models.Cluster):
             instance_name = "%s-%s-%s" % (name, "configsvr", str(i))
             inst_models.Instance.create(context, instance_name,
                                         flavor_id,
-                                        datastore_version.image_id,
+                                        image_id,
                                         [], [], datastore,
                                         datastore_version,
                                         configsvr_vsize, None,
@@ -183,7 +188,7 @@ class MongoDbCluster(models.Cluster):
             instance_name = "%s-%s-%s" % (name, "mongos", str(i))
             inst_models.Instance.create(context, instance_name,
                                         flavor_id,
-                                        datastore_version.image_id,
+                                        image_id,
                                         [], [], datastore,
                                         datastore_version,
                                         mongos_vsize, None,
@@ -316,7 +321,7 @@ class MongoDbCluster(models.Cluster):
                                           str(i))
             inst_models.Instance.create(self.context, instance_name,
                                         a_member.flavor_id,
-                                        a_member.datastore_version.image_id,
+                                        self.image_id,
                                         [], [], a_member.datastore,
                                         a_member.datastore_version,
                                         volume_size, None,
@@ -436,6 +441,19 @@ class MongoDbCluster(models.Cluster):
             instance.delete()
         self.manager.shrink_cluster(self.id, instance_ids)
 
+    @property
+    def image_id(self):
+        """The image of the datastore version, resolved from its tags
+        when it names none.
+        """
+        image_id = self.datastore_version.image_id
+        if not image_id:
+            glance_client = clients.create_glance_client(self.context)
+            image_id = common_glance.get_image_id(
+                glance_client, self.datastore_version.image_id,
+                self.datastore_version.image_tags)
+        return image_id
+
     def _create_instances(self, instances, cluster_config,
                           default_name_tag, locality, key=None):
         """Loop through the instances and create them in this cluster."""
@@ -450,7 +468,7 @@ class MongoDbCluster(models.Cluster):
                 self.name, default_name_tag, i + 1))
             new_instance = inst_models.Instance.create(
                 self.context, name, instance['flavor_id'],
-                self.datastore_version.image_id, [], [],
+                self.image_id, [], [],
                 self.datastore, self.datastore_version,
                 instance['volume_size'], None,
                 availability_zone=instance.get('availability_zone', None),

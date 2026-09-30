@@ -546,8 +546,9 @@ class MongoDBAdmin(object):
         self.app = app
 
     def _client(self, authenticate=True):
+        # pymongo takes a socket only in its URI form.
         kwargs = {
-            'host': socket_path(self.app.port),
+            'host': socket_uri(self.app.port),
             'directConnection': True,
             'serverSelectionTimeoutMS': 10000,
         }

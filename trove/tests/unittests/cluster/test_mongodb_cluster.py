@@ -259,6 +259,26 @@ class MongoDBClusterTest(trove_testtools.TestCase):
     @mock.patch.object(QUOTAS, 'check_quotas')
     @mock.patch.object(models, 'validate_instance_flavors')
     @mock.patch.object(inst_models.Instance, 'create')
+    def test_create_uses_the_image_resolved_from_tags(
+            self, mock_ins_create, *args):
+        # A datastore version registered with image tags has no image_id;
+        # the cluster controller resolves the tags and passes the image.
+        self.datastore_version.image_id = None
+        self.cluster.create(mock.Mock(),
+                            self.cluster_name,
+                            self.datastore,
+                            self.datastore_version,
+                            self.instances, {}, None, None,
+                            image_id='image-from-tags')
+        images = [call[0][3] for call in mock_ins_create.call_args_list]
+        self.assertEqual(['image-from-tags'] * 7, images)
+
+    @mock.patch.object(task_api, 'load')
+    @mock.patch.object(models.DBCluster, 'create')
+    @mock.patch.object(models, 'validate_instance_nics')
+    @mock.patch.object(QUOTAS, 'check_quotas')
+    @mock.patch.object(models, 'validate_instance_flavors')
+    @mock.patch.object(inst_models.Instance, 'create')
     def test_create_with_extended_properties(self, mock_ins_create, *args):
         extended_properties = {
             "num_configsvr": 5,
