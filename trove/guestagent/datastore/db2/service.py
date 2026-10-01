@@ -575,8 +575,12 @@ class DB2Admin(object):
                           % (name, name))
 
     def list_databases(self, limit=None, marker=None, include_marker=False):
+        """The names in lower case: the server folds them to upper case,
+        and the API compares the names it is given as they are.
+        """
         return guestagent_utils.serialize_list(
-            [models.DB2Schema(name) for name in self._database_names()],
+            [models.DB2Schema(name.lower())
+             for name in self._database_names()],
             limit=limit, marker=marker, include_marker=include_marker)
 
     #########
@@ -684,7 +688,7 @@ class DB2Admin(object):
     def _build_user(self, username):
         user = models.DB2User(username)
         for database in self._databases_of(username):
-            user.databases = database
+            user.databases = database.lower()
         return user
 
     def _grant(self, username, database):

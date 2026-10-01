@@ -344,7 +344,9 @@ class TestDB2Admin(DB2GuestTestCase):
         adm, fake, _ = self._adm()
         self.assertEqual([], adm.list_databases()[0])
         adm.create_database([models.DB2Schema('appdb').serialize()])
-        self.assertEqual(['APPDB'],
+        # In lower case: the API compares the names it is given as they
+        # are, and the server folds them to upper case.
+        self.assertEqual(['appdb'],
                          [d['_name'] for d in adm.list_databases()[0]])
         # Ready for online backups.
         self.assertIn('db2 UPDATE DB CFG FOR APPDB USING LOGARCHMETH1 '
@@ -370,13 +372,13 @@ class TestDB2Admin(DB2GuestTestCase):
 
         listed = adm.list_users()[0]
         self.assertEqual(['appuser'], [u['_name'] for u in listed])
-        self.assertEqual(['APPDB'],
+        self.assertEqual(['appdb'],
                          [d['_name'] for d in listed[0]['_databases']])
         adm.grant_access('appuser', None, ['otherdb'])
-        self.assertEqual(['APPDB', 'OTHERDB'],
+        self.assertEqual(['appdb', 'otherdb'],
                          [d['_name'] for d in adm.list_access('appuser')])
         adm.revoke_access('appuser', None, 'appdb')
-        self.assertEqual(['OTHERDB'],
+        self.assertEqual(['otherdb'],
                          [d['_name'] for d in adm.list_access('appuser')])
 
     def test_a_database_being_created_is_left_out(self):
@@ -394,7 +396,7 @@ class TestDB2Admin(DB2GuestTestCase):
                     'database cannot be connected to in the mode requested.')
             return real_run(statements, database)
         adm.run = run
-        self.assertEqual(['APPDB'],
+        self.assertEqual(['appdb'],
                          [d['_name'] for d in adm.list_access('appuser')])
         # Other errors are errors.
         adm.run = mock.Mock(side_effect=exception.TroveError('SQL0204N'))
