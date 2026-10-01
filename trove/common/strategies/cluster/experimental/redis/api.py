@@ -11,6 +11,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
+
 from oslo_log import log as logging
 
 from trove.cluster import models
@@ -65,7 +67,14 @@ class RedisCluster(models.Cluster):
 
         models.validate_instance_nics(context, instances)
 
-        name_index = 1
+        # Number on from the members there are: a grown cluster's new
+        # member was named member-1 again.
+        name_index = 1 + max(
+            [int(m.group(1)) for m in (
+                re.search(r'-member-(\d+)$', db_instance.name or '')
+                for db_instance in inst_models.DBInstance.find_all(
+                    cluster_id=db_info.id, deleted=False).all())
+             if m] or [0])
         for instance in instances:
             if not instance.get('name'):
                 instance['name'] = "%s-member-%s" % (db_info.name, name_index)

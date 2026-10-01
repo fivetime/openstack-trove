@@ -233,6 +233,28 @@ class ClusterTest(trove_testtools.TestCase):
                            cluster_id=self.cluster_id,
                            type="member") for i in ids]
 
+    @patch.object(DBCluster, 'update')
+    @patch.object(redis_api, 'CONF')
+    @patch.object(inst_models.Instance, 'create')
+    @patch.object(task_api, 'load')
+    @patch.object(QUOTAS, 'check_quotas')
+    @patch.object(clients, 'create_nova_client')
+    @patch.object(DBInstance, 'find_all')
+    def test_grow_names_new_members_after_the_existing(
+            self, mock_find_all, mock_client, mock_check_quotas,
+            mock_task_api, mock_ins_create, mock_conf, mock_update):
+        # member-2 left the cluster: the next one is member-4, not one
+        # of the names there are.
+        mock_find_all.return_value.all.return_value = self._members(
+            'c-member-1', 'c-member-3')
+        mock_conf.get = Mock(
+            return_value=FakeOptGroup(volume_support=True))
+        mock_client.return_value.flavors = Mock()
+        self.cluster.grow([dict(i) for i in self.instances_w_volumes[:2]])
+        self.assertEqual([self.cluster_name + '-member-4',
+                          self.cluster_name + '-member-5'],
+                         [c[0][1] for c in mock_ins_create.call_args_list])
+
     @patch.object(task_api, 'load')
     @patch.object(DBInstance, 'find_all')
     @patch.object(DBCluster, 'update')
