@@ -18,7 +18,10 @@ from oslo_log import log as logging
 from trove.common import cfg
 from trove.common import exception
 from trove.common.i18n import _
+from trove.common import utils
 from trove.common import wsgi
+from trove.extensions.common import models
+from trove.extensions.common import views
 from trove.extensions.common.service import DefaultRootController
 from trove.extensions.redis.models import RedisRoot
 from trove.extensions.redis.views import RedisRootCreatedView
@@ -30,9 +33,22 @@ MANAGER = CONF.datastore_manager if CONF.datastore_manager else 'redis'
 
 
 class RedisRootController(DefaultRootController):
+    def root_index(self, req, tenant_id, instance_id, is_cluster):
+        if is_cluster:
+            context = req.environ[wsgi.CONTEXT_KEY]
+            enabled = any(models.Root.load(context, member_id)
+                          for member_id in self._cluster_members(
+                              tenant_id, instance_id))
+            return wsgi.Result(views.RootEnabledView(enabled).data(), 200)
+        return super(RedisRootController, self).root_index(
+            req, tenant_id, instance_id, is_cluster)
+
     def root_create(self, req, body, tenant_id, instance_id, is_cluster):
         """Enable authentication for a redis instance and its replicas if any
         """
+        if is_cluster:
+            return self._cluster_root_create(req, body, tenant_id,
+                                             instance_id)
         self._validate_can_perform_action(tenant_id, instance_id, is_cluster,
                                           "enable_root")
         password = DefaultRootController._get_password_from_body(body)
@@ -43,6 +59,11 @@ class RedisRootController(DefaultRootController):
     def root_delete(self, req, tenant_id, instance_id, is_cluster):
         """Disable authentication for a redis instance and its replicas if any
         """
+        if is_cluster:
+            context = req.environ[wsgi.CONTEXT_KEY]
+            for member_id in self._cluster_members(tenant_id, instance_id):
+                models.Root.delete(context, member_id)
+            return wsgi.Result(None, 204)
         self._validate_can_perform_action(tenant_id, instance_id, is_cluster,
                                           "disable_root")
         slave_instances = self._get_slaves(tenant_id, instance_id)
@@ -172,11 +193,35 @@ class RedisRootController(DefaultRootController):
                 )
         return password
 
+    @staticmethod
+    def _cluster_members(tenant_id, cluster_id):
+        return [db_instance.id for db_instance in DBInstance.find_all(
+            tenant_id=tenant_id, cluster_id=cluster_id, deleted=False).all()]
+
+    def _cluster_root_create(self, req, body, tenant_id, cluster_id):
+        """Each member of a cluster has its own users, and a client is sent
+        from one to another: give every member the root user with one
+        password.
+        """
+        LOG.info("Enabling root for cluster '%s'.", cluster_id)
+        context = req.environ[wsgi.CONTEXT_KEY]
+        password = (DefaultRootController._get_password_from_body(body) or
+                    utils.generate_random_password())
+        root = None
+        for member_id in self._cluster_members(tenant_id, cluster_id):
+            root = RedisRoot.create(context, member_id, password)
+        return wsgi.Result(views.RootCreatedView(root).data(), 200)
+
     def _validate_can_perform_action(self, tenant_id, instance_id, is_cluster,
                                      operation):
         if is_cluster:
             raise exception.ClusterOperationNotSupported(
                 operation=operation)
+
+        # A member alone would end up with a root its peers do not have.
+        db_instance = DBInstance.find_by(id=instance_id, tenant_id=tenant_id)
+        if db_instance.cluster_id:
+            raise exception.ClusterInstanceOperationNotSupported()
 
         is_slave = self._is_slave(tenant_id, instance_id)
         if is_slave:
