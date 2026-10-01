@@ -283,7 +283,11 @@ class VerticaApp(service.BaseDbApp):
         return self.get_auth_password()
 
     def write_license(self, content):
-        """Keep a license where the server reads it."""
+        """Keep a license where the server reads it. A license file is
+        text.
+        """
+        if isinstance(content, bytes):
+            content = content.decode()
         operating_system.ensure_directory(
             HOST_CONF_DIR, user=self.database_service_uid,
             group=self.database_service_gid, force=True, as_root=True)

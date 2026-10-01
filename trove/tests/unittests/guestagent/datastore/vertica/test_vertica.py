@@ -266,6 +266,17 @@ class TestVerticaApp(VerticaGuestTestCase):
                       modes['/etc/vertica-trove/start.sh'])
         mock_save.assert_called_once_with('dbadmin', 'pw')
 
+    @mock.patch.object(vertica_service, 'operating_system')
+    def test_a_license_is_written_as_text(self, mock_os):
+        # The module hands the guest bytes; the file is written in text
+        # mode.
+        app = self._app()
+        app.write_license(b'Acme\n10TB\n')
+        written = {call[0][0]: call[0][1]
+                   for call in mock_os.write_file.call_args_list}
+        self.assertEqual('Acme\n10TB\n',
+                         written['/etc/vertica-trove/license.key'])
+
     def test_start_script_is_valid_bash(self):
         app = self._app()
         written = {}
@@ -728,6 +739,16 @@ class TestVerticaManager(VerticaGuestTestCase):
         manager.app.write_license.assert_called_once_with(b'LICENSE')
         # The modules are then applied as usual.
         self.assertEqual(modules, prepare.call_args[1]['modules'])
+
+    def test_a_license_that_cannot_be_kept_does_not_stop_the_prepare(self):
+        manager = self._manager()
+        manager.app.write_license.side_effect = OSError('disk')
+        modules = [{'module': {'type': 'vertica_license', 'name': 'lic',
+                               'contents': base64.encode_as_text(b'L')}}]
+        with mock.patch.object(base_manager.Manager, 'prepare') as prepare:
+            manager.prepare(mock.Mock(), None, None, 4096, None,
+                            modules=modules)
+        prepare.assert_called_once()
 
     def test_configuration_changes_reach_the_running_server(self):
         manager = self._manager()

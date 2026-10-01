@@ -51,8 +51,16 @@ class Manager(manager.Manager):
                     module.get('contents'):
                 LOG.info("Keeping the license of module '%s' for the "
                          "database.", module.get('name'))
-                self.app.write_license(
-                    base64.decode_as_bytes(module['contents']))
+                # Nothing here may stop the preparation: it has not
+                # reported its start yet, and the instance would stay in
+                # BUILD with no fault. A version that needs the license
+                # fails to create its database, and says so.
+                try:
+                    self.app.write_license(
+                        base64.decode_as_bytes(module['contents']))
+                except Exception:
+                    LOG.exception("Could not keep the license of module "
+                                  "'%s'.", module.get('name'))
         super(Manager, self).prepare(
             context, packages, databases, memory_mb, users,
             device_path=device_path, mount_point=mount_point,
