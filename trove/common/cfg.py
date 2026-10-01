@@ -814,7 +814,9 @@ def _build_redis_family_datastore_opts(
         ),
         cfg.StrOpt(
             'root_controller',
-            default='trove.extensions.common.service.DefaultRootController',
+            # Redis' own: it enables root on an instance's replicas too and
+            # on every member of a cluster, whose ACL users are their own.
+            default='trove.extensions.redis.service.RedisRootController',
             help='Root controller implementation for redis.'
         ),
         cfg.ListOpt(

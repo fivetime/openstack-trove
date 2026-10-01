@@ -88,6 +88,11 @@ class TestRedisDatastoreWiring(trove_testtools.TestCase):
                             for ports in CONF.redis.cluster_tcp_ports))
         self.assertFalse(any(16379 in ports for ports in CONF.redis.tcp_ports))
         self.assertIn('clusteradmin', CONF.redis.ignore_users)
+        # Root on a cluster goes to every member: the Redis controller
+        # does that, the default one refuses clusters.
+        self.assertEqual(
+            'trove.extensions.redis.service.RedisRootController',
+            CONF.redis.root_controller)
 
     def test_user_api_is_enabled(self):
         self.assertIn('redis',
