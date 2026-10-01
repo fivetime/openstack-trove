@@ -223,25 +223,41 @@ class ClusterTest(trove_testtools.TestCase):
             [mock_ins_create.return_value.id] * 3)
         self.assertEqual(3, mock_ins_create.call_count)
 
+    def _members(self, *ids):
+        return [DBInstance(InstanceTasks.NONE, id=i, name=i,
+                           compute_instance_id="compute-" + i,
+                           task_id=InstanceTasks.NONE._code,
+                           task_description=InstanceTasks.NONE._db_text,
+                           volume_id="volume-" + i,
+                           datastore_version_id="1",
+                           cluster_id=self.cluster_id,
+                           type="member") for i in ids]
+
+    @patch.object(task_api, 'load')
     @patch.object(DBInstance, 'find_all')
-    @patch.object(Cluster, 'get_guest')
     @patch.object(DBCluster, 'update')
-    @patch.object(inst_models.Instance, 'load')
     @patch.object(inst_models.Instance, 'delete')
-    def test_shrink(self,
-                    mock_ins_delete, mock_ins_load, mock_update,
-                    mock_guest, mock_find_all):
-        mock_find_all.return_value.all.return_value = [
-            DBInstance(InstanceTasks.NONE, id="1", name="member1",
-                       compute_instance_id="compute-1",
-                       task_id=InstanceTasks.NONE._code,
-                       task_description=InstanceTasks.NONE._db_text,
-                       volume_id="volume-1",
-                       datastore_version_id="1",
-                       cluster_id=self.cluster_id,
-                       type="member")]
+    def test_shrink(self, mock_ins_delete, mock_update, mock_find_all,
+                    mock_task_api):
+        # The taskmanager moves the slots off and deletes the members;
+        # the request itself only hands the work over.
+        mock_find_all.return_value.all.return_value = self._members(
+            'id1', 'id2', 'id3')
         self.cluster.shrink(['id1'])
-        self.assertEqual(1, mock_ins_delete.call_count)
+        mock_task_api.return_value.shrink_cluster.assert_called_once_with(
+            self.dbcreate_mock.return_value.id, ['id1'])
+        mock_ins_delete.assert_not_called()
+
+    @patch.object(task_api, 'load')
+    @patch.object(DBInstance, 'find_all')
+    @patch.object(DBCluster, 'update')
+    def test_shrink_must_leave_a_member(self, mock_update, mock_find_all,
+                                        mock_task_api):
+        mock_find_all.return_value.all.return_value = self._members(
+            'id1', 'id2')
+        self.assertRaises(exception.ClusterShrinkMustNotLeaveClusterEmpty,
+                          self.cluster.shrink, ['id1', 'id2'])
+        mock_task_api.return_value.shrink_cluster.assert_not_called()
 
     @patch('trove.cluster.models.LOG')
     def test_delete_bad_task_status(self, mock_logging):

@@ -18,6 +18,7 @@ from trove.common import cfg
 from trove.common.exception import TroveError
 from trove.common.i18n import _
 from trove.common.strategies.cluster import base
+from trove.common import utils
 from trove.instance.models import DBInstance
 from trove.instance.models import Instance
 from trove.instance import tasks as inst_tasks
@@ -42,6 +43,23 @@ class RedisTaskManagerStrategy(base.BaseTaskManagerStrategy):
 
 class RedisClusterTasks(task_models.ClusterTasks):
 
+    # A Redis Cluster spreads 16384 hash slots over its masters.
+    TOTAL_SLOTS = 16384
+
+    @staticmethod
+    def slot_ranges(num_nodes):
+        """[(first, last), ...]: an even share of the slots for each node,
+        the first ones taking one more while there are leftovers.
+        """
+        per_node, leftover = divmod(RedisClusterTasks.TOTAL_SLOTS, num_nodes)
+        ranges = []
+        first = 0
+        for index in range(num_nodes):
+            count = per_node + (1 if index < leftover else 0)
+            ranges.append((first, first + count - 1))
+            first += count
+        return ranges
+
     def create_cluster(self, context, cluster_id):
         LOG.debug("Begin create_cluster for id: %s.", cluster_id)
 
@@ -59,29 +77,26 @@ class RedisClusterTasks(task_models.ClusterTasks):
             instances = [Instance.load(context, instance_id) for instance_id
                          in instance_ids]
 
-            # Connect nodes to the first node
             guests = [self.get_guest(instance) for instance in instances]
             try:
+                # Every member gets the account the cluster is managed with.
+                password = utils.generate_random_password()
+                for guest in guests:
+                    guest.cluster_init(password)
+
+                # Connect nodes to the first node
                 cluster_head = instances[0]
                 cluster_head_port = '6379'
                 cluster_head_ip = self.get_ip(cluster_head)
                 for guest in guests[1:]:
                     guest.cluster_meet(cluster_head_ip, cluster_head_port)
 
-                num_nodes = len(instances)
-                total_slots = 16384
-                slots_per_node = total_slots / num_nodes
-                leftover_slots = total_slots % num_nodes
-                first_slot = 0
-                for guest in guests:
-                    last_slot = first_slot + slots_per_node
-                    if leftover_slots > 0:
-                        leftover_slots -= 1
-                    else:
-                        last_slot -= 1
+                for guest, (first_slot, last_slot) in zip(
+                        guests, self.slot_ranges(len(guests))):
                     guest.cluster_addslots(first_slot, last_slot)
-                    first_slot = last_slot + 1
 
+                for guest in guests:
+                    guest.cluster_wait(len(guests))
                 for guest in guests:
                     guest.cluster_complete()
             except Exception:
@@ -115,9 +130,8 @@ class RedisClusterTasks(task_models.ClusterTasks):
             if not cluster_head:
                 raise TroveError(_("Unable to determine existing Redis cluster"
                                    " member"))
-
-            (cluster_head_ip, cluster_head_port) = (
-                self.get_guest(cluster_head).get_node_ip())
+            head_guest = self.get_guest(cluster_head)
+            (cluster_head_ip, cluster_head_port) = head_guest.get_node_ip()
 
             # Wait for cluster members to get to cluster-ready status.
             if not self._all_instances_ready(new_instance_ids, cluster_id):
@@ -126,11 +140,26 @@ class RedisClusterTasks(task_models.ClusterTasks):
             LOG.debug("All members ready, proceeding for cluster setup.")
             new_insts = [Instance.load(context, instance_id)
                          for instance_id in new_instance_ids]
-            new_guests = map(self.get_guest, new_insts)
+            # A list: the guests are gone through more than once (a map
+            # was, and every loop after the first did nothing).
+            new_guests = [self.get_guest(inst) for inst in new_insts]
+
+            password = head_guest.get_cluster_password()
+            for guest in new_guests:
+                guest.cluster_init(password)
 
             # Connect nodes to the cluster head
             for guest in new_guests:
                 guest.cluster_meet(cluster_head_ip, cluster_head_port)
+
+            # A node that has just met the cluster refuses slots until it
+            # sees all of it.
+            for guest in new_guests:
+                guest.cluster_wait(len(db_instances))
+
+            # The new members are empty masters: give them their share of
+            # the slots, with the keys in them.
+            head_guest.cluster_rebalance(use_empty_masters=True)
 
             for guest in new_guests:
                 guest.cluster_complete()
@@ -138,7 +167,6 @@ class RedisClusterTasks(task_models.ClusterTasks):
         timeout = Timeout(CONF.cluster_usage_timeout)
         try:
             _grow_cluster()
-            self.reset_task()
         except Timeout as t:
             if t is not timeout:
                 raise  # not my timeout
@@ -151,8 +179,59 @@ class RedisClusterTasks(task_models.ClusterTasks):
                 cluster_id, status=inst_tasks.InstanceTasks.GROWING_ERROR)
         finally:
             timeout.cancel()
+            # Failed or not, the cluster can be acted on again: the members
+            # carry the error, and a task left set would refuse even a
+            # delete.
+            self.reset_task()
 
         LOG.debug("End grow_cluster for id: %s.", cluster_id)
+
+    def shrink_cluster(self, context, cluster_id, removal_ids):
+        LOG.debug("Begin shrink_cluster for id: %s.", cluster_id)
+
+        def _shrink_cluster():
+            db_instances = DBInstance.find_all(cluster_id=cluster_id,
+                                               deleted=False).all()
+            remaining = [Instance.load(context, db_inst.id)
+                         for db_inst in db_instances
+                         if db_inst.id not in removal_ids]
+            removed = [Instance.load(context, instance_id)
+                       for instance_id in removal_ids]
+            head_guest = self.get_guest(remaining[0])
+            node_ids = [self.get_guest(inst).get_node_id()
+                        for inst in removed]
+
+            # Move every slot, with its keys, off the leaving members,
+            # then take them out of the cluster and delete them.
+            head_guest.cluster_rebalance(
+                weights={node_id: 0 for node_id in node_ids})
+            for node_id in node_ids:
+                head_guest.cluster_del_node(node_id)
+            for inst in removed:
+                inst.update_db(cluster_id=None)
+                Instance.delete(inst)
+
+        timeout = Timeout(CONF.cluster_usage_timeout)
+        try:
+            _shrink_cluster()
+        except Timeout as t:
+            if t is not timeout:
+                raise  # not my timeout
+            LOG.exception("Timeout for shrinking cluster.")
+            self.update_statuses_on_failure(
+                cluster_id, status=inst_tasks.InstanceTasks.SHRINKING_ERROR)
+        except Exception:
+            LOG.exception("Error shrinking cluster %s.", cluster_id)
+            self.update_statuses_on_failure(
+                cluster_id, status=inst_tasks.InstanceTasks.SHRINKING_ERROR)
+        finally:
+            timeout.cancel()
+            # Failed or not, the cluster can be acted on again: the members
+            # carry the error, and a task left set would refuse even a
+            # delete.
+            self.reset_task()
+
+        LOG.debug("End shrink_cluster for id: %s.", cluster_id)
 
     def upgrade_cluster(self, context, cluster_id, datastore_version):
         self.rolling_upgrade_cluster(context, cluster_id, datastore_version)

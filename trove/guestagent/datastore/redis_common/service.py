@@ -13,8 +13,11 @@
 #    limitations under the License.
 
 import docker
+import json
 import os
 from oslo_log import log as logging
+from oslo_utils import netutils
+import time
 from valkey.exceptions import ConnectionError
 from valkey import Valkey
 from trove.common import cfg, constants, exception, stream_codecs, utils
@@ -30,6 +33,9 @@ from typing import Union, List
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
 CNF_EXT = 'conf'
+CLUSTER_CHANGE_ID = 'cluster'
+# How long a member may take to see the whole cluster agree.
+CLUSTER_WAIT_TIMEOUT = 300
 
 
 class RedisApp(service.BaseDbApp):
@@ -306,6 +312,94 @@ class RedisApp(service.BaseDbApp):
         # Use osadmin password from restored backup
         self.adm.set_osadmin_password(self.get_osadmin_password())
 
+    # Cluster
+
+    def enable_cluster(self):
+        """Start the server as a cluster node. Takes effect on start."""
+        self.configuration_manager.apply_system_override({
+            'cluster-enabled': 'yes',
+            'cluster-config-file': f'{self.datadir}/nodes.conf',
+        }, CLUSTER_CHANGE_ID)
+
+    def set_cluster_admin(self, password):
+        """Add the account every member of the cluster shares.
+
+        Each member's os_admin password is its own, but redis-cli
+        --cluster logs in to every node with one account, and a member
+        that ends up a replica (one that loses all its slots does) syncs
+        with its master as masteruser.
+        """
+        user = models.RedisCommonUser(name=manager.CLUSTER_ADMIN_USER,
+                                      password=password)
+        self.save_password(manager.CLUSTER_ADMIN_USER, password)
+        self.adm.create_root_user(user)
+        options = {'masteruser': manager.CLUSTER_ADMIN_USER,
+                   'masterauth': password}
+        self.configuration_manager.apply_system_override(
+            options, CLUSTER_CHANGE_ID)
+        for name, value in options.items():
+            self.adm.connection.config_set(name, value)
+
+    def get_cluster_admin_password(self):
+        return self.get_auth_password(
+            file=f'{manager.CLUSTER_ADMIN_USER}.cnf')
+
+    def get_node_ip(self):
+        """[address, port] the other members and clients reach this one at.
+
+        Before a node has met any other, CLUSTER NODES does not know its
+        own address, so take the one of the tenant's NIC.
+        """
+        ip_address = None
+        if os.path.exists(constants.ETH1_CONFIG_PATH):
+            with open(constants.ETH1_CONFIG_PATH) as fd:
+                eth1_config = json.load(fd)
+            ip_address = (eth1_config.get("ipv4_address") or
+                          eth1_config.get("ipv6_address"))
+        if not ip_address:
+            ip_address = netutils.get_my_ipv4()
+        return [ip_address, str(self.get_port())]
+
+    def wait_for_cluster(self, expected_nodes):
+        """Wait until this node sees every member and all slots served.
+
+        A node that has just met the cluster answers CLUSTERDOWN until it
+        has the whole picture; slots moved to it before then are left
+        half migrated.
+        """
+        deadline = time.time() + CLUSTER_WAIT_TIMEOUT
+        info = {}
+        while time.time() < deadline:
+            info = self.adm.cluster_info()
+            if (info.get('cluster_state') == 'ok' and
+                    int(info.get('cluster_known_nodes', 0)) >=
+                    expected_nodes):
+                return
+            time.sleep(2)
+        raise exception.TroveError(
+            f"Cluster not ready after {CLUSTER_WAIT_TIMEOUT}s: state "
+            f"{info.get('cluster_state')}, "
+            f"{info.get('cluster_known_nodes')} of {expected_nodes} nodes")
+
+    def run_cluster_cli(self, *args):
+        """Run redis-cli --cluster in the database container, logged in
+        as the cluster admin, whose password goes in the environment and
+        not on the command line.
+        """
+        ip, port = self.get_node_ip()
+        command = [self.CLI_BINARY, '--user', manager.CLUSTER_ADMIN_USER,
+                   '--cluster', args[0], f'{ip}:{port}'] + list(args[1:])
+        container = self.docker_client.containers.get('database')
+        ret, output = container.exec_run(
+            command,
+            environment={'REDISCLI_AUTH': self.get_cluster_admin_password()})
+        output = output.decode('utf-8', 'replace') if output else ''
+        LOG.debug("%s exited %s: %s", ' '.join(command[:5]), ret, output)
+        if ret != 0 or '[ERR]' in output or '\n*** ' in output:
+            raise exception.TroveError(
+                f"redis-cli --cluster {args[0]} failed: {output[-1000:]}")
+        return output
+
     def enable_aclfile(self):
         self.configuration_manager.apply_system_override({
             'aclfile': self.ACL_FILE})
@@ -558,6 +652,22 @@ class RedisAdmin(object):
     def create_root_user(self, user, **kwargs):
         self.create_user(user, categories=["+@all"], channels=["*"],
                          keys=["~*"], **kwargs)
+
+    def cluster_info(self):
+        return self.connection.cluster('INFO')
+
+    def cluster_myid(self):
+        node_id = self.connection.cluster('MYID')
+        return node_id.decode() if isinstance(node_id, bytes) else node_id
+
+    def cluster_meet(self, ip, port):
+        self.connection.cluster('MEET', ip, int(port))
+
+    def cluster_addslots(self, first_slot, last_slot):
+        # ADDSLOTSRANGE is Redis 7; ADDSLOTS in groups works everywhere.
+        slots = list(range(int(first_slot), int(last_slot) + 1))
+        for i in range(0, len(slots), 1000):
+            self.connection.cluster('ADDSLOTS', *slots[i:i + 1000])
 
     def create_replication_user(self, user, **kwargs):
         self.create_user(user, commands=["+psync", "+replconf", "+ping"],

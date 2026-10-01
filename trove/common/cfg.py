@@ -755,9 +755,11 @@ def _build_redis_family_datastore_opts(
             help='Whether to permit ICMP.',
             deprecated_for_removal=True,
         ),
+        # 16379 is the cluster bus (client port + 10000), which cluster
+        # members talk to each other on.
         cfg.ListOpt(
             'tcp_ports',
-            default=["6379", "6380"],
+            default=["6379", "6380", "16379"],
             item_type=ListOfPortsType,
             help='List of TCP ports and/or port ranges to open '
                  'in the security group (only applicable '
@@ -811,7 +813,7 @@ def _build_redis_family_datastore_opts(
         ),
         cfg.ListOpt(
             'ignore_users',
-            default=['os_admin', 'default', 'replicator']
+            default=['os_admin', 'default', 'replicator', 'clusteradmin']
         ),
         cfg.StrOpt(
             'guest_log_exposed_logs',
@@ -877,11 +879,11 @@ redis_group, redis_opts = _build_redis_family_datastore_opts(
     docker_image='redis',
 )
 
-# The API and taskmanager halves of Redis clustering are still in the tree,
-# but the guest agent half went with the pre-container guest agent. Keep
-# the strategies loadable and the feature off until the guest side is back.
+# Redis Cluster: every member is a master holding a share of the 16384
+# hash slots; growing rebalances slots onto the new members, shrinking
+# moves them off the leaving ones first.
 redis_opts += [
-    cfg.BoolOpt('cluster_support', default=False,
+    cfg.BoolOpt('cluster_support', default=True,
                 help='Enable clusters to be created and managed.'),
     cfg.StrOpt('api_strategy',
                default='trove.common.strategies.cluster.experimental.'

@@ -13,10 +13,12 @@
 
 from oslo_log import log as logging
 
+from trove.common import cfg
 from trove.common.strategies.cluster import base
 from trove.guestagent import api as guest_api
 
 
+CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
 
 
@@ -39,48 +41,62 @@ class RedisGuestAgentAPI(guest_api.API):
     appropriate in this file
     """
 
+    def cluster_init(self, password):
+        LOG.debug("Adding the cluster admin account.")
+        return self._call("cluster_init", self.agent_high_timeout,
+                          version=guest_api.API.API_BASE_VERSION,
+                          password=password)
+
+    def get_cluster_password(self):
+        LOG.debug("Retrieve the cluster admin password.")
+        return self._call("get_cluster_password", self.agent_high_timeout,
+                          version=guest_api.API.API_BASE_VERSION)
+
     def get_node_ip(self):
         LOG.debug("Retrieve ip info from node.")
-        version = guest_api.API.API_BASE_VERSION
+        return self._call("get_node_ip", self.agent_high_timeout,
+                          version=guest_api.API.API_BASE_VERSION)
 
-        return self._call("get_node_ip",
-                          self.agent_high_timeout,
-                          version=version)
-
-    def get_node_id_for_removal(self):
-        LOG.debug("Validating cluster node removal.")
-        version = guest_api.API.API_BASE_VERSION
-
-        return self._call("get_node_id_for_removal",
-                          self.agent_high_timeout,
-                          version=version)
-
-    def remove_nodes(self, node_ids):
-        LOG.debug("Removing nodes from cluster.")
-        version = guest_api.API.API_BASE_VERSION
-
-        return self._call("remove_nodes", self.agent_high_timeout,
-                          version=version, node_ids=node_ids)
+    def get_node_id(self):
+        LOG.debug("Retrieve the cluster node id.")
+        return self._call("get_node_id", self.agent_high_timeout,
+                          version=guest_api.API.API_BASE_VERSION)
 
     def cluster_meet(self, ip, port):
         LOG.debug("Joining node to cluster.")
-        version = guest_api.API.API_BASE_VERSION
-
         return self._call("cluster_meet", self.agent_high_timeout,
-                          version=version, ip=ip, port=port)
+                          version=guest_api.API.API_BASE_VERSION,
+                          ip=ip, port=port)
 
     def cluster_addslots(self, first_slot, last_slot):
         LOG.debug("Adding slots %s-%s to cluster.", first_slot, last_slot)
-        version = guest_api.API.API_BASE_VERSION
-
-        return self._call("cluster_addslots",
-                          self.agent_high_timeout,
-                          version=version,
+        return self._call("cluster_addslots", self.agent_high_timeout,
+                          version=guest_api.API.API_BASE_VERSION,
                           first_slot=first_slot, last_slot=last_slot)
+
+    # The next three can take long: waiting for the cluster to agree, and
+    # moving slots with their keys. The cluster task's own timeout bounds
+    # them.
+    def cluster_wait(self, expected_nodes):
+        LOG.debug("Waiting for the cluster to see %s nodes.", expected_nodes)
+        return self._call("cluster_wait", CONF.cluster_usage_timeout,
+                          version=guest_api.API.API_BASE_VERSION,
+                          expected_nodes=expected_nodes)
+
+    def cluster_rebalance(self, weights=None, use_empty_masters=False):
+        LOG.debug("Rebalancing the cluster.")
+        return self._call("cluster_rebalance", CONF.cluster_usage_timeout,
+                          version=guest_api.API.API_BASE_VERSION,
+                          weights=weights,
+                          use_empty_masters=use_empty_masters)
+
+    def cluster_del_node(self, node_id):
+        LOG.debug("Removing node %s from the cluster.", node_id)
+        return self._call("cluster_del_node", CONF.cluster_usage_timeout,
+                          version=guest_api.API.API_BASE_VERSION,
+                          node_id=node_id)
 
     def cluster_complete(self):
         LOG.debug("Notifying cluster install completion.")
-        version = guest_api.API.API_BASE_VERSION
-
         return self._call("cluster_complete", self.agent_high_timeout,
-                          version=version)
+                          version=guest_api.API.API_BASE_VERSION)

@@ -14,7 +14,6 @@
 from oslo_log import log as logging
 
 from trove.cluster import models
-from trove.cluster.models import Cluster
 from trove.cluster.tasks import ClusterTasks
 from trove.cluster.views import ClusterView
 from trove.common import cfg
@@ -48,7 +47,8 @@ class RedisCluster(models.Cluster):
 
     @staticmethod
     def _create_instances(context, db_info, datastore, datastore_version,
-                          instances, extended_properties, locality):
+                          instances, extended_properties, locality,
+                          image_id=None):
         redis_conf = CONF.get(datastore_version.manager)
         ephemeral_enabled = redis_conf.device_path
         volume_enabled = redis_conf.volume_support
@@ -76,11 +76,15 @@ class RedisCluster(models.Cluster):
                          'volumes': total_volume_allocation}
         check_quotas(context.project_id, quota_request)
 
+        # The version is registered by image tags, so its image_id is
+        # empty; the API resolved the image from the tags.
+        image_id = datastore_version.image_id or image_id
+
         # Creating member instances
         return [inst_models.Instance.create(context,
                                             instance['name'],
                                             instance['flavor_id'],
-                                            datastore_version.image_id,
+                                            image_id,
                                             [], [],
                                             datastore, datastore_version,
                                             instance.get('volume_size'),
@@ -118,7 +122,8 @@ class RedisCluster(models.Cluster):
             task_status=ClusterTasks.BUILDING_INITIAL)
 
         cls._create_instances(context, db_info, datastore, datastore_version,
-                              instances, extended_properties, locality)
+                              instances, extended_properties, locality,
+                              image_id=image_id)
 
         # Calling taskmanager to further proceed for cluster-configuration
         task_api.load(context, datastore_version.manager).create_cluster(
@@ -129,7 +134,7 @@ class RedisCluster(models.Cluster):
     def upgrade(self, datastore_version):
         self.rolling_upgrade(datastore_version)
 
-    def grow(self, instances):
+    def grow(self, instances, image_id=None):
         LOG.debug("Growing cluster.")
 
         self.validate_cluster_available()
@@ -144,7 +149,8 @@ class RedisCluster(models.Cluster):
         locality = srv_grp.ServerGroup.convert_to_hint(self.server_group)
         new_instances = self._create_instances(context, db_info,
                                                datastore, datastore_version,
-                                               instances, None, locality)
+                                               instances, None, locality,
+                                               image_id=image_id)
 
         task_api.load(context, datastore_version.manager).grow_cluster(
             db_info.id, [instance.id for instance in new_instances])
@@ -152,48 +158,25 @@ class RedisCluster(models.Cluster):
         return RedisCluster(context, db_info, datastore, datastore_version)
 
     def shrink(self, removal_ids):
+        """Members holding slots can leave too: the taskmanager moves their
+        slots, with the keys, onto the remaining members first. That takes
+        as long as the data does, so it is not done in the API request.
+        """
         LOG.debug("Shrinking cluster %s.", self.id)
 
         self.validate_cluster_available()
 
-        cluster_info = self.db_info
-        cluster_info.update(task_status=ClusterTasks.SHRINKING_CLUSTER)
-        try:
-            removal_insts = [inst_models.Instance.load(self.context, inst_id)
-                             for inst_id in removal_ids]
-            node_ids = []
-            error_ids = []
-            for instance in removal_insts:
-                node_id = Cluster.get_guest(instance).get_node_id_for_removal()
-                if node_id:
-                    node_ids.append(node_id)
-                else:
-                    error_ids.append(instance.id)
-            if error_ids:
-                raise exception.ClusterShrinkInstanceInUse(
-                    id=error_ids,
-                    reason="Nodes cannot be removed. Check slots."
-                )
+        all_ids = [inst.id for inst in inst_models.DBInstance.find_all(
+            cluster_id=self.id, deleted=False).all()]
+        if not set(removal_ids) < set(all_ids):
+            raise exception.ClusterShrinkMustNotLeaveClusterEmpty()
 
-            all_instances = (
-                inst_models.DBInstance.find_all(cluster_id=self.id,
-                                                deleted=False).all())
-            remain_insts = [inst_models.Instance.load(self.context, inst.id)
-                            for inst in all_instances
-                            if inst.id not in removal_ids]
+        self.db_info.update(task_status=ClusterTasks.SHRINKING_CLUSTER)
+        task_api.load(self.context, self.ds_version.manager).shrink_cluster(
+            self.db_info.id, removal_ids)
 
-            for inst in remain_insts:
-                guest = Cluster.get_guest(inst)
-                guest.remove_nodes(node_ids)
-            for inst in removal_insts:
-                inst.update_db(cluster_id=None)
-            for inst in removal_insts:
-                inst_models.Instance.delete(inst)
-
-            return RedisCluster(self.context, cluster_info,
-                                self.ds, self.ds_version)
-        finally:
-            cluster_info.update(task_status=ClusterTasks.NONE)
+        return RedisCluster(self.context, self.db_info,
+                            self.ds, self.ds_version)
 
 
 class RedisClusterView(ClusterView):

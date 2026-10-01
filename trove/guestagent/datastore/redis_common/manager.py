@@ -25,6 +25,7 @@ LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
 OSADMIN_USER = 'os_admin'
 REPLICATION_USER = 'replicator'
+CLUSTER_ADMIN_USER = 'clusteradmin'
 
 
 class RedisManager(manager.Manager):
@@ -90,11 +91,57 @@ class RedisManager(manager.Manager):
 
         self.app.enable_aclfile()
 
+        if cluster_config:
+            self.app.enable_cluster()
+
         if snapshot:
             # This instance is a replica
             self.attach_replica(context, snapshot, snapshot['config'])
 
         self.app.start_db(ds_version=ds_version, memory_mb=memory_mb)
+
+    # Cluster (driven by the taskmanager's Redis cluster strategy)
+
+    def cluster_init(self, context, password):
+        LOG.info("Adding the cluster admin account.")
+        self.app.set_cluster_admin(password)
+
+    def get_cluster_password(self, context):
+        return self.app.get_cluster_admin_password()
+
+    def get_node_ip(self, context):
+        return self.app.get_node_ip()
+
+    def get_node_id(self, context):
+        return self.adm.cluster_myid()
+
+    def cluster_meet(self, context, ip, port):
+        LOG.info("Joining the cluster at %s:%s.", ip, port)
+        self.adm.cluster_meet(ip, port)
+
+    def cluster_addslots(self, context, first_slot, last_slot):
+        LOG.info("Taking hash slots %s-%s.", first_slot, last_slot)
+        self.adm.cluster_addslots(first_slot, last_slot)
+
+    def cluster_wait(self, context, expected_nodes):
+        self.app.wait_for_cluster(expected_nodes)
+
+    def cluster_rebalance(self, context, weights=None,
+                          use_empty_masters=False):
+        """Spread the slots evenly, or by weight: a weight of 0 moves all
+        slots, and their keys, off that node.
+        """
+        args = ['rebalance']
+        for node_id, weight in (weights or {}).items():
+            args += ['--cluster-weight', f'{node_id}={weight}']
+        if use_empty_masters:
+            args.append('--cluster-use-empty-masters')
+        LOG.info("Rebalancing the cluster: %s", args[1:])
+        self.app.run_cluster_cli(*args)
+
+    def cluster_del_node(self, context, node_id):
+        LOG.info("Removing node %s from the cluster.", node_id)
+        self.app.run_cluster_cli('del-node', node_id)
 
     def enable_root(self, context):
         root_password = self.app.set_password()

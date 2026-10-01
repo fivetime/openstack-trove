@@ -17,6 +17,7 @@ from oslo_utils import importutils
 from trove.common import cfg
 from trove.common import configurations
 from trove.common import constants
+from trove.common import exception
 from trove.common import template
 from trove.extensions.common import models as extension_models
 from trove.guestagent.datastore.redis_common import manager as common_manager
@@ -75,14 +76,15 @@ class TestRedisDatastoreWiring(trove_testtools.TestCase):
         self.assertIsNotNone(
             importutils.import_class(CONF.redis.root_controller))
 
-    def test_cluster_support_is_off_but_strategies_load(self):
-        # The guest agent half of Redis clustering is not ported to the
-        # container guest agent, so the API must refuse to build a cluster.
-        self.assertFalse(CONF.redis.cluster_support)
+    def test_cluster_support_and_strategies(self):
+        self.assertTrue(CONF.redis.cluster_support)
         for option in ('api_strategy', 'taskmanager_strategy',
                        'guestagent_strategy'):
             self.assertIsNotNone(
                 importutils.import_class(CONF.redis.get(option)))
+        # The members talk on the cluster bus, client port + 10000.
+        self.assertTrue(any(16379 in ports for ports in CONF.redis.tcp_ports))
+        self.assertIn('clusteradmin', CONF.redis.ignore_users)
 
     def test_user_api_is_enabled(self):
         self.assertIn('redis',
@@ -137,3 +139,80 @@ class TestRedisConfigTemplate(trove_testtools.TestCase):
             for other in {'redis', 'valkey', 'keydb'} - {manager}:
                 self.assertNotIn('/%s' % other, rendered,
                                  '%s template mentions %s' % (manager, other))
+
+
+class TestRedisCluster(trove_testtools.TestCase):
+    """The guest side of a Redis Cluster, on a mocked server."""
+
+    def setUp(self):
+        super(TestRedisCluster, self).setUp()
+        patcher = mock.patch.object(common_manager.RedisManager,
+                                    '__init__', return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.manager = common_manager.RedisManager()
+        self.manager.app = mock.MagicMock()
+        self.manager.adm = mock.MagicMock()
+
+    def test_rebalance_arguments(self):
+        self.manager.cluster_rebalance(None, use_empty_masters=True)
+        self.manager.app.run_cluster_cli.assert_called_with(
+            'rebalance', '--cluster-use-empty-masters')
+        self.manager.cluster_rebalance(None, weights={'n1': 0, 'n2': 0})
+        self.manager.app.run_cluster_cli.assert_called_with(
+            'rebalance', '--cluster-weight', 'n1=0',
+            '--cluster-weight', 'n2=0')
+
+    def test_del_node(self):
+        self.manager.cluster_del_node(None, 'n1')
+        self.manager.app.run_cluster_cli.assert_called_once_with(
+            'del-node', 'n1')
+
+
+class TestRedisClusterApp(trove_testtools.TestCase):
+
+    def setUp(self):
+        super(TestRedisClusterApp, self).setUp()
+        patcher = mock.patch.object(common_service.RedisApp, '__init__',
+                                    return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.app = common_service.RedisApp()
+        self.app.docker_client = mock.MagicMock()
+        self.app.adm = mock.MagicMock()
+        self.container = self.app.docker_client.containers.get.return_value
+        for name, value in (('get_node_ip', ['10.0.0.5', '6379']),
+                            ('get_cluster_admin_password', 's3cret')):
+            p = mock.patch.object(common_service.RedisApp, name,
+                                  return_value=value)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_cluster_cli_password_in_environment(self):
+        self.container.exec_run.return_value = (0, b'[OK] All good')
+        self.app.run_cluster_cli('del-node', 'n1')
+        command = self.container.exec_run.call_args[0][0]
+        self.assertEqual(['redis-cli', '--user', 'clusteradmin', '--cluster',
+                          'del-node', '10.0.0.5:6379', 'n1'], command)
+        self.assertNotIn('s3cret', ' '.join(command))
+        self.assertEqual(
+            {'REDISCLI_AUTH': 's3cret'},
+            self.container.exec_run.call_args[1]['environment'])
+
+    def test_cluster_cli_failures(self):
+        # redis-cli --cluster reports some failures only in its output.
+        for ret, output in ((1, b'boom'),
+                            (0, b'>>> Removing\n[ERR] Node is not empty!'),
+                            (0, b'Moving\n*** Please fix your cluster')):
+            self.container.exec_run.return_value = (ret, output)
+            self.assertRaises(exception.TroveError, self.app.run_cluster_cli,
+                              'rebalance')
+
+    def test_wait_for_cluster(self):
+        self.app.adm.cluster_info.side_effect = [
+            {'cluster_state': 'fail', 'cluster_known_nodes': '1'},
+            {'cluster_state': 'ok', 'cluster_known_nodes': '2'},
+            {'cluster_state': 'ok', 'cluster_known_nodes': '3'}]
+        with mock.patch.object(common_service.time, 'sleep'):
+            self.app.wait_for_cluster(3)
+        self.assertEqual(3, self.app.adm.cluster_info.call_count)
