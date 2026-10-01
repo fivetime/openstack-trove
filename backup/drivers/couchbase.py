@@ -22,9 +22,11 @@ CONF = cfg.CONF
 
 # What the server keeps under its var directory that is not the server:
 # logs, the samples of its statistics, scratch space and crash dumps. The
-# directories stay in the archive, empty; the server expects them.
+# directories stay in the archive, empty; the server expects them. conf.d
+# is the guest agent's, with the admin password of the instance in it.
 EXCLUDED = ('lib/couchbase/logs', 'lib/couchbase/stats_data',
-            'lib/couchbase/tmp', 'lib/couchbase/crash', 'lost+found')
+            'lib/couchbase/tmp', 'lib/couchbase/crash', 'lost+found',
+            'conf.d')
 
 
 class CouchbaseBackup(base.BaseRunner):

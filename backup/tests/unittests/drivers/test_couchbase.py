@@ -57,6 +57,7 @@ class TestCouchbaseBackup(unittest.TestCase):
         self._touch('lib', 'couchbase', 'tmp', 'scratch')
         self._touch('lib', 'couchbase', 'crash', 'dump')
         self._touch('lost+found', 'x')
+        self._touch('conf.d', 'os_admin.cnf')
         runner = self.runner_cls(filename='b1', db_datadir=self.datadir)
         runner.pre_backup()
         self.assertTrue(runner._gzip)
@@ -78,6 +79,8 @@ class TestCouchbaseBackup(unittest.TestCase):
                          'crash/dump'):
             self.assertNotIn('./lib/couchbase/' + excluded, names)
         self.assertNotIn('./lost+found/x', names)
+        # The guest agent's files, the admin password among them.
+        self.assertNotIn('./conf.d/os_admin.cnf', names)
         # The server expects the directories themselves.
         for kept in ('logs', 'stats_data', 'tmp', 'crash'):
             self.assertIn('./lib/couchbase/' + kept, names)
