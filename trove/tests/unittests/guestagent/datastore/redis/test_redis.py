@@ -205,6 +205,25 @@ class TestRedisClusterApp(trove_testtools.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
+    def test_cluster_nodes(self):
+        # As valkey-py parses CLUSTER NODES (seen on Redis 7.2).
+        admin = common_service.RedisAdmin()
+        admin._connection = mock.Mock()
+        admin._connection.cluster.return_value = {
+            '172.31.79.12:6379': {
+                'node_id': 'r1', 'flags': 'slave', 'master_id': 'm1',
+                'slots': [], 'connected': True},
+            '172.31.79.11:6379': {
+                'node_id': 'm1', 'flags': 'myself,master', 'master_id': '-',
+                'slots': [['0', '16383']], 'connected': True},
+        }
+        nodes = sorted(admin.cluster_nodes(), key=lambda n: n['id'])
+        self.assertEqual(
+            [{'id': 'm1', 'address': '172.31.79.11', 'role': 'master',
+              'master_id': None, 'has_slots': True},
+             {'id': 'r1', 'address': '172.31.79.12', 'role': 'replica',
+              'master_id': 'm1', 'has_slots': False}], nodes)
+
     def test_cluster_cli_password_in_environment(self):
         self.container.exec_run.return_value = (0, b'[OK] All good')
         self.app.run_cluster_cli('del-node', 'n1')

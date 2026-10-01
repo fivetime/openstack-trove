@@ -20,8 +20,10 @@ from trove.cluster.tasks import ClusterTasks
 from trove.cluster.views import ClusterView
 from trove.common import cfg
 from trove.common import exception
+from trove.common.i18n import _
 from trove.common import server_group as srv_grp
 from trove.common.strategies.cluster import base
+from trove.common import utils
 from trove.extensions.mgmt.clusters.views import MgmtClusterView
 from trove.instance import models as inst_models
 from trove.quota.quota import check_quotas
@@ -45,12 +47,40 @@ class RedisAPIStrategy(base.BaseAPIStrategy):
         return RedisMgmtClusterView
 
 
+def replica_groups(num_instances, replicas_per_master, existing_masters=0):
+    """Split the instances into groups of a master and its replicas.
+
+    A master without a replica takes the whole cluster down with it (no
+    other node serves its slots). With replicas, a failover needs most
+    masters to vote, so a cluster of fewer than three masters cannot have
+    one.
+    """
+    try:
+        replicas = int(replicas_per_master or 0)
+    except (TypeError, ValueError):
+        replicas = -1
+    if replicas < 0:
+        raise exception.BadRequest(_(
+            "replicas_per_master must be a whole number, 0 or more."))
+    if num_instances % (1 + replicas):
+        raise exception.BadRequest(_(
+            "With %(r)s replica(s) per master the instances come in groups "
+            "of %(g)s: a master and its replicas.") %
+            {'r': replicas, 'g': 1 + replicas})
+    masters = num_instances // (1 + replicas)
+    if replicas and existing_masters + masters < 3:
+        raise exception.BadRequest(_(
+            "A cluster with replicas needs at least 3 masters: a failover "
+            "needs most of them to agree."))
+    return replicas, masters
+
+
 class RedisCluster(models.Cluster):
 
     @staticmethod
     def _create_instances(context, db_info, datastore, datastore_version,
                           instances, extended_properties, locality,
-                          image_id=None):
+                          image_id=None, replicas_per_master=0):
         redis_conf = CONF.get(datastore_version.manager)
         ephemeral_enabled = redis_conf.device_path
         volume_enabled = redis_conf.volume_support
@@ -75,10 +105,25 @@ class RedisCluster(models.Cluster):
                 for db_instance in inst_models.DBInstance.find_all(
                     cluster_id=db_info.id, deleted=False).all())
              if m] or [0])
-        for instance in instances:
-            if not instance.get('name'):
-                instance['name'] = "%s-member-%s" % (db_info.name, name_index)
+        # Each master comes first in its group, its replicas after it; a
+        # group shares a shard_id, which tells the taskmanager whose
+        # replica a node is.
+        group_size = 1 + replicas_per_master
+        configs = []
+        for index, instance in enumerate(instances):
+            position = index % group_size
+            if position == 0:
+                shard_id = utils.generate_uuid()
+                master_name = "%s-member-%s" % (db_info.name, name_index)
                 name_index += 1
+            if not instance.get('name'):
+                instance['name'] = (
+                    master_name if position == 0 else
+                    "%s-replica-%s" % (master_name, position))
+            configs.append({"id": db_info.id,
+                            "instance_type": ("member" if position == 0
+                                              else "replica"),
+                            "shard_id": shard_id})
 
         # Check quotas
         quota_request = {'instances': num_instances,
@@ -102,9 +147,7 @@ class RedisCluster(models.Cluster):
                                                 'availability_zone', None),
                                             instance.get('nics', None),
                                             configuration_id=None,
-                                            cluster_config={
-                                                "id": db_info.id,
-                                                "instance_type": "member"},
+                                            cluster_config=config,
                                             volume_type=instance.get(
                                                 'volume_type', None),
                                             modules=instance.get('modules'),
@@ -112,7 +155,7 @@ class RedisCluster(models.Cluster):
                                             region_name=instance.get(
                                                 'region_name')
                                             )
-                for instance in instances]
+                for instance, config in zip(instances, configs)]
 
     @classmethod
     def create(cls, context, name, datastore, datastore_version,
@@ -123,6 +166,10 @@ class RedisCluster(models.Cluster):
         if configuration:
             raise exception.ConfigurationNotSupported()
 
+        replicas, _masters = replica_groups(
+            len(instances),
+            (extended_properties or {}).get('replicas_per_master'))
+
         # Updating Cluster Task
 
         db_info = models.DBCluster.create(
@@ -132,7 +179,8 @@ class RedisCluster(models.Cluster):
 
         cls._create_instances(context, db_info, datastore, datastore_version,
                               instances, extended_properties, locality,
-                              image_id=image_id)
+                              image_id=image_id,
+                              replicas_per_master=replicas)
 
         # Calling taskmanager to further proceed for cluster-configuration
         task_api.load(context, datastore_version.manager).create_cluster(
@@ -153,13 +201,23 @@ class RedisCluster(models.Cluster):
         datastore = self.ds
         datastore_version = self.ds_version
 
+        # A cluster with replicas grows by whole groups, as many replicas
+        # per master as it has.
+        members = inst_models.DBInstance.find_all(
+            cluster_id=db_info.id, deleted=False).all()
+        masters = len([m for m in members if m.type != 'replica'])
+        replicas, _new = replica_groups(
+            len(instances), (len(members) - masters) // max(masters, 1),
+            existing_masters=masters)
+
         db_info.update(task_status=ClusterTasks.GROWING_CLUSTER)
 
         locality = srv_grp.ServerGroup.convert_to_hint(self.server_group)
         new_instances = self._create_instances(context, db_info,
                                                datastore, datastore_version,
                                                instances, None, locality,
-                                               image_id=image_id)
+                                               image_id=image_id,
+                                               replicas_per_master=replicas)
 
         task_api.load(context, datastore_version.manager).grow_cluster(
             db_info.id, [instance.id for instance in new_instances])

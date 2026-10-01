@@ -74,6 +74,17 @@ class RedisGuestAgentAPI(guest_api.API):
                           version=guest_api.API.API_BASE_VERSION,
                           first_slot=first_slot, last_slot=last_slot)
 
+    def cluster_replicate(self, master_id):
+        LOG.debug("Replicating master %s.", master_id)
+        return self._call("cluster_replicate", self.agent_high_timeout,
+                          version=guest_api.API.API_BASE_VERSION,
+                          master_id=master_id)
+
+    def get_cluster_nodes(self):
+        LOG.debug("Retrieve the nodes of the cluster.")
+        return self._call("get_cluster_nodes", self.agent_high_timeout,
+                          version=guest_api.API.API_BASE_VERSION)
+
     # The next three can take long: waiting for the cluster to agree, and
     # moving slots with their keys. The cluster task's own timeout bounds
     # them.

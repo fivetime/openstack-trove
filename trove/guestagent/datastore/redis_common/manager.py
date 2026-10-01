@@ -123,6 +123,13 @@ class RedisManager(manager.Manager):
         LOG.info("Taking hash slots %s-%s.", first_slot, last_slot)
         self.adm.cluster_addslots(first_slot, last_slot)
 
+    def cluster_replicate(self, context, master_id):
+        LOG.info("Replicating master %s.", master_id)
+        self.adm.cluster_replicate(master_id)
+
+    def get_cluster_nodes(self, context):
+        return self.adm.cluster_nodes()
+
     def cluster_wait(self, context, expected_nodes):
         self.app.wait_for_cluster(expected_nodes)
 

@@ -663,6 +663,29 @@ class RedisAdmin(object):
     def cluster_meet(self, ip, port):
         self.connection.cluster('MEET', ip, int(port))
 
+    def cluster_replicate(self, master_id):
+        self.connection.cluster('REPLICATE', master_id)
+
+    def cluster_nodes(self):
+        """The nodes this one knows: [{'id', 'address', 'role',
+        'master_id', 'has_slots'}], 'role' being master or replica as
+        they are now, which a failover changes.
+        """
+        nodes = []
+        for address, node in self.connection.cluster('NODES').items():
+            flags = node.get('flags') or ''
+            if isinstance(flags, (list, tuple)):
+                flags = ','.join(flags)
+            master_id = node.get('master_id')
+            nodes.append({
+                'id': node.get('node_id'),
+                'address': address.split('@')[0].rsplit(':', 1)[0],
+                'role': 'replica' if 'slave' in flags else 'master',
+                'master_id': None if master_id in (None, '-') else master_id,
+                'has_slots': bool(node.get('slots')),
+            })
+        return nodes
+
     def cluster_addslots(self, first_slot, last_slot):
         # ADDSLOTSRANGE is Redis 7; ADDSLOTS in groups works everywhere.
         slots = list(range(int(first_slot), int(last_slot) + 1))

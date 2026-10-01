@@ -71,9 +71,26 @@ class RedisClusterTasksTest(trove_testtools.TestCase):
     def _guest(self, instance):
         return self.guests.setdefault(instance.id, MagicMock(name=instance.id))
 
-    def _members(self, *ids):
-        self.find_all.return_value.all.return_value = [
-            MagicMock(id=i) for i in ids]
+    def _members(self, *ids, replicas=()):
+        """Members by id; replicas are (replica id, its master's id)."""
+        rows = [MagicMock(id=i, type='member', shard_id='s-' + i)
+                for i in ids]
+        rows += [MagicMock(id=r, type='replica', shard_id='s-' + m)
+                 for r, m in replicas]
+        self.find_all.return_value.all.return_value = rows
+
+    def _nodes(self, *nodes):
+        """CLUSTER NODES, as any node tells it: (id, role, master id, has
+        slots).
+        """
+        listed = [
+            {'id': 'node-' + i, 'address': 'ip-' + i, 'role': role,
+             'master_id': master and 'node-' + master, 'has_slots': slots}
+            for i, role, master, slots in nodes]
+        for i, _role, _master, _slots in nodes:
+            guest = self._guest(MagicMock(id=i))
+            guest.get_node_id.return_value = 'node-' + i
+            guest.get_cluster_nodes.return_value = listed
 
     def test_create(self):
         self._members('a', 'b', 'c')
@@ -116,7 +133,8 @@ class RedisClusterTasksTest(trove_testtools.TestCase):
 
     def test_shrink(self):
         self._members('a', 'b', 'c')
-        self._guest(MagicMock(id='c')).get_node_id.return_value = 'node-c'
+        self._nodes(('a', 'master', None, True), ('b', 'master', None, True),
+                    ('c', 'master', None, True))
         self.tasks.shrink_cluster(None, 'cluster', ['c'])
         head = self.guests['a']
         self.assertEqual(
@@ -130,6 +148,8 @@ class RedisClusterTasksTest(trove_testtools.TestCase):
 
     def test_shrink_failure_keeps_the_members_and_clears_the_task(self):
         self._members('a', 'b', 'c')
+        self._nodes(('a', 'master', None, True), ('b', 'master', None, True),
+                    ('c', 'master', None, True))
         self._guest(MagicMock(id='a')).cluster_rebalance.side_effect = (
             Exception('slots stuck'))
         self.tasks.shrink_cluster(None, 'cluster', ['c'])
@@ -146,3 +166,82 @@ class RedisClusterTasksTest(trove_testtools.TestCase):
         self.tasks.grow_cluster(None, 'cluster', ['d'])
         self.guests['d'].enable_root_with_password.assert_not_called()
         self.guests['d'].cluster_complete.assert_called_once_with()
+
+    def test_create_with_replicas(self):
+        # Masters a, b, c; d follows a, e follows b, f follows c.
+        self._members('a', 'b', 'c',
+                      replicas=(('d', 'a'), ('e', 'b'), ('f', 'c')))
+        for i in 'abcdef':
+            self._guest(MagicMock(id=i)).get_node_id.return_value = (
+                'node-' + i)
+        self.tasks.create_cluster(None, 'cluster')
+        # The masters alone share the slots.
+        self.assertEqual([call(0, 5461)],
+                         self.guests['a'].cluster_addslots.call_args_list)
+        for r in 'def':
+            self.guests[r].cluster_addslots.assert_not_called()
+        for r, m in (('d', 'a'), ('e', 'b'), ('f', 'c')):
+            self.guests[r].cluster_replicate.assert_called_once_with(
+                'node-' + m)
+        for guest in self.guests.values():
+            guest.cluster_wait.assert_called_once_with(6)
+            guest.cluster_complete.assert_called_once_with()
+
+    def test_grow_by_a_master_and_its_replica(self):
+        self._members('a', 'b', 'c', 'g',
+                      replicas=(('d', 'a'), ('e', 'b'), ('f', 'c'),
+                                ('h', 'g')))
+        head = self._guest(MagicMock(id='a'))
+        head.get_node_ip.return_value = ['10.0.0.1', '6379']
+        head.get_root_password.return_value = None
+        self._guest(MagicMock(id='g')).get_node_id.return_value = 'node-g'
+        order = MagicMock()
+        order.attach_mock(self._guest(MagicMock(id='h')).cluster_replicate,
+                          'replicate')
+        order.attach_mock(head.cluster_rebalance, 'rebalance')
+        self.tasks.grow_cluster(None, 'cluster', ['g', 'h'])
+        # The replica follows its master before the rebalance, or it would
+        # take slots as an empty master.
+        self.assertEqual(['replicate', 'rebalance'],
+                         [c[0] for c in order.mock_calls])
+        self.guests['h'].cluster_replicate.assert_called_once_with('node-g')
+        self.guests['g'].cluster_addslots.assert_not_called()
+        self.tasks.update_statuses_on_failure.assert_not_called()
+
+    def test_shrink_a_master_whose_replica_stays(self):
+        # b leaves; its replica e stays and follows the master with the
+        # fewest replicas, c.
+        self._members('a', 'b', 'c', replicas=(('d', 'a'), ('e', 'b')))
+        self._nodes(('a', 'master', None, True), ('b', 'master', None, True),
+                    ('c', 'master', None, True), ('d', 'replica', 'a', False),
+                    ('e', 'replica', 'b', False))
+        self.tasks.shrink_cluster(None, 'cluster', ['b'])
+        head = self.guests['a']
+        head.cluster_rebalance.assert_called_once_with(weights={'node-b': 0})
+        self.guests['e'].cluster_replicate.assert_called_once_with('node-c')
+        head.cluster_del_node.assert_called_once_with('node-b')
+        self.tasks.update_statuses_on_failure.assert_not_called()
+
+    def test_shrink_after_a_failover_goes_by_the_live_roles(self):
+        # b failed over to its replica e: removing e drains slots, b is a
+        # replica now and is removed first.
+        self._members('a', 'b', 'c', replicas=(('e', 'b'),))
+        self._nodes(('a', 'master', None, True), ('b', 'replica', 'e', False),
+                    ('c', 'master', None, True), ('e', 'master', None, True))
+        self.tasks.shrink_cluster(None, 'cluster', ['b', 'e'])
+        head = self.guests['a']
+        head.cluster_rebalance.assert_called_once_with(weights={'node-e': 0})
+        self.assertEqual([call('node-b'), call('node-e')],
+                         head.cluster_del_node.call_args_list)
+
+    def test_shrink_must_keep_a_master(self):
+        # The replica d would be all that is left.
+        self._members('a', 'b', replicas=(('d', 'a'),))
+        self._nodes(('a', 'master', None, True), ('b', 'master', None, True),
+                    ('d', 'replica', 'a', False))
+        self.tasks.shrink_cluster(None, 'cluster', ['b', 'a'])
+        self.guests['d'].get_cluster_nodes.assert_called_once_with()
+        self.delete.assert_not_called()
+        self.guests['d'].cluster_rebalance.assert_not_called()
+        self.tasks.update_statuses_on_failure.assert_called_once_with(
+            'cluster', status=inst_tasks.InstanceTasks.SHRINKING_ERROR)

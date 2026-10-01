@@ -255,6 +255,60 @@ class ClusterTest(trove_testtools.TestCase):
                           self.cluster_name + '-member-5'],
                          [c[0][1] for c in mock_ins_create.call_args_list])
 
+    def test_replica_groups(self):
+        self.assertEqual((0, 3), redis_api.replica_groups(3, None))
+        self.assertEqual((1, 3), redis_api.replica_groups(6, '1'))
+        self.assertEqual((2, 3), redis_api.replica_groups(9, 2))
+        for count, replicas in ((5, 1),    # not whole groups
+                                (4, 1),    # 2 masters cannot fail over
+                                (3, -1), (3, 'x')):
+            self.assertRaises(exception.BadRequest,
+                              redis_api.replica_groups, count, replicas)
+        # Growing a cluster of 3 masters by one group is fine.
+        self.assertEqual((1, 1), redis_api.replica_groups(
+            2, 1, existing_masters=3))
+
+    @patch.object(redis_api, 'CONF')
+    @patch.object(inst_models.Instance, 'create')
+    @patch.object(QUOTAS, 'check_quotas')
+    @patch.object(clients, 'create_nova_client')
+    @patch.object(DBInstance, 'find_all')
+    def test_create_instances_in_groups(self, mock_find_all, mock_client,
+                                        mock_check_quotas, mock_ins_create,
+                                        mock_conf):
+        mock_find_all.return_value.all.return_value = []
+        mock_conf.get = Mock(return_value=FakeOptGroup(volume_support=True))
+        mock_client.return_value.flavors = Mock()
+        db_info = Mock(id='cid')
+        db_info.name = 'rc'
+        redis_api.RedisCluster._create_instances(
+            Mock(), db_info, Mock(), Mock(),
+            [dict(i) for i in self.instances_w_volumes * 2], None, None,
+            replicas_per_master=1)
+        calls = mock_ins_create.call_args_list
+        self.assertEqual(['rc-member-1', 'rc-member-1-replica-1',
+                          'rc-member-2', 'rc-member-2-replica-1',
+                          'rc-member-3', 'rc-member-3-replica-1'],
+                         [c[0][1] for c in calls])
+        configs = [c[1]['cluster_config'] for c in calls]
+        self.assertEqual(['member', 'replica'] * 3,
+                         [c['instance_type'] for c in configs])
+        # A master and its replica share a shard_id, the groups do not.
+        shards = [c['shard_id'] for c in configs]
+        self.assertEqual(shards[0], shards[1])
+        self.assertEqual(3, len(set(shards)))
+
+    @patch.object(DBCluster, 'update')
+    @patch.object(DBInstance, 'find_all')
+    def test_grow_by_whole_groups(self, mock_find_all, mock_update):
+        rows = self._members('m1', 'm2', 'm3', 'r1', 'r2', 'r3')
+        for row in rows[3:]:
+            row.type = 'replica'
+        mock_find_all.return_value.all.return_value = rows
+        self.assertRaises(exception.BadRequest, self.cluster.grow,
+                          [dict(self.instances_w_volumes[0])])
+        mock_update.assert_not_called()
+
     @patch.object(task_api, 'load')
     @patch.object(DBInstance, 'find_all')
     @patch.object(DBCluster, 'update')

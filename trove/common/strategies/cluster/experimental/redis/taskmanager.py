@@ -60,6 +60,26 @@ class RedisClusterTasks(task_models.ClusterTasks):
             first += count
         return ranges
 
+    def _groups(self, context, db_instances):
+        """([master], [(replica, its master)]) as the instances were made:
+        a master and its replicas share a shard_id.
+        """
+        masters = {}
+        for db_instance in db_instances:
+            if db_instance.type != 'replica':
+                masters[db_instance.shard_id or db_instance.id] = (
+                    Instance.load(context, db_instance.id))
+        replicas = [(Instance.load(context, db_instance.id),
+                     masters[db_instance.shard_id])
+                    for db_instance in db_instances
+                    if db_instance.type == 'replica']
+        return list(masters.values()), replicas
+
+    def _replicate(self, replicas):
+        for replica, master in replicas:
+            self.get_guest(replica).cluster_replicate(
+                self.get_guest(master).get_node_id())
+
     def create_cluster(self, context, cluster_id):
         LOG.debug("Begin create_cluster for id: %s.", cluster_id)
 
@@ -74,9 +94,8 @@ class RedisClusterTasks(task_models.ClusterTasks):
                 return
 
             LOG.debug("All members ready, proceeding for cluster setup.")
-            instances = [Instance.load(context, instance_id) for instance_id
-                         in instance_ids]
-
+            masters, replicas = self._groups(context, db_instances)
+            instances = masters + [r for r, _master in replicas]
             guests = [self.get_guest(instance) for instance in instances]
             try:
                 # Every member gets the account the cluster is managed with.
@@ -85,18 +104,21 @@ class RedisClusterTasks(task_models.ClusterTasks):
                     guest.cluster_init(password)
 
                 # Connect nodes to the first node
-                cluster_head = instances[0]
+                cluster_head = masters[0]
                 cluster_head_port = '6379'
                 cluster_head_ip = self.get_ip(cluster_head)
                 for guest in guests[1:]:
                     guest.cluster_meet(cluster_head_ip, cluster_head_port)
 
-                for guest, (first_slot, last_slot) in zip(
-                        guests, self.slot_ranges(len(guests))):
-                    guest.cluster_addslots(first_slot, last_slot)
+                # The masters share the slots; a replica holds none.
+                for master, (first_slot, last_slot) in zip(
+                        masters, self.slot_ranges(len(masters))):
+                    self.get_guest(master).cluster_addslots(first_slot,
+                                                            last_slot)
 
                 for guest in guests:
                     guest.cluster_wait(len(guests))
+                self._replicate(replicas)
                 for guest in guests:
                     guest.cluster_complete()
             except Exception:
@@ -138,8 +160,10 @@ class RedisClusterTasks(task_models.ClusterTasks):
                 return
 
             LOG.debug("All members ready, proceeding for cluster setup.")
-            new_insts = [Instance.load(context, instance_id)
-                         for instance_id in new_instance_ids]
+            new_masters, new_replicas = self._groups(
+                context, [db_inst for db_inst in db_instances
+                          if db_inst.id in new_instance_ids])
+            new_insts = new_masters + [r for r, _master in new_replicas]
             # A list: the guests are gone through more than once (a map
             # was, and every loop after the first did nothing).
             new_guests = [self.get_guest(inst) for inst in new_insts]
@@ -164,8 +188,12 @@ class RedisClusterTasks(task_models.ClusterTasks):
             for guest in new_guests:
                 guest.cluster_wait(len(db_instances))
 
-            # The new members are empty masters: give them their share of
-            # the slots, with the keys in them.
+            # Replicas first: an empty node that is still a master would
+            # take slots in the rebalance.
+            self._replicate(new_replicas)
+
+            # The new masters are empty: give them their share of the
+            # slots, with the keys in them.
             head_guest.cluster_rebalance(use_empty_masters=True)
 
             for guest in new_guests:
@@ -204,16 +232,46 @@ class RedisClusterTasks(task_models.ClusterTasks):
                          if db_inst.id not in removal_ids]
             removed = [Instance.load(context, instance_id)
                        for instance_id in removal_ids]
+            guest_at = {self.get_ip(inst): self.get_guest(inst)
+                        for inst in remaining}
             head_guest = self.get_guest(remaining[0])
-            node_ids = [self.get_guest(inst).get_node_id()
-                        for inst in removed]
+            removed_ids = {self.get_guest(inst).get_node_id()
+                           for inst in removed}
 
-            # Move every slot, with its keys, off the leaving members,
-            # then take them out of the cluster and delete them.
-            head_guest.cluster_rebalance(
-                weights={node_id: 0 for node_id in node_ids})
-            for node_id in node_ids:
-                head_guest.cluster_del_node(node_id)
+            # The roles as they are: a failover swaps a master and its
+            # replica, which the instances' types do not follow.
+            nodes = head_guest.get_cluster_nodes()
+            kept_masters = [n for n in nodes if n['id'] not in removed_ids
+                            and n['role'] == 'master' and n['has_slots']]
+            if not kept_masters:
+                raise TroveError(_("Removing these members would leave no "
+                                   "master to hold the slots."))
+
+            # Move every slot, with its keys, off the leaving masters.
+            draining = {n['id']: 0 for n in nodes
+                        if n['id'] in removed_ids and n['role'] == 'master'
+                        and n['has_slots']}
+            if draining:
+                head_guest.cluster_rebalance(weights=draining)
+
+            # A replica that stays follows a master that stays: the one with
+            # the fewest replicas.
+            followers = {m['id']: 0 for m in kept_masters}
+            for n in nodes:
+                if n['master_id'] in followers and n['id'] not in removed_ids:
+                    followers[n['master_id']] += 1
+            for n in nodes:
+                if (n['id'] not in removed_ids and n['role'] == 'replica'
+                        and n['master_id'] in removed_ids):
+                    target = min(followers, key=followers.get)
+                    guest_at[n['address']].cluster_replicate(target)
+                    followers[target] += 1
+
+            # Then take them out of the cluster, replicas before the
+            # masters they follow, and delete them.
+            for n in sorted((n for n in nodes if n['id'] in removed_ids),
+                            key=lambda n: n['role'] != 'replica'):
+                head_guest.cluster_del_node(n['id'])
             for inst in removed:
                 inst.update_db(cluster_id=None)
                 Instance.delete(inst)
