@@ -21,8 +21,8 @@ from trove.common.i18n import _
 from trove.common import utils
 from trove.common import wsgi
 from trove.extensions.common import models
-from trove.extensions.common import views
 from trove.extensions.common.service import DefaultRootController
+from trove.extensions.common import views
 from trove.extensions.redis.models import RedisRoot
 from trove.extensions.redis.views import RedisRootCreatedView
 from trove.instance.models import DBInstance
