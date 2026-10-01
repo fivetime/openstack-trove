@@ -1,0 +1,3 @@
+# Db2 database manager parameters decided by Trove for an instance with
+# {{ flavor['ram'] }} MB of memory, as NAME=value. The guest agent sets them
+# on the instance; the image's defaults hold for the rest.

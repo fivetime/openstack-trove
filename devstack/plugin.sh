@@ -187,6 +187,8 @@ function configure_docker_images {
     iniset $TROVE_GUESTAGENT_CONF couchbase backup_docker_image ${TROVE_DATABASE_BACKUP_IMAGE_COUCHBASE}
     iniset $TROVE_GUESTAGENT_CONF vertica docker_image ${TROVE_DATABASE_IMAGE_VERTICA}
     iniset $TROVE_GUESTAGENT_CONF vertica backup_docker_image ${TROVE_DATABASE_BACKUP_IMAGE_VERTICA}
+    iniset $TROVE_GUESTAGENT_CONF db2 docker_image ${TROVE_DATABASE_IMAGE_DB2}
+    iniset $TROVE_GUESTAGENT_CONF db2 backup_docker_image ${TROVE_DATABASE_BACKUP_IMAGE_DB2}
 }
 
 function configure_cloudinit {
@@ -229,7 +231,7 @@ ${ETC_HOSTS_APPEND}
 EOF
 
     # NOTE(lxkong): Remove this when we support common cloud-init file for all datastores.
-    for datastore in "mysql" "mariadb" "postgresql" "keydb" "valkey" "redis" "percona" "pxc" "mongodb" "cassandra" "couchdb" "couchbase" "vertica"
+    for datastore in "mysql" "mariadb" "postgresql" "keydb" "valkey" "redis" "percona" "pxc" "mongodb" "cassandra" "couchdb" "couchbase" "vertica" "db2"
     do
         sudo cp ${common_cloudinit} /etc/trove/cloudinit/${datastore}.cloudinit
     done
@@ -736,6 +738,7 @@ function config_network_isolation {
         TROVE_DATABASE_IMAGE_COUCHDB="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/couchdb"
         TROVE_DATABASE_IMAGE_COUCHBASE="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/couchbase"
         TROVE_DATABASE_IMAGE_VERTICA="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/vertica"
+        TROVE_DATABASE_IMAGE_DB2="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db2"
         TROVE_DATABASE_BACKUP_IMAGE_MYSQL="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-mysql"
         TROVE_DATABASE_BACKUP_IMAGE_MARIADB="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-mariadb"
         TROVE_DATABASE_BACKUP_IMAGE_POSTGRESQL="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-postgresql"
@@ -749,6 +752,7 @@ function config_network_isolation {
         TROVE_DATABASE_BACKUP_IMAGE_COUCHDB="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-couchdb"
         TROVE_DATABASE_BACKUP_IMAGE_COUCHBASE="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-couchbase"
         TROVE_DATABASE_BACKUP_IMAGE_VERTICA="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-vertica"
+        TROVE_DATABASE_BACKUP_IMAGE_DB2="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-db2"
 
         configure_docker_images
     fi

@@ -40,7 +40,7 @@ cli_opts = [
         choices=['innobackupex', 'mariabackup', 'pg_basebackup', 'xtrabackup',
                  'keydbbackup', 'valkeybackup', 'redisbackup',
                  'mongodump', 'nodetoolsnapshot', 'couchdbbackup',
-                 'couchbasebackup', 'verticabackup']
+                 'couchbasebackup', 'verticabackup', 'db2backup']
     ),
     cfg.BoolOpt('backup'),
     cfg.StrOpt('swift-url'),
@@ -102,6 +102,7 @@ driver_mapping = {
     'couchdbbackup': 'backup.drivers.couchdb.CouchDBBackup',
     'couchbasebackup': 'backup.drivers.couchbase.CouchbaseBackup',
     'verticabackup': 'backup.drivers.vertica.VerticaBackup',
+    'db2backup': 'backup.drivers.db2.DB2Backup',
 }
 storage_mapping = {
     'swift': 'backup.storage.swift.SwiftStorage',

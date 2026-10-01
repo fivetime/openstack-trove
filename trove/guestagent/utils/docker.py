@@ -86,6 +86,8 @@ def _create_container_with_low_level_api(image: str, param: dict) -> None:
         host_config_kwargs["ipc_mode"] = param.get("ipc_mode")
     if param.get("ulimits"):
         host_config_kwargs["ulimits"] = param.get("ulimits")
+    if param.get("cap_add"):
+        host_config_kwargs["cap_add"] = param.get("cap_add")
     host_config = client.create_host_config(**host_config_kwargs)
 
     network_config_kwargs = dict()
@@ -127,7 +129,7 @@ def start_container(client, image, name="database",
                     restart_policy="unless-stopped",
                     volumes={}, ports={}, user="", network_mode="host",
                     environment={}, command="", healthcheck=None,
-                    privileged=False, ulimits=None):
+                    privileged=False, ulimits=None, cap_add=None):
     """Start a docker container.
 
     :param client: docker client obj.
@@ -145,6 +147,8 @@ def start_container(client, image, name="database",
     :param privileged: docker privileged
     :param ulimits: resource limits of the container, a list of
            docker.types.Ulimit; the daemon's defaults when not given
+    :param cap_add: capabilities to add, e.g. ["IPC_OWNER"]: narrower than
+           a privileged container
     :return:
     """
     try:
@@ -174,6 +178,8 @@ def start_container(client, image, name="database",
                   command=command)
     if ulimits:
         kwargs["ulimits"] = ulimits
+    if cap_add:
+        kwargs["cap_add"] = cap_add
     if network_mode == constants.DOCKER_HOST_NIC_MODE:
         create_network(client, constants.DOCKER_NETWORK_NAME)
         kwargs["network"] = constants.DOCKER_NETWORK_NAME

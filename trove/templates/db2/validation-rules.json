@@ -7,12 +7,6 @@
             "restart_required": true
         },
         {
-            "description": "Alternate encryption algorithm for incoming connections at server",
-            "type": "integer",
-            "name": "ALTERNATE_AUTH_ENC",
-            "restart_required": true
-        },
-        {
             "description": "Max number of concurrently active databases",
             "type": "integer",
             "name": "NUMDB",
@@ -23,12 +17,6 @@
             "type": "integer",
             "name": "FEDERATED",
             "restart_required": false
-        },
-        {
-            "description": "Transaction processor monitor name",
-            "type": "string",
-            "name": "TP_MON_NAME",
-            "restart_required": true
         },
         {
             "description": "Default charge-back account",
@@ -91,114 +79,6 @@
             "restart_required": false
         },
         {
-            "description": "SYSADM group name",
-            "type": "string",
-            "name": "SYSADM_GROUP",
-            "restart_required": true
-        },
-        {
-            "description": "SYSCTRL group name",
-            "type": "string",
-            "name": "SYSCTRL_GROUP",
-            "restart_required": true
-        },
-        {
-            "description": "SYSMAINT group name",
-            "type": "string",
-            "name": "SYSMAINT_GROUP",
-            "restart_required": true
-        },
-        {
-            "description": "SYSMON group name",
-            "type": "string",
-            "name": "SYSMAINT_GROUP",
-            "restart_required": true
-        },
-        {
-            "description": "Client Userid-Password Plugin",
-            "type": "string",
-            "name": "CLNT_PW_PLUGIN",
-            "restart_required": true
-        },
-        {
-            "description": "Client Kerberos Plugin",
-            "type": "string",
-            "name": "CLNT_KRB_PLUGIN",
-            "restart_required": true
-        },
-        {
-            "description": "Group Plugin",
-            "type": "string",
-            "name": "GROUP_PLUGIN",
-            "restart_required": true
-        },
-        {
-            "description": "GSS Plugin for Local Authorization",
-            "type": "string",
-            "name": "LOCAL_GSSPLUGIN",
-            "restart_required": true
-        },
-        {
-            "description": "Server Plugin Mode",
-            "type": "integer",
-            "name": "SRV_PLUGIN_MODE",
-            "restart_required": true
-        },
-        {
-            "description": "Server List of GSS Plugins",
-            "type": "string",
-            "name": "SRVCON_GSSPLUGIN_LIST",
-            "restart_required": true
-        },
-        {
-            "description": "Server Userid-Password Plugin",
-            "type": "string",
-            "name": "SRVCON_PW_PLUGIN",
-            "restart_required": true
-        },
-        {
-            "description": "Server Connection Authentication",
-            "type": "string",
-            "name": "SRVCON_AUTH",
-            "restart_required": true
-        },
-        {
-            "description": "Database manager authentication",
-            "type": "integer",
-            "name": "AUTHENTICATION",
-            "restart_required": true
-        },
-        {
-            "description": "Alternate authentication",
-            "type": "integer",
-            "name": "ALTERNATE_AUTH_ENC",
-            "restart_required": true
-        },
-        {
-            "description": "Cataloging allowed without authority",
-            "type": "integer",
-            "name": "CATALOG_NOAUTH",
-            "restart_required": false
-        },
-        {
-            "description": "Trust all clients",
-            "type": "integer",
-            "name": "TRUST_ALLCLNTS",
-            "restart_required": true
-        },
-        {
-            "description": "Trusted client authentication",
-            "type": "integer",
-            "name": "TRUST_CLNTAUTH",
-            "restart_required": true
-        },
-        {
-            "description": "Bypass federated authentication",
-            "type": "integer",
-            "name": "FED_NOAUTH",
-            "restart_required": false
-        },
-        {
             "description": "Database monitor heap size(4KB)",
             "type": "integer",
             "name": "MON_HEAP_SZ",
@@ -208,18 +88,6 @@
             "description": "Java Virtual Machine heap size(4KB)",
             "type": "integer",
             "name": "JAVA_HEAP_SZ",
-            "restart_required": true
-        },
-        {
-            "description": "Audit buffer size(4KB)",
-            "type": "integer",
-            "name": "AUDIT_BUF_SZ",
-            "restart_required": true
-        },
-        {
-            "description": "Agent stack size",
-            "type": "integer",
-            "name": "AGENT_STACK_SZ",
             "restart_required": true
         },
         {
@@ -319,12 +187,6 @@
             "restart_required": true
         },
         {
-            "description": "SPM name",
-            "type": "string",
-            "name": "SPM_NAME",
-            "restart_required": true
-        },
-        {
             "description": "SPM log size",
             "type": "integer",
             "name": "SPM_LOG_FILE_SZ",
@@ -334,60 +196,6 @@
             "description": "SPM resync agent limit",
             "type": "integer",
             "name": "SPM_MAX_RESYNC",
-            "restart_required": true
-        },
-        {
-            "description": "Discovery mode",
-            "type": "integer",
-            "name": "DISCOVER",
-            "restart_required": true
-        },
-        {
-            "description": "Discover server instance",
-            "type": "integer",
-            "name": "DISCOVER_INST",
-            "restart_required": false
-        },
-        {
-            "description": "SSL server keydb file",
-            "type": "string",
-            "name": "SSL_SVR_KEYDB",
-            "restart_required": true
-        },
-        {
-            "description": "SSL server stash file",
-            "type": "string",
-            "name": "SSL_SVR_STASH",
-            "restart_required": true
-        },
-        {
-            "description": "SSL server certificate label",
-            "type": "string",
-            "name": "SSL_SVR_LABEL",
-            "restart_required": true
-        },
-        {
-            "description": "SSL cipher specs",
-            "type": "string",
-            "name": "SSL_CIPHERSPECS",
-            "restart_required": true
-        },
-        {
-            "description": "SSL versions",
-            "type": "string",
-            "name": "SSL_VERSIONS",
-            "restart_required": true
-        },
-        {
-            "description": "SSL client keydb file",
-            "type": "string",
-            "name": "SSL_CLNT_KEYDB",
-            "restart_required": true
-        },
-        {
-            "description": "SSL client stash file",
-            "type": "string",
-            "name": "SSL_CLNT_STASH",
             "restart_required": true
         },
         {
@@ -442,12 +250,6 @@
             "description": "WLM dispatcher min. utilization (%)",
             "type": "integer",
             "name": "WLM_DISP_MIN_UTIL",
-            "restart_required": false
-        },
-        {
-            "description": "Communication buffer exit library list",
-            "type": "string",
-            "name": "COMM_EXIT_LIST",
             "restart_required": false
         }
     ]

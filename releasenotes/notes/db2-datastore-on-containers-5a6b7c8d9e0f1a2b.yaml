@@ -1,0 +1,32 @@
+---
+features:
+  - |
+    The ``db2`` datastore runs on the container based guest agent from
+    the Db2 Community Edition image named by ``[db2] docker_image``
+    (``icr.io/db2_community/db2`` by default), as single instances.
+    Databases are Db2 databases, users are users of the container's
+    system with the database administration authorities on each of their
+    databases, root is a user in the group of the instance owner, and the
+    database manager parameters are configuration parameters. Backups
+    are online backup images of every database, with their logs.
+  - |
+    The new module type ``db2_license`` installs a Db2 license: the
+    contents of the module are the license file IBM issues. One image
+    serves every edition; the instance keeps the license on its volume.
+  - |
+    ``start_container`` of the guest agent's docker helper takes
+    capabilities to add to a container, narrower than a privileged one.
+upgrade:
+  - |
+    The ``db2`` datastore replaces the former experimental implementation,
+    whose guest agent side was removed with the move to containers.
+    ``[db2] backup_strategy`` is now ``db2backup``, ``[db2] mount_point``
+    ``/var/lib/db2``, and the instance owner ``db2inst1`` (uid 1000).
+    ``db2_license`` is added to ``[DEFAULT] module_types``.
+security:
+  - |
+    The former ``db2`` implementation built shell commands out of user
+    names and passwords. Statements now go through files only the
+    instance owner reads and passwords through ``chpasswd`` from such a
+    file. Database names and user names are restricted to what Db2 and
+    the system accept.

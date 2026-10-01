@@ -507,7 +507,7 @@ common_opts = [
     cfg.StrOpt('module_aes_cbc_key', default='module_aes_cbc_key',
                help='OpenSSL aes_cbc key for module encryption.'),
     cfg.ListOpt('module_types', default=['ping', 'new_relic_license',
-                                         'vertica_license'],
+                                         'vertica_license', 'db2_license'],
                 help='A list of module types supported. A module type '
                      'corresponds to the name of a ModuleDriver.'),
     cfg.IntOpt('module_reapply_max_batch_size', default=50,
@@ -1416,9 +1416,9 @@ db2_group = cfg.OptGroup(
 db2_opts = [
     cfg.StrOpt('database_service_uname', default='database',
                help='The name of database service user.'),
-    cfg.StrOpt('database_service_uid',
+    cfg.StrOpt('database_service_uid', default='1000',
                help='The UID of database service user.'),
-    cfg.StrOpt('database_service_gid',
+    cfg.StrOpt('database_service_gid', default='1000',
                help='The GID of database service user.'),
     cfg.BoolOpt('icmp', default=False,
                 help='Whether to permit ICMP.',
@@ -1432,14 +1432,14 @@ db2_opts = [
                 help='List of UDP ports and/or port ranges to open '
                 'in the security group (only applicable '
                 'if trove_security_groups_support is True).'),
-    cfg.StrOpt('mount_point', default="/home/db2inst1/db2inst1",
+    cfg.StrOpt('mount_point', default="/var/lib/db2",
                help="Filesystem path for mounting "
                "volumes if volume support is enabled."),
     cfg.BoolOpt('volume_support', default=True,
                 help='Whether to provision a Cinder volume for datadir.'),
     cfg.StrOpt('device_path', default='/dev/vdb',
                help='Device path for volume if volume support is enabled.'),
-    cfg.StrOpt('backup_strategy', default='DB2OfflineBackup',
+    cfg.StrOpt('backup_strategy', default='db2backup',
                help='Default strategy to perform backups.'),
     cfg.StrOpt('replication_strategy', default=None,
                help='Default strategy for replication.'),
@@ -1448,7 +1448,10 @@ db2_opts = [
                 'service during instance-create. The generated password for '
                 'the root user is immediately returned in the response of '
                 "instance-create as the 'password' field."),
-    cfg.ListOpt('ignore_users', default=['PUBLIC', 'DB2INST1']),
+    cfg.ListOpt('ignore_users', default=['db2inst1', 'db2fenc1', 'db2root'],
+                help='Users to exclude when listing users.'),
+    cfg.ListOpt('ignore_dbs', default=[],
+                help='Databases to exclude when listing databases.'),
     cfg.StrOpt('root_controller',
                default='trove.extensions.common.service.DefaultRootController',
                help='Root controller implementation for db2.'),
@@ -1456,7 +1459,19 @@ db2_opts = [
                 item_type=types.String(ignore_case=True),
                 help='List of Guest Logs to expose for publishing.'),
     cfg.IntOpt('default_password_length', default=36,
-               help='Character length of generated passwords.')
+               help='Character length of generated passwords.'),
+    cfg.StrOpt(
+        'docker_image', default='icr.io/db2_community/db2',
+        help='Database docker image.'
+    ),
+    cfg.StrOpt(
+        'backup_docker_image',
+        sample_default='your-registry/your-repo/db-backup-db2',
+        help='The docker image used for backup and restore. Trove will uses'
+             'datastore version as the image tag, for example: '
+             'your-registry/your-repo/db-backup-db2:12.1.5.0 is used for '
+             'db2 datastore with version 12.1.5.0'
+    ),
 ]
 
 # MariaDB
