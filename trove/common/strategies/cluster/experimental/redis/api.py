@@ -246,13 +246,18 @@ class RedisCluster(models.Cluster):
                             self.ds, self.ds_version)
 
 
+# A replica is a member too: it serves reads, takes over its master, and
+# the tenant pays for it.
+MEMBER_TYPES = ['member', 'replica']
+
+
 class RedisClusterView(ClusterView):
 
     def build_instances(self):
-        return self._build_instances(['member'], ['member'])
+        return self._build_instances(MEMBER_TYPES, MEMBER_TYPES)
 
 
 class RedisMgmtClusterView(MgmtClusterView):
 
     def build_instances(self):
-        return self._build_instances(['member'], ['member'])
+        return self._build_instances(MEMBER_TYPES, MEMBER_TYPES)

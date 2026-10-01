@@ -255,6 +255,14 @@ class ClusterTest(trove_testtools.TestCase):
                           self.cluster_name + '-member-5'],
                          [c[0][1] for c in mock_ins_create.call_args_list])
 
+    def test_view_lists_the_replicas(self):
+        view = redis_api.RedisClusterView.__new__(redis_api.RedisClusterView)
+        with patch.object(redis_api.ClusterView, '_build_instances',
+                          return_value=([], [])) as build:
+            view.build_instances()
+        build.assert_called_once_with(['member', 'replica'],
+                                      ['member', 'replica'])
+
     def test_replica_groups(self):
         self.assertEqual((0, 3), redis_api.replica_groups(3, None))
         self.assertEqual((1, 3), redis_api.replica_groups(6, '1'))
