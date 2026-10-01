@@ -14,7 +14,7 @@
         },
         {
             "description": "Federated Database Support",
-            "type": "integer",
+            "type": "string",
             "name": "FEDERATED",
             "restart_required": false
         },
@@ -32,55 +32,55 @@
         },
         {
             "description": "Default database monitor switch for Buffer pool",
-            "type": "integer",
+            "type": "string",
             "name": "DFT_MON_BUFPOOL",
             "restart_required": false
         },
         {
             "description": "Default database monitor switch for Lock",
-            "type": "integer",
+            "type": "string",
             "name": "DFT_MON_LOCK",
             "restart_required": false
         },
         {
             "description": "Default database monitor switch for Sort",
-            "type": "integer",
+            "type": "string",
             "name": "DFT_MON_SORT",
             "restart_required": false
         },
         {
             "description": "Default database monitor switch for Statement",
-            "type": "integer",
+            "type": "string",
             "name": "DFT_MON_STMT",
             "restart_required": false
         },
         {
             "description": "Default database monitor switch for Table",
-            "type": "integer",
+            "type": "string",
             "name": "DFT_MON_TABLE",
             "restart_required": false
         },
         {
             "description": "Default database monitor switch for Timestamp",
-            "type": "integer",
+            "type": "string",
             "name": "DFT_MON_TIMESTAMP",
             "restart_required": false
         },
         {
             "description": "Default database monitor switch for Unit of work",
-            "type": "integer",
+            "type": "string",
             "name": "DFT_MON_UOW",
             "restart_required": false
         },
         {
             "description": "Monitor health of instance and databases",
-            "type": "integer",
+            "type": "string",
             "name": "HEALTH_MON",
             "restart_required": false
         },
         {
             "description": "Database monitor heap size(4KB)",
-            "type": "integer",
+            "type": "string",
             "name": "MON_HEAP_SZ",
             "restart_required": false
         },
@@ -98,7 +98,7 @@
         },
         {
             "description": "Directory cache support",
-            "type": "integer",
+            "type": "string",
             "name": "DIR_CACHE",
             "restart_required": true
         },
@@ -122,13 +122,13 @@
         },
         {
             "description": "Priority of agents",
-            "type": "integer",
+            "type": "string",
             "name": "AGENTPRI",
             "restart_required": true
         },
         {
             "description": "Agent pool size",
-            "type": "integer",
+            "type": "string",
             "name": "NUM_POOLAGENTS",
             "restart_required": false
         },
@@ -140,25 +140,25 @@
         },
         {
             "description": "Max number of coordinating agents",
-            "type": "integer",
+            "type": "string",
             "name": "MAX_COORDAGENTS",
             "restart_required": false
         },
         {
             "description": "Max number of client connections",
-            "type": "integer",
+            "type": "string",
             "name": "MAX_CONNECTIONS",
             "restart_required": false
         },
         {
             "description": "Keep fenced process",
-            "type": "integer",
+            "type": "string",
             "name": "KEEPFENCED",
             "restart_required": true
         },
         {
             "description": "Number of pooled fenced processes",
-            "type": "integer",
+            "type": "string",
             "name": "FENCED_POOL",
             "restart_required": false
         },
@@ -170,7 +170,7 @@
         },
         {
             "description": "Index re-creation time and redo index build",
-            "type": "integer",
+            "type": "string",
             "name": "INDEXREC",
             "restart_required": false
         },
@@ -200,25 +200,25 @@
         },
         {
             "description": "Maximum query degree of parallelism",
-            "type": "integer",
+            "type": "string",
             "name": "MAX_QUERYDEGREE",
             "restart_required": false
         },
         {
             "description": "Enable intra-partition parallelism",
-            "type": "integer",
+            "type": "string",
             "name": "INTRA_PARALLEL",
             "restart_required": true
         },
         {
             "description": "No. of int. communication buffers(4KB)",
-            "type": "integer",
+            "type": "string",
             "name": "FCM_NUM_BUFFERS",
             "restart_required": false
         },
         {
             "description": "No. of int. communication channels",
-            "type": "integer",
+            "type": "string",
             "name": "FCM_NUM_CHANNELS",
             "restart_required": false
         },
@@ -230,19 +230,19 @@
         },
         {
             "description": "WLM dispatcher enabled",
-            "type": "integer",
+            "type": "string",
             "name": "WLM_DISPATCHER",
             "restart_required": false
         },
         {
             "description": "WLM dispatcher concurrency",
-            "type": "integer",
+            "type": "string",
             "name": "WLM_DISP_CONCUR",
             "restart_required": false
         },
         {
             "description": "WLM dispatcher CPU shares enabled",
-            "type": "integer",
+            "type": "string",
             "name": "WLM_DISP_CPU_SHARES",
             "restart_required": false
         },

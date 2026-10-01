@@ -153,6 +153,17 @@ class TestDB2DatastoreWiring(trove_testtools.TestCase):
             self.assertNotIn(name, rules)
         self.assertIn('MAX_CONNECTIONS', rules)
 
+    def test_rule_types_take_the_values_the_server_takes(self):
+        # Switches take ON/OFF or YES/NO, and many sizes AUTOMATIC: as
+        # integers they refused the values the server takes.
+        with open('trove/templates/db2/validation-rules.json') as f:
+            rules = {rule['name']: rule
+                     for rule in json.load(f)['configuration-parameters']}
+        for name in ('DFT_MON_LOCK', 'HEALTH_MON', 'INTRA_PARALLEL',
+                     'MAX_CONNECTIONS', 'MON_HEAP_SZ'):
+            self.assertEqual('string', rules[name]['type'])
+        self.assertEqual('integer', rules['NUMDB']['type'])
+
 
 class TestDB2Models(trove_testtools.TestCase):
 
