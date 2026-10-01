@@ -261,6 +261,18 @@ class FreshInstanceTasksTest(BaseFreshInstanceTasksTest):
         snapshot_info = master.get_replication_snapshot.call_args[0][0]
         return snapshot_info, get_last
 
+    def test_secgroup_ports_of_a_single_instance_and_a_member(self):
+        tcp, udp = taskmanager_models.secgroup_ports('vertica')
+        self.assertEqual({5433}, {p for r in tcp for p in r})
+        self.assertEqual([], udp)
+        tcp, udp = taskmanager_models.secgroup_ports('vertica', 'c1')
+        self.assertEqual({5433, 5434, 4803, 5554, 8443},
+                         {p for r in tcp for p in r})
+        self.assertEqual({4803, 4804, 5433}, {p for r in udp for p in r})
+        # A datastore without cluster ports opens its own.
+        tcp, udp = taskmanager_models.secgroup_ports('mysql', 'c1')
+        self.assertEqual([[3306]], [list(r) for r in tcp])
+
     def test_replication_snapshot_incremental_when_supported(self):
         snapshot_info, get_last = self._replication_snapshot('mysql')
         get_last.assert_called_once()
@@ -1294,6 +1306,8 @@ class BuiltInstanceTasksAccessTest(trove_testtools.TestCase):
         self.instance_task.id = INST_ID
         self.instance_task.tenant_id = 'tenant-id'
         self.instance_task.datastore.name = 'mysql'
+        self.instance_task.datastore_version.manager = 'mysql'
+        self.instance_task.cluster_id = None
         self.instance_task.neutron_client.list_ports.return_value = {
             'ports': [{
                 'id': 'port-id',

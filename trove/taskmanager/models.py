@@ -74,6 +74,24 @@ LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
 
 
+def secgroup_ports(datastore_manager, cluster_id=None):
+    """The ports an instance's security group opens: those of the
+    datastore, and for a member of a cluster also the ones its nodes talk
+    to each other on, which a single instance keeps closed.
+    """
+    conf = CONF.get(datastore_manager)
+    tcp_ports = list(conf.tcp_ports)
+    udp_ports = list(conf.udp_ports)
+    if cluster_id:
+        for ports, option in ((tcp_ports, 'cluster_tcp_ports'),
+                              (udp_ports, 'cluster_udp_ports')):
+            try:
+                ports.extend(conf.get(option) or [])
+            except cfg.NoSuchOptError:
+                pass
+    return tcp_ports, udp_ports
+
+
 class NotifyMixin(object):
     """Notification Mixin
 
@@ -1199,8 +1217,8 @@ class FreshInstanceTasks(FreshInstance, NotifyMixin, ConfigurationMixin):
 
             if not allowed_cidrs:
                 allowed_cidrs = [CONF.trove_security_group_rule_cidr]
-            tcp_ports = CONF.get(datastore_manager).tcp_ports
-            udp_ports = CONF.get(datastore_manager).udp_ports
+            tcp_ports, udp_ports = secgroup_ports(datastore_manager,
+                                                  self.cluster_id)
 
             neutron.create_security_group_rule(
                 self.neutron_client, sg_id, 'tcp', tcp_ports, allowed_cidrs
@@ -1556,8 +1574,8 @@ class BuiltInstanceTasks(Instance, NotifyMixin, ConfigurationMixin):
                         sg['id'])
 
                     if new_allowed_cidrs:
-                        tcp_ports = CONF.get(self.datastore.name).tcp_ports
-                        udp_ports = CONF.get(self.datastore.name).udp_ports
+                        tcp_ports, udp_ports = secgroup_ports(
+                            self.datastore_version.manager, self.cluster_id)
 
                         neutron.create_security_group_rule(
                             self.neutron_client, sg['id'], 'tcp', tcp_ports,

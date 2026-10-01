@@ -74,7 +74,9 @@ class Manager(manager.Manager):
                    config_contents, root_password, overrides,
                    cluster_config, snapshot, ds_version=None):
         """Decide the admin and the settings, start the container, and
-        create the database on it or bring the restored one up.
+        create the database on it or bring the restored one up. A member
+        of a cluster stops at its agent: the taskmanager has the first
+        member create the database on all of them.
         """
         LOG.info('Preparing database config files')
         self.app.configuration_manager.reset_configuration(config_contents)
@@ -87,6 +89,8 @@ class Manager(manager.Manager):
             self.perform_restore(context, self.app.mount_point, backup_info)
 
         self.app.start_db(ds_version=ds_version)
+        if cluster_config:
+            return
         if backup_info:
             self.app.reset_admin_password()
         elif not self.app.database_exists():
@@ -95,6 +99,23 @@ class Manager(manager.Manager):
 
     def restart(self, context):
         self.app.restart()
+
+    ##########
+    # Cluster
+    ##########
+
+    def get_cluster_secrets(self, context):
+        return self.app.cluster_secrets()
+
+    def install_cluster_secrets(self, context, secrets):
+        self.app.install_cluster_secrets(secrets)
+
+    def install_cluster(self, context, members):
+        LOG.info("Creating the database on %s.", members)
+        return self.app.install_cluster(members)
+
+    def set_cluster_config(self, context, config):
+        self.app.set_cluster_config(config)
 
     def stop_db(self, context):
         self.app.stop_db()

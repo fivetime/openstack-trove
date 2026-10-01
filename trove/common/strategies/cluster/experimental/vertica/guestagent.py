@@ -41,53 +41,31 @@ class VerticaGuestAgentAPI(guest_api.API):
     appropriate in this file
     """
 
-    def get_public_keys(self, user):
-        LOG.debug("Getting public keys for user: %s.", user)
-        version = guest_api.API.API_BASE_VERSION
+    def get_cluster_secrets(self):
+        LOG.debug("Getting the cluster secrets of the first member.")
+        return self._call("get_cluster_secrets", self.agent_high_timeout,
+                          version=guest_api.API.API_BASE_VERSION)
 
-        return self._call("get_public_keys", self.agent_high_timeout,
-                          version=version, user=user)
-
-    def authorize_public_keys(self, user, public_keys):
-        LOG.debug("Authorizing public keys for user: %s.", user)
-        version = guest_api.API.API_BASE_VERSION
-
-        return self._call("authorize_public_keys",
+    def install_cluster_secrets(self, secrets):
+        LOG.debug("Installing the cluster secrets.")
+        return self._call("install_cluster_secrets",
                           self.agent_high_timeout,
-                          version=version,
-                          user=user, public_keys=public_keys)
+                          version=guest_api.API.API_BASE_VERSION,
+                          secrets=secrets)
 
     def install_cluster(self, members):
-        LOG.debug("Installing Vertica cluster on members: %s.", members)
-        version = guest_api.API.API_BASE_VERSION
-
+        LOG.debug("Creating the database on %s.", members)
         return self._call("install_cluster", CONF.cluster_usage_timeout,
-                          version=version, members=members)
+                          version=guest_api.API.API_BASE_VERSION,
+                          members=members)
 
-    def grow_cluster(self, members):
-        LOG.debug("Growing Vertica cluster with members: %s.", members)
-        version = guest_api.API.API_BASE_VERSION
-
-        return self._call("grow_cluster", CONF.cluster_usage_timeout,
-                          version=version, members=members)
-
-    def shrink_cluster(self, members):
-        LOG.debug("Shrinking Vertica cluster with members: %s.", members)
-        version = guest_api.API.API_BASE_VERSION
-
-        return self._call("shrink_cluster", CONF.cluster_usage_timeout,
-                          version=version, members=members)
-
-    def mark_design_ksafe(self, k):
-        LOG.debug("Setting vertica k-safety level to : %s.", k)
-        version = guest_api.API.API_BASE_VERSION
-
-        return self._call("mark_design_ksafe", CONF.cluster_usage_timeout,
-                          version=version, k=k)
+    def set_cluster_config(self, config):
+        LOG.debug("Setting the cluster configuration.")
+        return self._call("set_cluster_config", self.agent_high_timeout,
+                          version=guest_api.API.API_BASE_VERSION,
+                          config=config)
 
     def cluster_complete(self):
         LOG.debug("Notifying cluster install completion.")
-        version = guest_api.API.API_BASE_VERSION
-
         return self._call("cluster_complete", self.agent_high_timeout,
-                          version=version)
+                          version=guest_api.API.API_BASE_VERSION)

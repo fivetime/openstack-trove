@@ -82,8 +82,11 @@ class TestRedisDatastoreWiring(trove_testtools.TestCase):
                        'guestagent_strategy'):
             self.assertIsNotNone(
                 importutils.import_class(CONF.redis.get(option)))
-        # The members talk on the cluster bus, client port + 10000.
-        self.assertTrue(any(16379 in ports for ports in CONF.redis.tcp_ports))
+        # The members talk on the cluster bus, client port + 10000, which a
+        # single instance keeps closed.
+        self.assertTrue(any(16379 in ports
+                            for ports in CONF.redis.cluster_tcp_ports))
+        self.assertFalse(any(16379 in ports for ports in CONF.redis.tcp_ports))
         self.assertIn('clusteradmin', CONF.redis.ignore_users)
 
     def test_user_api_is_enabled(self):

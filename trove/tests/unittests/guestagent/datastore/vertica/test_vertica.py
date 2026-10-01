@@ -172,8 +172,16 @@ class TestVerticaDatastoreWiring(trove_testtools.TestCase):
         # single node are for the node itself.
         self.assertEqual({5433}, ports)
         self.assertEqual([], CONF.vertica.udp_ports)
-        # The guest side of clusters is not there.
-        self.assertFalse(CONF.vertica.cluster_support)
+        self.assertTrue(CONF.vertica.cluster_support)
+        # What the nodes of a cluster talk on is opened for its members.
+        self.assertEqual(
+            {5434, 4803, 5554, 8443},
+            {port for port_range in CONF.vertica.cluster_tcp_ports
+             for port in port_range})
+        self.assertEqual(
+            {4803, 4804, 5433},
+            {port for port_range in CONF.vertica.cluster_udp_ports
+             for port in port_range})
 
     def test_the_admins_and_the_system_schemas_are_hidden(self):
         self.assertEqual({'dbadmin', 'root'},
@@ -315,6 +323,51 @@ class TestVerticaApp(VerticaGuestTestCase):
             f.write(written['/etc/vertica-trove/start.sh'])
             f.flush()
             subprocess.check_call(['bash', '-n', f.name])
+
+    def test_start_script_stops_only_its_node_in_a_cluster(self):
+        # SHUTDOWN() stops the database on every node.
+        script = vertica_service.START_SCRIPT_CONTENT
+        stop = script[script.index('stop() {'):script.index('trap stop')]
+        self.assertIn('vcluster stop_node --stop-hosts "$HOST"', stop)
+        self.assertIn('SELECT SHUTDOWN()', stop)
+        self.assertLess(stop.index('stop_node'),
+                        stop.index('SELECT SHUTDOWN()'))
+        # Decided when stopping: a member gets its configuration after
+        # the container started.
+        self.assertIn('if [ "$(nodes)" -gt 1 ]', stop)
+
+    def test_cluster_secrets_are_the_certificates_and_the_password(self):
+        self.assertEqual(set(vertica_service.generate_certificates()),
+                         set(vertica_service.CERT_FILES))
+        app = self._app()
+        with mock.patch.object(vertica_service, 'operating_system') as os_:
+            os_.read_file.side_effect = lambda path, **kw: 'of ' + path
+            secrets = app.cluster_secrets()
+        self.assertEqual('of /etc/vertica-trove/admin.secret',
+                         secrets['password'])
+        self.assertEqual(
+            {name: 'of /etc/vertica-trove/certs/' + name
+             for name in vertica_service.CERT_FILES}, secrets['certs'])
+
+    @mock.patch.object(vertica_service, 'docker_util')
+    def test_installed_secrets_restart_the_agent(self, mock_docker):
+        app = self._app()
+        written = {}
+        with mock.patch.object(
+                vertica_service.VerticaApp, '_write_owned',
+                side_effect=lambda path, content, mode=None:
+                written.__setitem__(path, content)), \
+                mock.patch.object(vertica_service.VerticaApp,
+                                  'save_password') as save, \
+                mock.patch.object(vertica_service.VerticaApp, 'agent_is_up',
+                                  return_value=True):
+            app.install_cluster_secrets(
+                {'password': 'p', 'certs': {'rootca.pem': 'CA'}})
+        self.assertEqual('p', written['/etc/vertica-trove/admin.secret'])
+        self.assertEqual('CA', written['/etc/vertica-trove/certs/rootca.pem'])
+        save.assert_called_once_with('dbadmin', 'p')
+        mock_docker.restart_container.assert_called_once_with(
+            app.docker_client)
 
     def test_certificates_chain_to_the_authority(self):
         files = vertica_service.generate_certificates()
@@ -752,6 +805,30 @@ class TestVerticaManager(VerticaGuestTestCase):
                          [call[0] for call in order.mock_calls])
         manager.app.create_database.assert_not_called()
         self.assertEqual('/var/lib/vertica', mock_restore.call_args[0][1])
+
+    def test_a_cluster_member_stops_at_its_agent(self):
+        # The first member creates the database on all members later.
+        manager = self._manager()
+        self._prepare(manager, cluster_config={'id': 'c1',
+                                               'instance_type': 'member'})
+        manager.app.secure.assert_called_once_with()
+        manager.app.start_db.assert_called_once_with(
+            ds_version='25.4.0-0-minimal')
+        manager.app.create_database.assert_not_called()
+        manager.app.apply_settings.assert_not_called()
+
+    def test_cluster_calls_reach_the_app(self):
+        manager = self._manager()
+        manager.app.install_cluster.return_value = 'config'
+        self.assertEqual('config', manager.install_cluster(
+            None, ['10.0.0.1', '10.0.0.2', '10.0.0.3']))
+        manager.app.install_cluster.assert_called_once_with(
+            ['10.0.0.1', '10.0.0.2', '10.0.0.3'])
+        manager.install_cluster_secrets(None, {'password': 'p'})
+        manager.app.install_cluster_secrets.assert_called_once_with(
+            {'password': 'p'})
+        manager.set_cluster_config(None, 'config')
+        manager.app.set_cluster_config.assert_called_once_with('config')
 
     def test_a_license_module_is_kept_before_the_database_exists(self):
         manager = self._manager()

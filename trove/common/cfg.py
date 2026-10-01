@@ -755,11 +755,9 @@ def _build_redis_family_datastore_opts(
             help='Whether to permit ICMP.',
             deprecated_for_removal=True,
         ),
-        # 16379 is the cluster bus (client port + 10000), which cluster
-        # members talk to each other on.
         cfg.ListOpt(
             'tcp_ports',
-            default=["6379", "6380", "16379"],
+            default=["6379", "6380"],
             item_type=ListOfPortsType,
             help='List of TCP ports and/or port ranges to open '
                  'in the security group (only applicable '
@@ -772,6 +770,14 @@ def _build_redis_family_datastore_opts(
             help='List of UDP ports and/or port ranges to open '
                  'in the security group (only applicable '
                  'if trove_security_groups_support is True).',
+        ),
+        cfg.ListOpt(
+            'cluster_tcp_ports',
+            default=["16379"],
+            item_type=ListOfPortsType,
+            help='TCP ports the members of a cluster talk to each other on, '
+                 'opened in their security group as well: the cluster bus, '
+                 'client port + 10000.',
         ),
         cfg.StrOpt(
             'backup_strategy',
@@ -1364,7 +1370,18 @@ vertica_opts = [
                deprecated_for_removal=True),
     cfg.IntOpt('readahead_size', default=2048,
                help='Size(MB) to be set as readahead_size for data volume'),
-    cfg.BoolOpt('cluster_support', default=False,
+    # The nodes of a cluster talk on 5434 (data), 4803 (spread), 5554 (the
+    # node management agent vcluster calls) and 8443 (the HTTPS service);
+    # a single instance keeps them closed.
+    cfg.ListOpt('cluster_tcp_ports', item_type=ListOfPortsType,
+                default=["5434", "4803", "5554", "8443"],
+                help='TCP ports opened between the members of a cluster as '
+                     'well.'),
+    cfg.ListOpt('cluster_udp_ports', item_type=ListOfPortsType,
+                default=["4803", "4804", "5433"],
+                help='UDP ports opened between the members of a cluster as '
+                     'well (spread).'),
+    cfg.BoolOpt('cluster_support', default=True,
                 help='Enable clusters to be created and managed.'),
     cfg.IntOpt('cluster_member_count', default=3,
                help='Number of members in Vertica cluster.'),

@@ -66,6 +66,10 @@ LICENSE_FILE = 'license.key'
 # The certificates of the node management agent and of the HTTPS service
 # of the server, where the image looks for them.
 CERT_DIR = f'{HOST_CONF_DIR}/certs'
+# What generate_certificates writes there.
+CERT_FILES = ('rootca.pem', 'rootca.key', 'httpstls.json') + tuple(
+    f'{name}.{ext}' for name in ('vertica_https', 'nma_client', 'dbadmin')
+    for ext in ('pem', 'key'))
 CONTAINER_CERT_DIR = '/opt/vertica/config/https_certs'
 # The volume, as the container sees it.
 CONTAINER_DATA_DIR = '/data'
@@ -105,10 +109,24 @@ CONF=%(conf)s
 CFG=%(cluster_config)s
 TLS="%(tls)s"
 export USER=%(admin)s HOME=/tmp
+HOST=$(cat $CONF/%(host_file)s)
+# A node of a cluster: its configuration names more than one host. Asked
+# again when stopping: a member gets the configuration after it started.
+nodes() {
+    if [ -f "$CFG" ]; then grep -c '^ *address:' "$CFG"; else echo 0; fi
+}
+NODES=$(nodes)
 /opt/vertica/bin/node_management_agent &
 NMA=$!
+running() { ps -eo args | grep -q '^/opt/vertica/bin/vertica '; }
 stop() {
-    vsql -U %(admin)s -Atc "SELECT SHUTDOWN()"
+    if [ "$(nodes)" -gt 1 ]; then
+        # SHUTDOWN() stops the whole database, on every node.
+        vcluster stop_node --stop-hosts "$HOST" \\
+            --password-file $CONF/%(secret)s $TLS --config "$CFG"
+    else
+        vsql -U %(admin)s -Atc "SELECT SHUTDOWN()"
+    fi
     kill $NMA
     wait $NMA
 }
@@ -117,8 +135,27 @@ for i in $(seq 1 60); do
     curl -sk -o /dev/null https://127.0.0.1:%(nma_port)d/v1/health && break
     sleep 1
 done
-if [ -f "$CFG" ]; then
-    HOST=$(cat $CONF/%(host_file)s)
+if [ "$NODES" -gt 1 ]; then
+    # Start the database if no node runs it; when another one does, the
+    # start says it still runs and this node joins it. Every node of a
+    # cluster that restarts as a whole tries to start it at once: one
+    # wins, the others join or try again.
+    (
+        for try in $(seq 1 30); do
+            running && exit 0
+            out=$(vcluster start_db --db-name %(db)s \\
+                --password-file $CONF/%(secret)s --timeout 300 $TLS \\
+                --config "$CFG" 2>&1)
+            if echo "$out" | grep -q 'still running'; then
+                vcluster start_node --start-hosts "$HOST" \\
+                    --password-file $CONF/%(secret)s $TLS --config "$CFG"
+            fi
+            # The node starts after vcluster returns.
+            for i in $(seq 1 60); do running && exit 0; sleep 2; done
+            sleep $((RANDOM %% 20 + 5))
+        done
+    ) &
+elif [ -f "$CFG" ]; then
     OLD=$(sed -n 's/^ *address: *//p' "$CFG" | head -1)
     if [ -n "$OLD" ] && [ "$OLD" != "$HOST" ]; then
         # The data comes from a node with another address.
@@ -426,8 +463,9 @@ class VerticaApp(service.BaseDbApp):
         ):
             raise exception.TroveError("Failed to start database service")
 
-    def create_database(self):
-        """Create the database on the node, as the one node of it.
+    def create_database(self, hosts=None):
+        """Create the database on the node, as the one node of it, or on
+        the nodes of a cluster, whose agents trust the same authority.
 
         From 26.1 the server refuses the license of the Community Edition
         the image has: the database needs one installed with the instance.
@@ -435,7 +473,7 @@ class VerticaApp(service.BaseDbApp):
         utils.poll_until(self.agent_is_up, sleep_time=2,
                          time_out=CONF.state_change_wait_time)
         args = ['create_db', '--db-name', DB_NAME,
-                '--hosts', self.address,
+                '--hosts', ','.join(hosts or [self.address]),
                 '--catalog-path', CONTAINER_DATA_DIR,
                 '--data-path', CONTAINER_DATA_DIR,
                 '--password-file', f'{CONTAINER_CONF_DIR}/{ADMIN_SECRET}']
@@ -461,6 +499,51 @@ class VerticaApp(service.BaseDbApp):
                 quote_identifier(ADMIN_USER)),
         ], password=self.admin_password)
         self._wait_until_healthy(update_db=False)
+
+    ##########
+    # Cluster
+    ##########
+
+    def cluster_secrets(self):
+        """What every member of a cluster must share with this one: the
+        password of the admin, and the authority its agent trusts with the
+        certificates it signed. vcluster talks to the agents of all nodes
+        with one certificate.
+        """
+        certs = {name: operating_system.read_file(f'{CERT_DIR}/{name}',
+                                                  as_root=True)
+                 for name in CERT_FILES}
+        return {'password': self.admin_password, 'certs': certs}
+
+    def install_cluster_secrets(self, secrets):
+        """Take the secrets of the first member, and restart the container
+        so that its agent trusts the new authority.
+        """
+        LOG.info('Taking the cluster secrets.')
+        self._write_owned(self._conf_path(ADMIN_SECRET), secrets['password'])
+        self.save_password(ADMIN_USER, secrets['password'])
+        for name, content in secrets['certs'].items():
+            self._write_owned(f'{CERT_DIR}/{name}', content)
+        docker_util.restart_container(self.docker_client)
+        utils.poll_until(self.agent_is_up, sleep_time=2,
+                         time_out=CONF.state_change_wait_time)
+
+    def install_cluster(self, members):
+        """Create the database on all members, from this one, and return
+        the configuration vcluster wrote, which the others need to start
+        and stop their node.
+        """
+        self.create_database(hosts=members)
+        self.apply_settings()
+        return operating_system.read_file(
+            f'{self.mount_point}/vertica_cluster.yaml', as_root=True)
+
+    def set_cluster_config(self, content):
+        path = f'{self.mount_point}/vertica_cluster.yaml'
+        operating_system.write_file(path, content, as_root=True)
+        operating_system.chown(
+            path, self.database_service_uid, self.database_service_gid,
+            as_root=True)
 
     def reset_admin_password(self):
         """Give the admin of a restored database the password of this

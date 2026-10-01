@@ -18,7 +18,7 @@ from trove.cluster.tasks import ClusterTasks
 from trove.cluster.views import ClusterView
 from trove.common import cfg
 from trove.common import exception
-from trove.common import server_group as srv_grp
+from trove.common.i18n import _
 from trove.common.strategies.cluster import base
 from trove.common import utils
 from trove.extensions.mgmt.clusters.views import MgmtClusterView
@@ -70,7 +70,7 @@ class VerticaCluster(models.Cluster):
     @staticmethod
     def _create_instances(context, db_info, datastore, datastore_version,
                           instances, extended_properties, locality,
-                          new_cluster=True):
+                          new_cluster=True, image_id=None):
         vertica_conf = CONF.get(datastore_version.manager)
         num_instances = len(instances)
 
@@ -122,7 +122,7 @@ class VerticaCluster(models.Cluster):
             minstances.append(
                 inst_models.Instance.create(
                     context, instance_name, flavor_id,
-                    datastore_version.image_id, [], [], datastore,
+                    datastore_version.image_id or image_id, [], [], datastore,
                     datastore_version, volume_size, None,
                     nics=nics[i], availability_zone=azs[i],
                     configuration_id=None, cluster_config=member_config,
@@ -156,7 +156,7 @@ class VerticaCluster(models.Cluster):
 
         cls._create_instances(context, db_info, datastore, datastore_version,
                               instances, extended_properties, locality,
-                              new_cluster=True)
+                              new_cluster=True, image_id=image_id)
         # Calling taskmanager to further proceed for cluster-configuration
         task_api.load(context, datastore_version.manager).create_cluster(
             db_info.id)
@@ -177,63 +177,14 @@ class VerticaCluster(models.Cluster):
         else:
             return 2
 
-    def grow(self, instances):
-        LOG.debug("Growing cluster.")
-
-        self.validate_cluster_available()
-
-        context = self.context
-        db_info = self.db_info
-        datastore = self.ds
-        datastore_version = self.ds_version
-
-        db_info.update(task_status=ClusterTasks.GROWING_CLUSTER)
-
-        locality = srv_grp.ServerGroup.convert_to_hint(self.server_group)
-        new_instances = self._create_instances(context, db_info, datastore,
-                                               datastore_version, instances,
-                                               None, locality,
-                                               new_cluster=False)
-
-        task_api.load(context, datastore_version.manager).grow_cluster(
-            db_info.id, [instance.id for instance in new_instances])
-
-        return VerticaCluster(context, db_info, datastore, datastore_version)
+    # Not yet with vcluster; see the taskmanager strategy.
+    def grow(self, instances, image_id=None):
+        raise exception.BadRequest(_(
+            "Growing a Vertica cluster is not supported."))
 
     def shrink(self, instance_ids):
-        self.validate_cluster_available()
-
-        context = self.context
-        db_info = self.db_info
-        datastore_version = self.ds_version
-
-        for db_instance in self.db_instances:
-            if db_instance.type == 'master':
-                if db_instance.id in instance_ids:
-                    raise exception.ClusterShrinkInstanceInUse(
-                        id=db_instance.id,
-                        reason="Cannot remove master node."
-                    )
-
-        all_instance_ids = [db_instance.id for db_instance
-                            in self.db_instances]
-
-        left_instances = [instance_id for instance_id
-                          in all_instance_ids
-                          if instance_id not in instance_ids]
-
-        k = self.k_safety(len(left_instances))
-
-        vertica_conf = CONF.get(datastore_version.manager)
-        if k < vertica_conf.min_ksafety:
-            raise exception.ClusterNumInstancesBelowSafetyThreshold()
-
-        db_info.update(task_status=ClusterTasks.SHRINKING_CLUSTER)
-
-        task_api.load(context, datastore_version.manager).shrink_cluster(
-            self.db_info.id, instance_ids)
-        return VerticaCluster(self.context, db_info,
-                              self.ds, self.ds_version)
+        raise exception.BadRequest(_(
+            "Shrinking a Vertica cluster is not supported."))
 
 
 class VerticaClusterView(ClusterView):
