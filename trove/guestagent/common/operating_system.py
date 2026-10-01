@@ -24,11 +24,14 @@ import stat
 import tempfile
 
 from oslo_concurrency.processutils import UnknownArgumentError
+from oslo_log import log as logging
 
 from trove.common import exception
 from trove.common.i18n import _
 from trove.common.stream_codecs import IdentityCodec
 from trove.common import utils
+
+LOG = logging.getLogger(__name__)
 
 REDHAT = 'redhat'
 DEBIAN = 'debian'
@@ -889,7 +892,14 @@ def create_user(user_name, user_id, group_name=None, group_id=None):
         execute_shell_cmd('useradd', [], '--uid', user_id, '--gid', group_id,
                           '-M', user_name, as_root=True)
     except exception.ProcessExecutionError as err:
-        if 'already exists' not in err.stderr:
+        if 'is not unique' in err.stderr:
+            # The id the database image runs as is a user of the guest
+            # already, as uid 1000 is. Only the id matters: the container
+            # runs as it and the files belong to it, under whatever name
+            # the guest has for it.
+            LOG.warning('User id %s is already a user of the guest; the '
+                        'database service runs as it.', user_id)
+        elif 'already exists' not in err.stderr:
             raise exception.UnprocessableEntity(
                 'Failed to add user %s, error: %s' % (user_name, err.stderr)
             )
