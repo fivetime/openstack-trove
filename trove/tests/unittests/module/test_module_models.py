@@ -51,6 +51,29 @@ class CreateModuleTest(trove_testtools.TestCase):
         models.Module.update(self.context, new_module, module, False)
         module.delete()
 
+    def test_load_lists_modules_for_admin_and_tenant(self):
+        # An admin used to get UnboundLocalError (HTTP 500) here: the
+        # admin branch queried the modules and never returned them.
+        mine = models.Module.create(
+            self.context, 'mine', self.module_type, self.contents,
+            'desc', 'tenant_a', None, None, False, True, False,
+            False, 5, True)
+        theirs = models.Module.create(
+            self.context, 'theirs', self.module_type, self.contents,
+            'desc', 'tenant_b', None, None, False, True, False,
+            False, 5, True)
+        self.addCleanup(mine.delete)
+        self.addCleanup(theirs.delete)
+
+        admin = Mock(is_admin=True, project_id='tenant_a')
+        names = {m.name for m in models.Modules.load(admin)}
+        self.assertTrue({'mine', 'theirs'} <= names)
+
+        tenant = Mock(is_admin=False, project_id='tenant_a')
+        names = {m.name for m in models.Modules.load(tenant)}
+        self.assertIn('mine', names)
+        self.assertNotIn('theirs', names)
+
     def test_validate_action(self):
         # tenant_id, auto_apply, visible, priority_apply, full_access,
         # valid, exception, works_for_admin

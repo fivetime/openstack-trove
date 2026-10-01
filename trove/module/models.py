@@ -59,6 +59,7 @@ class Modules(object):
             db_info = DBModule.find_all(**query_opts)
             if db_info.count() == 0:
                 LOG.debug("No modules found for admin user")
+            modules = db_info.all()
         else:
             # build a query manually, since we need current tenant
             # plus the 'all' tenant ones
