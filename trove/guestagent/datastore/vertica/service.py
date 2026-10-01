@@ -285,7 +285,8 @@ class VerticaApp(service.BaseDbApp):
 
     @property
     def admin_password(self):
-        return self.get_auth_password()
+        # save_password keeps it under the name of the user.
+        return self.get_auth_password(file=f'{ADMIN_USER}.cnf')
 
     def write_license(self, content):
         """Keep a license where the server reads it. A license file is

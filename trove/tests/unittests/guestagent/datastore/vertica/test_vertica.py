@@ -277,6 +277,25 @@ class TestVerticaApp(VerticaGuestTestCase):
         self.assertEqual('Acme\n10TB\n',
                          written['/etc/vertica-trove/license.key'])
 
+    def test_the_admin_password_is_read_where_it_is_saved(self):
+        app = self._app()
+        with mock.patch.object(base_service.BaseDbApp, 'save_password'), \
+                mock.patch.object(base_service.guestagent_utils,
+                                  'get_conf_dir', return_value='/c'), \
+                mock.patch.object(base_service.operating_system,
+                                  'read_file',
+                                  return_value={'client': {'password': 'pw'}}
+                                  ) as read_file:
+            self.assertEqual('pw', app.admin_password)
+        self.assertEqual('/c/dbadmin.cnf', read_file.call_args[0][0])
+        # Where save_password writes it.
+        with mock.patch.object(base_service.guestagent_utils,
+                               'get_conf_dir', return_value='/c'), \
+                mock.patch.object(base_service.operating_system,
+                                  'write_file') as write_file:
+            base_service.BaseDbApp.save_password('dbadmin', 'pw')
+        self.assertEqual('/c/dbadmin.cnf', write_file.call_args[0][0])
+
     def test_start_script_is_valid_bash(self):
         app = self._app()
         written = {}
