@@ -99,10 +99,13 @@ class RedisClusterTasksTest(trove_testtools.TestCase):
         self._guest(MagicMock(id='a')).get_node_ip.return_value = [
             '10.0.0.1', '6379']
         self.guests['a'].get_cluster_password.return_value = 'pw'
+        self.guests['a'].get_root_password.return_value = 'rootpw'
         self.tasks.grow_cluster(None, 'cluster', ['d', 'e'])
         for new in ('d', 'e'):
             guest = self.guests[new]
             guest.cluster_init.assert_called_once_with('pw')
+            # The root user the cluster has, for clients sent here.
+            guest.enable_root_with_password.assert_called_once_with('rootpw')
             guest.cluster_meet.assert_called_once_with('10.0.0.1', '6379')
             guest.cluster_wait.assert_called_once_with(5)
             guest.cluster_complete.assert_called_once_with()
@@ -134,3 +137,12 @@ class RedisClusterTasksTest(trove_testtools.TestCase):
         self.tasks.update_statuses_on_failure.assert_called_once_with(
             'cluster', status=inst_tasks.InstanceTasks.SHRINKING_ERROR)
         self.tasks.reset_task.assert_called_once_with()
+
+    def test_grow_without_root(self):
+        self._members('a', 'b', 'c', 'd')
+        self._guest(MagicMock(id='a')).get_node_ip.return_value = [
+            '10.0.0.1', '6379']
+        self.guests['a'].get_root_password.return_value = None
+        self.tasks.grow_cluster(None, 'cluster', ['d'])
+        self.guests['d'].enable_root_with_password.assert_not_called()
+        self.guests['d'].cluster_complete.assert_called_once_with()

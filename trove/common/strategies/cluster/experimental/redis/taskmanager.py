@@ -148,6 +148,13 @@ class RedisClusterTasks(task_models.ClusterTasks):
             for guest in new_guests:
                 guest.cluster_init(password)
 
+            # A client is sent to the new members too: they need the root
+            # user the others have, if root is enabled.
+            root_password = head_guest.get_root_password()
+            if root_password:
+                for guest in new_guests:
+                    guest.enable_root_with_password(root_password)
+
             # Connect nodes to the cluster head
             for guest in new_guests:
                 guest.cluster_meet(cluster_head_ip, cluster_head_port)

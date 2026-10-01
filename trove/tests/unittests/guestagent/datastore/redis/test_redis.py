@@ -166,6 +166,15 @@ class TestRedisCluster(trove_testtools.TestCase):
             'rebalance', '--cluster-weight', 'n1=0',
             '--cluster-weight', 'n2=0')
 
+    def test_root_password_only_when_enabled(self):
+        self.manager.adm.is_root_enabled.return_value = False
+        self.assertIsNone(self.manager.get_root_password(None))
+        self.manager.adm.is_root_enabled.return_value = True
+        self.manager.app.get_auth_password.return_value = 'rootpw'
+        self.assertEqual('rootpw', self.manager.get_root_password(None))
+        self.manager.app.get_auth_password.assert_called_once_with(
+            file='root.cnf')
+
     def test_del_node(self):
         self.manager.cluster_del_node(None, 'n1')
         self.manager.app.run_cluster_cli.assert_called_once_with(

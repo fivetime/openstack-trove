@@ -153,6 +153,14 @@ class RedisManager(manager.Manager):
         root = self.adm.enable_root(root_password)
         return root
 
+    def get_root_password(self, context):
+        """The password of the root user, if it is enabled: a member that
+        joins a cluster gets the one the others have.
+        """
+        if not self.adm.is_root_enabled():
+            return None
+        return self.app.get_auth_password(file='root.cnf')
+
     def apply_overrides(self, context, overrides):
         """Reload config."""
         LOG.info("Reloading database config.")
