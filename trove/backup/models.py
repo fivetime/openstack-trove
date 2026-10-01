@@ -123,6 +123,13 @@ class Backup(object):
             ds = instance_model.datastore
             ds_version = instance_model.datastore_version
 
+            if ((parent_id or incremental) and
+                    not utils.supports_incremental_backup(
+                        ds_version.manager)):
+                raise exception.BackupCreationError(
+                    _("Backups of %s cannot be incremental; create a full "
+                      "backup instead.") % ds.name)
+
             if parent_id:
                 # Look up the parent info or fail early if not found or if
                 # the user does not have access to the parent.

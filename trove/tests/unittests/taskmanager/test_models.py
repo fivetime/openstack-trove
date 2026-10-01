@@ -234,6 +234,48 @@ class BaseFreshInstanceTasksTest(trove_testtools.TestCase):
 
 class FreshInstanceTasksTest(BaseFreshInstanceTasksTest):
 
+    def _replication_snapshot(self, manager):
+        """Ask for a replica's snapshot of a source with a backup already;
+        return what the source was asked to snapshot.
+        """
+        master = MagicMock()
+        master.backup_required_for_replication.return_value = True
+        master.datastore_version.manager = manager
+        master.get_replication_snapshot.return_value = {'dataset': {}}
+        last = MagicMock(id='last-backup-id')
+        with patch.object(taskmanager_models.BuiltInstanceTasks, 'load',
+                          return_value=master), \
+                patch.object(taskmanager_models.Backup,
+                             'get_last_completed',
+                             return_value=last) as get_last, \
+                patch.object(taskmanager_models.Backup, 'get_by_id',
+                             return_value=MagicMock(location='loc',
+                                                    checksum='sum')), \
+                patch.object(taskmanager_models.DBBackup, 'create',
+                             return_value=MagicMock(id='snapshot-id')), \
+                patch.object(taskmanager_models.clients, 'swift_client'), \
+                patch.object(self.freshinstancetasks,
+                             '_render_replica_config'):
+            self.freshinstancetasks.get_replication_master_snapshot(
+                self.freshinstancetasks.context, 'source-id', MagicMock())
+        snapshot_info = master.get_replication_snapshot.call_args[0][0]
+        return snapshot_info, get_last
+
+    def test_replication_snapshot_incremental_when_supported(self):
+        snapshot_info, get_last = self._replication_snapshot('mysql')
+        get_last.assert_called_once()
+        self.assertEqual('last-backup-id', snapshot_info['parent_id'])
+        self.assertIn('parent', snapshot_info)
+
+    def test_replication_snapshot_full_without_incremental_driver(self):
+        # A Valkey or KeyDB source with a backup already: the snapshot
+        # used to be incremental, and the backup container failed on it.
+        for manager in ('redis', 'valkey', 'keydb'):
+            snapshot_info, get_last = self._replication_snapshot(manager)
+            get_last.assert_not_called()
+            self.assertIsNone(snapshot_info['parent_id'], manager)
+            self.assertNotIn('parent', snapshot_info, manager)
+
     def test_create_instance_userdata(self):
         cloudinit_location = os.path.dirname(self.cloudinit)
         datastore_manager = os.path.splitext(os.path.basename(self.

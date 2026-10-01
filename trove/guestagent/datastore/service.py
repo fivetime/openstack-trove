@@ -25,6 +25,7 @@ from trove.common import context as trove_context
 from trove.common import exception
 from trove.common.i18n import _
 from trove.common import stream_codecs
+from trove.common import utils
 from trove.conductor import api as conductor_api
 from trove.guestagent.common import guestagent_utils
 from trove.guestagent.common import operating_system
@@ -498,7 +499,13 @@ class BaseDbApp(object):
                 "Missing swift_url in backup metadata.")
         incremental = ''
         backup_type = 'full'
-        if backup_info.get('parent'):
+        if backup_info.get('parent') and not utils.supports_incremental_backup(
+                None):
+            # The backup image has no incremental driver for this strategy;
+            # a control plane from before the API checked would still ask.
+            LOG.warning("Backups with the %s strategy cannot be incremental, "
+                        "taking a full backup instead.", backup_driver)
+        elif backup_info.get('parent'):
             incremental = (
                 f'--incremental '
                 f'--parent-location={backup_info["parent"]["location"]} '

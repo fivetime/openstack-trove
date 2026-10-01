@@ -112,6 +112,7 @@ class BackupCreateTest(trove_testtools.TestCase):
                 return_value=None)
             instance.datastore_version = MagicMock()
             instance.datastore_version.id = 'datastore-id-999'
+            instance.datastore_version.manager = 'mysql'
             instance.cluster_id = None
             with patch.multiple(models.Backup,
                                 validate_can_perform_action=DEFAULT,
@@ -151,6 +152,7 @@ class BackupCreateTest(trove_testtools.TestCase):
 
     def test_create_incremental_not_found(self):
         instance = MagicMock()
+        instance.datastore_version.manager = 'mysql'
         with patch.object(instance_models.BuiltInstance, 'load',
                           return_value=instance):
             instance.validate_can_perform_action = MagicMock(
@@ -164,6 +166,24 @@ class BackupCreateTest(trove_testtools.TestCase):
                                       self.context, self.instance_id,
                                       BACKUP_NAME, BACKUP_DESC,
                                       parent_id='BAD')
+
+    def test_create_incremental_refused_without_incremental_driver(self):
+        # The Redis family's backup drivers only take full backups; the
+        # backup container used to fail on the missing driver instead.
+        for manager in ('redis', 'valkey', 'keydb'):
+            instance = MagicMock(cluster_id=None)
+            instance.datastore_version.manager = manager
+            with patch.object(instance_models.BuiltInstance, 'load',
+                              return_value=instance), \
+                    patch.multiple(models.Backup,
+                                   validate_can_perform_action=DEFAULT,
+                                   verify_swift_auth_token=DEFAULT):
+                for kwargs in ({'incremental': True},
+                               {'parent_id': 'parent_uuid'}):
+                    self.assertRaises(
+                        exception.BackupCreationError, models.Backup.create,
+                        self.context, self.instance_id, BACKUP_NAME,
+                        BACKUP_DESC, **kwargs)
 
     def test_create_instance_not_active(self):
         instance = MagicMock()

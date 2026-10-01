@@ -209,3 +209,33 @@ class TestUtils(trove_testtools.TestCase):
             "Invalid locality 'invalid-locality'",
             utils.validate_locality,
             'invalid-locality')
+
+
+class TestSupportsIncrementalBackup(trove_testtools.TestCase):
+
+    def test_by_backup_strategy(self):
+        for manager in ('mysql', 'mariadb', 'percona', 'pxc', 'postgresql'):
+            self.assertTrue(utils.supports_incremental_backup(manager),
+                            manager)
+        for manager in ('redis', 'valkey', 'keydb', 'mongodb', 'cassandra',
+                        'couchdb', 'couchbase', 'vertica', 'db2',
+                        'no-such-datastore'):
+            self.assertFalse(utils.supports_incremental_backup(manager),
+                             manager)
+
+    def test_matches_the_backup_image(self):
+        # The list must name exactly the strategies backup/main.py has an
+        # incremental driver for.
+        import ast
+        import os
+        main = os.path.join(os.path.dirname(utils.__file__), '..', '..',
+                            'backup', 'main.py')
+        tree = ast.parse(open(main).read())
+        mapping = next(
+            node.value for node in ast.walk(tree)
+            if isinstance(node, ast.Assign) and
+            getattr(node.targets[0], 'id', None) == 'driver_mapping')
+        keys = {k.value for k in mapping.keys}
+        self.assertEqual(
+            {k[:-len('_inc')] for k in keys if k.endswith('_inc')},
+            set(utils.INCREMENTAL_BACKUP_STRATEGIES))

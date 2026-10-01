@@ -681,8 +681,13 @@ class FreshInstanceTasks(FreshInstance, NotifyMixin, ConfigurationMixin):
         backup_required = master.backup_required_for_replication()
         if backup_required:
             # if we aren't passed in a backup id, look it up to possibly do
-            # an incremental backup, thus saving time
-            if not parent_backup_id:
+            # an incremental backup, thus saving time. Only for datastores
+            # whose backups can be incremental: for the others the snapshot
+            # failed outright whenever the source had a backup already.
+            if not utils.supports_incremental_backup(
+                    master.datastore_version.manager):
+                parent_backup_id = None
+            elif not parent_backup_id:
                 backup = Backup.get_last_completed(
                     context, slave_of_id, include_incremental=True)
                 if backup:

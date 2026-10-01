@@ -25,6 +25,7 @@ import uuid
 
 import jinja2
 from oslo_concurrency import processutils
+from oslo_config import cfg as oslo_cfg
 from oslo_log import log as logging
 from oslo_service import loopingcall
 from oslo_utils.encodeutils import safe_encode
@@ -226,6 +227,29 @@ def poll_until(retriever, condition=lambda value: value,
 
 
 # Copied from nova.api.openstack.common in the old code.
+# The backup strategies the backup image has an incremental driver for
+# (backup/main.py, driver_mapping['<strategy>_inc']). The others can only
+# take full backups; asked for an incremental one, the backup container
+# fails on the missing driver.
+INCREMENTAL_BACKUP_STRATEGIES = frozenset(
+    ['innobackupex', 'mariabackup', 'pg_basebackup', 'xtrabackup'])
+
+
+def supports_incremental_backup(manager):
+    """Whether backups of a datastore with this manager can be incremental.
+
+    Only the datastore's own option counts: get_configuration_property
+    would fall back to [DEFAULT] backup_strategy, the MySQL one.
+    """
+    manager = manager or CONF.datastore_manager
+    try:
+        strategy = CONF.get(manager).get('backup_strategy')
+    except (oslo_cfg.NoSuchOptError, oslo_cfg.NoSuchGroupError, KeyError,
+            TypeError):
+        return False
+    return strategy in INCREMENTAL_BACKUP_STRATEGIES
+
+
 def get_id_from_href(href):
     """Return the id or uuid portion of a url.
 
