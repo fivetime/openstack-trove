@@ -76,3 +76,15 @@ class TestStreamCodecs(trove_testtools.TestCase):
         deserialized_data['int'] = int(deserialized_data['int'])
         deserialized_data['float'] = float(deserialized_data['float'])
         self.assertEqual(data, deserialized_data)
+
+
+class TestJsonCodec(trove_testtools.TestCase):
+
+    def test_text_and_bytes_read_back(self):
+        # What read_file hands the codec: text, or bytes when asked not
+        # to decode.
+        codec = stream_codecs.JsonCodec()
+        data = {'name': 'lic', 'updated': 1, 'nested': {'a': [1, 2]}}
+        text = codec.serialize(data)
+        self.assertEqual(data, codec.deserialize(text))
+        self.assertEqual(data, codec.deserialize(text.encode('utf-8')))

@@ -508,10 +508,9 @@ class JsonCodec(StreamCodec):
         return jsonutils.dumps(dict_data)
 
     def deserialize(self, stream):
-        if isinstance(stream, str):
-            return jsonutils.load(io.StringIO(stream))
-        if isinstance(stream, bytes):
-            return jsonutils.load(io.BytesIO(stream))
+        # jsonutils.load decodes the file it is given, which a text one
+        # cannot be: loads takes the text or the bytes as they are.
+        return jsonutils.loads(stream)
 
 
 class Base64Codec(StreamCodec):
