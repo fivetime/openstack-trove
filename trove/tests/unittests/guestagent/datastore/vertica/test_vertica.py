@@ -326,6 +326,9 @@ class TestVerticaApp(VerticaGuestTestCase):
         self.assertEqual('/opt/vertica/config/https_certs',
                          volumes['/etc/vertica-trove/certs']['bind'])
         self.assertEqual({'5433/tcp': 5433}, kwargs['ports'])
+        # The server requires 32768 open files and docker gives 1024.
+        self.assertEqual([{'Name': 'nofile', 'Soft': 65536,
+                           'Hard': 65536}], kwargs['ulimits'])
         # The health check needs no password.
         self.assertNotIn('VSQL_PASSWORD', kwargs['healthcheck']['test'][1])
         self.assertNotIn('-h', kwargs['healthcheck']['test'][1].split())

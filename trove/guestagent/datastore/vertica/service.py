@@ -15,6 +15,8 @@ import ipaddress
 import json
 import os
 
+import docker
+
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives import serialization
@@ -80,6 +82,9 @@ NMA_PORT = 5554
 # from.
 LOCAL_AUTHENTICATION = 'trove_local'
 ROOT_ROLE = 'PSEUDOSUPERUSER'
+# The server refuses to create or start a database with fewer open files
+# than it requires, and docker gives a container 1024 unless told.
+OPEN_FILES = 65536
 # The parameters of the database the guest agent sets itself.
 SYSTEM_PARAMETERS = {
     # The objects of a dropped user go to the admin instead of with it.
@@ -398,7 +403,9 @@ class VerticaApp(service.BaseDbApp):
                 ports=ports,
                 user=user,
                 healthcheck=self.HEALTHCHECK,
-                command=command
+                command=command,
+                ulimits=[docker.types.Ulimit(name='nofile', soft=OPEN_FILES,
+                                             hard=OPEN_FILES)]
             )
         except Exception:
             LOG.exception("Failed to start database service")

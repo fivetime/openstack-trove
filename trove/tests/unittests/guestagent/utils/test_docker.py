@@ -140,6 +140,39 @@ class TestDockerUtils(trove_testtools.TestCase):
         mock_client().create_container.assert_called_once()
         mock_client().start.assert_called_once()
 
+    @mock.patch("docker.APIClient")
+    def test__create_container_with_low_level_api_ulimits(self, mock_client):
+        eth1_data = json.dumps({"mac_address": "fa:16:3e:7c:9c:57",
+                                "ipv4_address": "10.111.0.8",
+                                "ipv4_cidr": "10.111.0.0/26",
+                                "ipv4_gateway": "10.111.0.1"})
+        ulimits = [docker.types.Ulimit(name='nofile', soft=65536,
+                                       hard=65536)]
+        param = dict(name="test", restart_policy={"Name": "always"},
+                     volumes={}, ports={}, user="u", environment={},
+                     command="sleep inf", ulimits=ulimits)
+        with mock.patch.object(docker_utils, 'open',
+                               mock.mock_open(read_data=eth1_data)):
+            docker_utils._create_container_with_low_level_api(
+                "busybox", param)
+        self.assertEqual(
+            ulimits,
+            mock_client().create_host_config.call_args[1]['ulimits'])
+
+    def test_start_container_passes_ulimits(self):
+        self.docker_client.containers.get.side_effect = \
+            docker.errors.NotFound('no')
+        ulimits = [docker.types.Ulimit(name='nofile', soft=1, hard=1)]
+        docker_utils.start_container(self.docker_client, 'busybox',
+                                     network_mode='bridge', ulimits=ulimits)
+        self.assertEqual(
+            ulimits,
+            self.docker_client.containers.run.call_args[1]['ulimits'])
+        docker_utils.start_container(self.docker_client, 'busybox',
+                                     network_mode='bridge')
+        self.assertNotIn('ulimits',
+                         self.docker_client.containers.run.call_args[1])
+
     def test_get_image_registry_exists(self):
         image_name = "example.domain/repo/mariadb:tag"
         mock_image_object = mock.Mock()
