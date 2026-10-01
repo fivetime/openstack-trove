@@ -56,6 +56,7 @@ class TestVerticaBackup(unittest.TestCase):
         self._touch(node, 'vertica.log')
         self._touch('db_srvr', 'dbLog')
         self._touch('db_srvr', 'v_db_srvr_node0001_data', '123.gt')
+        self._touch('conf.d', 'dbadmin.cnf')
         runner = self.runner_cls(filename='b1', db_datadir=self.datadir)
         runner.pre_backup()
         self.assertTrue(runner._gzip)
@@ -72,6 +73,8 @@ class TestVerticaBackup(unittest.TestCase):
         self.assertIn('./db_srvr/v_db_srvr_node0001_data/123.gt', names)
         self.assertNotIn('./%s/vertica.log' % node, names)
         self.assertNotIn('./db_srvr/dbLog', names)
+        # The guest agent's files, the admin password among them.
+        self.assertNotIn('./conf.d/dbadmin.cnf', names)
 
         target = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, target, ignore_errors=True)

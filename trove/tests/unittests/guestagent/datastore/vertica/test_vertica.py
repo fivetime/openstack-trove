@@ -277,24 +277,28 @@ class TestVerticaApp(VerticaGuestTestCase):
         self.assertEqual('Acme\n10TB\n',
                          written['/etc/vertica-trove/license.key'])
 
-    def test_the_admin_password_is_read_where_it_is_saved(self):
+    @mock.patch.object(vertica_service, 'operating_system')
+    def test_the_admin_password_is_this_instances(self, mock_os):
+        # Not the copy on the volume, which a restore replaces.
+        mock_os.read_file.return_value = 'pw'
         app = self._app()
-        with mock.patch.object(base_service.BaseDbApp, 'save_password'), \
-                mock.patch.object(base_service.guestagent_utils,
-                                  'get_conf_dir', return_value='/c'), \
-                mock.patch.object(base_service.operating_system,
-                                  'read_file',
-                                  return_value={'client': {'password': 'pw'}}
-                                  ) as read_file:
-            self.assertEqual('pw', app.admin_password)
-        self.assertEqual('/c/dbadmin.cnf', read_file.call_args[0][0])
-        # Where save_password writes it.
-        with mock.patch.object(base_service.guestagent_utils,
-                               'get_conf_dir', return_value='/c'), \
-                mock.patch.object(base_service.operating_system,
-                                  'write_file') as write_file:
-            base_service.BaseDbApp.save_password('dbadmin', 'pw')
-        self.assertEqual('/c/dbadmin.cnf', write_file.call_args[0][0])
+        self.assertEqual('pw', app.admin_password)
+        self.assertEqual('/etc/vertica-trove/admin.secret',
+                         mock_os.read_file.call_args[0][0])
+
+    def test_reset_admin_password_keeps_it_again(self):
+        app = self._app()
+        with mock.patch.object(vertica_service.VerticaApp, 'admin_password',
+                               new_callable=mock.PropertyMock,
+                               return_value="p'w"), \
+                mock.patch.object(vertica_service.VerticaApp,
+                                  'save_password') as save, \
+                mock.patch.object(vertica_service.VerticaAdmin,
+                                  'run') as run:
+            app.reset_admin_password()
+        run.assert_called_once_with(
+            ['''ALTER USER "dbadmin" IDENTIFIED BY 'p''w\''''])
+        save.assert_called_once_with('dbadmin', "p'w")
 
     def test_start_script_is_valid_bash(self):
         app = self._app()
@@ -377,7 +381,9 @@ class TestVerticaApp(VerticaGuestTestCase):
                                   new_callable=mock.PropertyMock,
                                   return_value='10.0.0.1'), \
                 mock.patch.object(vertica_service.VerticaApp,
-                                  'get_auth_password', return_value='pw'), \
+                                  'admin_password',
+                                  new_callable=mock.PropertyMock,
+                                  return_value='pw'), \
                 mock.patch.object(vertica_service.VerticaAdmin,
                                   'run') as run:
             app.create_database()

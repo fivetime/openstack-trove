@@ -285,8 +285,12 @@ class VerticaApp(service.BaseDbApp):
 
     @property
     def admin_password(self):
-        # save_password keeps it under the name of the user.
-        return self.get_auth_password(file=f'{ADMIN_USER}.cnf')
+        """The password of this instance's admin. The copy save_password
+        keeps is on the volume, and a restored volume has the one of the
+        instance the backup was taken from.
+        """
+        return operating_system.read_file(
+            self._conf_path(ADMIN_SECRET), as_root=True)
 
     def write_license(self, content):
         """Keep a license where the server reads it. A license file is
@@ -460,11 +464,12 @@ class VerticaApp(service.BaseDbApp):
 
     def reset_admin_password(self):
         """Give the admin of a restored database the password of this
-        instance.
+        instance, and keep it again where the backup put the old one.
         """
+        password = self.admin_password
         self.adm.run(['ALTER USER %s IDENTIFIED BY %s' % (
-            quote_identifier(ADMIN_USER),
-            quote_literal(self.admin_password))])
+            quote_identifier(ADMIN_USER), quote_literal(password))])
+        self.save_password(ADMIN_USER, password)
 
     def restart(self):
         LOG.info("Restarting database")

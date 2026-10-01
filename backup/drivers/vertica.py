@@ -40,8 +40,11 @@ class VerticaBackup(base.BaseRunner):
 
     @property
     def cmd(self):
+        # conf.d is the guest agent's, with the admin password of this
+        # instance in it.
         return ("tar --exclude=*/vertica.log --exclude=*/dbLog "
-                "--exclude=./lost+found -cpf - -C %s ." % self.datadir)
+                "--exclude=./lost+found --exclude=./conf.d "
+                "-cpf - -C %s ." % self.datadir)
 
     @property
     def restore_cmd(self):
