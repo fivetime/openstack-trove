@@ -13,7 +13,7 @@ usage() {
 	echo "Usage : $(basename $0) [--datastore datastore] [--datastore-version datastore-version]"
 	echo ""
 	echo " Command parameters:"
-	echo "  'datastore' is the datastore. The options are: 'mariadb', 'mysql', 'postgresql', 'keydb', 'valkey', 'redis', 'percona', 'pxc', 'mongodb', 'cassandra', 'couchdb', 'couchbase'"
+	echo "  'datastore' is the datastore. The options are: 'mariadb', 'mysql', 'postgresql', 'keydb', 'valkey', 'redis', 'percona', 'pxc', 'mongodb', 'cassandra', 'couchdb', 'couchbase', 'vertica'"
 	echo "  'datastore-version' is the datastore version of the datastore."
 	echo ""
 	exit 1
@@ -145,6 +145,9 @@ elif [ "${OPT_DATASTORE}" = "couchdb" ]; then
 	:
 elif [ "${OPT_DATASTORE}" = "couchbase" ]; then
 	# A backup is a copy of the var directory of the node, packed with tar.
+	:
+elif [ "${OPT_DATASTORE}" = "vertica" ]; then
+	# A backup is a copy of the catalog and the data, packed with tar.
 	:
 fi
 

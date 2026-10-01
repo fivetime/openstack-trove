@@ -49,4 +49,6 @@ REGISTRY_EXT_DEFAULTS = {
         'trove.guestagent.datastore.couchdb.manager.Manager',
     'couchbase':
         'trove.guestagent.datastore.couchbase.manager.Manager',
+    'vertica':
+        'trove.guestagent.datastore.vertica.manager.Manager',
 }

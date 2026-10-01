@@ -1,0 +1,6 @@
+# Vertica database parameters decided by Trove for an instance with
+# {{ flavor['ram'] }} MB of memory. The server reads no file: the guest
+# agent sets these on the database when it starts and whenever they
+# change, and the server keeps them in its catalog. Only what Trove
+# decides is here; the server uses its defaults for the rest.
+MaxClientSessions=50

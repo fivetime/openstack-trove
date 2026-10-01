@@ -1,0 +1,34 @@
+---
+features:
+  - |
+    The ``vertica`` datastore runs on the container based guest agent
+    from the image named by ``[vertica] docker_image``
+    (``opentext/vertica-k8s`` by default), as single node instances.
+    Databases are schemas of the one database of the instance, users have
+    all privileges on their schemas, root is a pseudosuperuser, and the
+    parameters of the database are configuration parameters set without
+    a restart unless the server needs one.
+  - |
+    The new module type ``vertica_license`` installs a Vertica license:
+    the contents of the module are the license file. An instance created
+    with the module has the license before its database is created, which
+    versions of Vertica from 26.1, which no longer accept the license of
+    the Community Edition the image carries, require.
+upgrade:
+  - |
+    The ``vertica`` datastore replaces the former experimental
+    implementation, whose guest agent side was removed with the move to
+    containers and which installed Vertica from a package with ssh between
+    the nodes. ``[vertica] backup_strategy`` is now ``verticabackup``, the
+    database service user is the ``dbadmin`` user of the image (uid 997,
+    gid 995), only the client port 5433 is opened, and
+    ``[vertica] cluster_support`` is ``False``: the guest side of clusters
+    is not there.
+  - |
+    ``vertica_license`` is added to ``[DEFAULT] module_types``. A
+    deployment that sets the option has to add it to use the module.
+other:
+  - |
+    A Vertica backup is taken with the database stopped, for the time of
+    the copy: the image has no tool that copies a running database
+    consistently.

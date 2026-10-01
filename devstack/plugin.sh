@@ -185,6 +185,8 @@ function configure_docker_images {
     iniset $TROVE_GUESTAGENT_CONF couchdb backup_docker_image ${TROVE_DATABASE_BACKUP_IMAGE_COUCHDB}
     iniset $TROVE_GUESTAGENT_CONF couchbase docker_image ${TROVE_DATABASE_IMAGE_COUCHBASE}
     iniset $TROVE_GUESTAGENT_CONF couchbase backup_docker_image ${TROVE_DATABASE_BACKUP_IMAGE_COUCHBASE}
+    iniset $TROVE_GUESTAGENT_CONF vertica docker_image ${TROVE_DATABASE_IMAGE_VERTICA}
+    iniset $TROVE_GUESTAGENT_CONF vertica backup_docker_image ${TROVE_DATABASE_BACKUP_IMAGE_VERTICA}
 }
 
 function configure_cloudinit {
@@ -227,7 +229,7 @@ ${ETC_HOSTS_APPEND}
 EOF
 
     # NOTE(lxkong): Remove this when we support common cloud-init file for all datastores.
-    for datastore in "mysql" "mariadb" "postgresql" "keydb" "valkey" "redis" "percona" "pxc" "mongodb" "cassandra" "couchdb" "couchbase"
+    for datastore in "mysql" "mariadb" "postgresql" "keydb" "valkey" "redis" "percona" "pxc" "mongodb" "cassandra" "couchdb" "couchbase" "vertica"
     do
         sudo cp ${common_cloudinit} /etc/trove/cloudinit/${datastore}.cloudinit
     done
@@ -304,7 +306,7 @@ function configure_trove {
     iniset $TROVE_CONF keydb tcp_ports 6379,6380
     iniset $TROVE_CONF valkey tcp_ports 6379,6380
     iniset $TROVE_CONF redis tcp_ports 6379,6380
-    iniset $TROVE_CONF vertica tcp_ports 5433,5434,5444,5450,4803
+    iniset $TROVE_CONF vertica tcp_ports 5433
 
     write_uwsgi_config "$TROVE_UWSGI_CONF" "$TROVE_UWSGI" "/database" "" "trove"
 
@@ -733,6 +735,7 @@ function config_network_isolation {
         TROVE_DATABASE_IMAGE_CASSANDRA="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/cassandra"
         TROVE_DATABASE_IMAGE_COUCHDB="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/couchdb"
         TROVE_DATABASE_IMAGE_COUCHBASE="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/couchbase"
+        TROVE_DATABASE_IMAGE_VERTICA="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/vertica"
         TROVE_DATABASE_BACKUP_IMAGE_MYSQL="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-mysql"
         TROVE_DATABASE_BACKUP_IMAGE_MARIADB="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-mariadb"
         TROVE_DATABASE_BACKUP_IMAGE_POSTGRESQL="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-postgresql"
@@ -745,6 +748,7 @@ function config_network_isolation {
         TROVE_DATABASE_BACKUP_IMAGE_CASSANDRA="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-cassandra"
         TROVE_DATABASE_BACKUP_IMAGE_COUCHDB="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-couchdb"
         TROVE_DATABASE_BACKUP_IMAGE_COUCHBASE="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-couchbase"
+        TROVE_DATABASE_BACKUP_IMAGE_VERTICA="$LOCAL_HOSTNAME:$REGISTRY_PORT/trove-datastores/db-backup-vertica"
 
         configure_docker_images
     fi

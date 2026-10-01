@@ -67,12 +67,6 @@
             "restart_required": false
         },
         {
-            "description": "Use as recommended by Technical Support",
-            "type": "integer",
-            "name": "BasicVerticaOptions",
-            "restart_required": false
-        },
-        {
             "description": "size of memory managed by memory manager (in MB)",
             "type": "integer",
             "name": "BlockCacheSize",
@@ -112,12 +106,6 @@
             "description": "Transaction log size must be at least this fraction of the checkpoint size before a new catalog checkpoint is created",
             "type": "integer",
             "name": "CatalogCheckpointPercent",
-            "restart_required": false
-        },
-        {
-            "description": "Rename storage files during final cleanup upon removal from the catalog",
-            "type": "integer",
-            "name": "CatalogDeindexRename",
             "restart_required": false
         },
         {
@@ -301,12 +289,6 @@
             "restart_required": false
         },
         {
-            "description": "Disable schema-level privileges on tables.",
-            "type": "integer",
-            "name": "DisableInheritedPrivileges",
-            "restart_required": false
-        },
-        {
             "description": "Set to disable local resegmentation",
             "type": "integer",
             "name": "DisableLocalResegmentation",
@@ -316,12 +298,6 @@
             "description": "If \u2018false\u2019, the optimizer randomly chooses nodes to do the work of any down nodes",
             "type": "integer",
             "name": "DisableNodeDownOptimization",
-            "restart_required": false
-        },
-        {
-            "description": "Do not allow creating prejoin projections",
-            "type": "integer",
-            "name": "DisablePrejoinProjections",
             "restart_required": false
         },
         {
@@ -343,18 +319,6 @@
             "restart_required": false
         },
         {
-            "description": "Use as recommended by Technical Support",
-            "type": "integer",
-            "name": "EEVerticaOptions",
-            "restart_required": false
-        },
-        {
-            "description": "Enables Access Policy feature",
-            "type": "integer",
-            "name": "EnableAccessPolicy",
-            "restart_required": false
-        },
-        {
             "description": "Enable all granted roles on login",
             "type": "integer",
             "name": "EnableAllRolesOnLogin",
@@ -373,12 +337,6 @@
             "restart_required": false
         },
         {
-            "description": "A value of 1 enables block memory manager or 0 disables memory manager",
-            "type": "integer",
-            "name": "EnableBlockMemoryManager",
-            "restart_required": true
-        },
-        {
             "description": "If true and a chunker is defined for the corresponding parser multiple parse threads can cooperate to parse the output of a single source",
             "type": "integer",
             "name": "EnableCooperativeParse",
@@ -389,12 +347,6 @@
             "type": "integer",
             "name": "EnableDataCollector",
             "restart_required": false
-        },
-        {
-            "description": "Enabled cipher suites for TLS",
-            "type": "string",
-            "name": "EnabledCipherSuites",
-            "restart_required": true
         },
         {
             "description": "Enable EE Thread Pool to reduce threads used",
@@ -409,21 +361,9 @@
             "restart_required": false
         },
         {
-            "description": "Allow expression results to be materialized as projection columns",
-            "type": "integer",
-            "name": "EnableExprsInProjections",
-            "restart_required": false
-        },
-        {
             "description": "allow user-specified force outer rule",
             "type": "integer",
             "name": "EnableForceOuter",
-            "restart_required": false
-        },
-        {
-            "description": "Allow aggregate projections using GROUP BY",
-            "type": "integer",
-            "name": "EnableGroupByProjections",
             "restart_required": false
         },
         {
@@ -487,33 +427,9 @@
             "restart_required": false
         },
         {
-            "description": "Enable SSL for the server",
-            "type": "integer",
-            "name": "EnableSSL",
-            "restart_required": true
-        },
-        {
-            "description": "Enable bundling data files along with their index files. Also MaxBundleableROSSizeKB is effective when this is enabled.",
-            "type": "integer",
-            "name": "EnableStorageBundling",
-            "restart_required": false
-        },
-        {
             "description": "Force casts from varchar to Time,TimeTz,Timestamp,TimestampTz,Interval to error instead of returning null",
             "type": "integer",
             "name": "EnableStrictTimeCasts",
-            "restart_required": false
-        },
-        {
-            "description": "Allow aggregate projections using Top K / LIMIT",
-            "type": "integer",
-            "name": "EnableTopKProjections",
-            "restart_required": false
-        },
-        {
-            "description": "Allow aggregate projections using UDTransforms",
-            "type": "integer",
-            "name": "EnableUDTProjections",
             "restart_required": false
         },
         {
@@ -595,12 +511,6 @@
             "restart_required": false
         },
         {
-            "description": "Force all UDx's to run in fenced mode",
-            "type": "integer",
-            "name": "ForceUDxFencedMode",
-            "restart_required": false
-        },
-        {
             "description": "Ensure catalog durable on disk after each commit",
             "type": "integer",
             "name": "FsyncCatalogForLuck",
@@ -622,12 +532,6 @@
             "description": "Enables profiling for all statements at the EE operator level",
             "type": "integer",
             "name": "GlobalEEProfiling",
-            "restart_required": false
-        },
-        {
-            "description": "A user who'll inherit objects of dropped users. Should be unset (blank) by default (opt-in)",
-            "type": "string",
-            "name": "GlobalHeirUsername",
             "restart_required": false
         },
         {
@@ -703,12 +607,6 @@
             "restart_required": false
         },
         {
-            "description": "Path to the java binary for executing UDx written in Java",
-            "type": "string",
-            "name": "JavaBinaryForUDx",
-            "restart_required": false
-        },
-        {
             "description": "Minimum heap size (in MB) for Java UDx side process",
             "type": "integer",
             "name": "JavaSideProcessMinHeapSizeMB",
@@ -724,12 +622,6 @@
             "description": "SNMP event when the LGE for the node lags more than LGELagThreshold seconds behind the last epoch close time",
             "type": "integer",
             "name": "LGELagThreshold",
-            "restart_required": false
-        },
-        {
-            "description": "Controls the maximum ROS output in data load; Negative and zero will be considered as 1.",
-            "type": "integer",
-            "name": "LoadMaxFinalROSCount",
             "restart_required": false
         },
         {
@@ -841,12 +733,6 @@
             "restart_required": true
         },
         {
-            "description": "Maximum number of historic passes made by Recovery before moving to the current pass where locks are taken",
-            "type": "integer",
-            "name": "MaxRecoverHistoricPasses",
-            "restart_required": true
-        },
-        {
             "description": "# of failed attempts before refresh gives up",
             "type": "integer",
             "name": "MaxRefreshErrors",
@@ -907,30 +793,6 @@
             "restart_required": false
         },
         {
-            "description": "Interval between Tuple Mover checks for moveouts to perform (seconds)",
-            "type": "integer",
-            "name": "MoveOutInterval",
-            "restart_required": false
-        },
-        {
-            "description": "The number of epochs data resides in WOS before the Tuple Mover triggers a moveout based on age",
-            "type": "integer",
-            "name": "MoveOutMaxAgeEpochs",
-            "restart_required": false
-        },
-        {
-            "description": "The amount of time data resides in WOS before the Tuple Mover triggers a moveout based on age (seconds)",
-            "type": "integer",
-            "name": "MoveOutMaxAgeTime",
-            "restart_required": false
-        },
-        {
-            "description": "The amount of WOS used before the Tuple Mover triggers a moveout based on utilization (percent)",
-            "type": "integer",
-            "name": "MoveOutSizePct",
-            "restart_required": false
-        },
-        {
             "description": "Memory to allocate to per-node Prepass GroupBy Operator",
             "type": "integer",
             "name": "NewEEGroupBySmallMemMB",
@@ -955,22 +817,10 @@
             "restart_required": true
         },
         {
-            "description": "Use as recommended by Technical Support",
-            "type": "string",
-            "name": "OptVerticaOptions",
-            "restart_required": false
-        },
-        {
             "description": "If true use a DT per local segment, even when sorting",
             "type": "integer",
             "name": "ParallelizeLocalSegmentLoad",
             "restart_required": false
-        },
-        {
-            "description": "Override the heap memory allocator for PCRE pattern matching library",
-            "type": "integer",
-            "name": "PatternMatchAllocator",
-            "restart_required": true
         },
         {
             "description": "Sets the recursion limit for PCRE used by pattern matching.",
@@ -1021,12 +871,6 @@
             "restart_required": true
         },
         {
-            "description": "If set to true, allows creating unsegmented projection using pre-excavator style",
-            "type": "integer",
-            "name": "PreExcavatorReplicatedProjection",
-            "restart_required": false
-        },
-        {
             "description": "Only load DataCollector records which satisfy time based predicates",
             "type": "integer",
             "name": "PruneDataCollectorByTime",
@@ -1057,21 +901,9 @@
             "restart_required": true
         },
         {
-            "description": "When recovering a projection with an identical buddy from scratch recovery may be able to directly copy storage containers if this feature is enabled",
-            "type": "integer",
-            "name": "RecoverByContainer",
-            "restart_required": false
-        },
-        {
             "description": "Seconds to wait for dirty transactions before cancelling the session",
             "type": "integer",
             "name": "RecoveryDirtyTxnWait",
-            "restart_required": false
-        },
-        {
-            "description": "Trigger moveout automatically on commit of data to WOS",
-            "type": "integer",
-            "name": "ReflexiveMoveout",
             "restart_required": false
         },
         {
@@ -1105,39 +937,9 @@
             "restart_required": true
         },
         {
-            "description": "Restrict non-dbadmin users from viewing system-tables",
-            "type": "integer",
-            "name": "RestrictSystemTables",
-            "restart_required": true
-        },
-        {
-            "description": "Number of 64K ROS blocks that may be kept in the decompression cache (default is 4096 blocks; 256MB)",
-            "type": "integer",
-            "name": "ROSCacheBlocks",
-            "restart_required": true
-        },
-        {
-            "description": "Number of large (>64K) ROS blocks that may be kept in the decompression cache (for Grouped ROSs)",
-            "type": "integer",
-            "name": "ROSCacheLargeBlocks",
-            "restart_required": true
-        },
-        {
-            "description": "Maximum of number of ROSes in a stratum once reached merge out happens",
-            "type": "integer",
-            "name": "ROSPerStratum",
-            "restart_required": false
-        },
-        {
             "description": "Set the query duration threshold in microseconds to save profiling information to the dc_execution_engine_profiles table.",
             "type": "integer",
             "name": "SaveDCEEProfileThresholdUS",
-            "restart_required": false
-        },
-        {
-            "description": "NONE (Default) MD5 and SHA512",
-            "type": "string",
-            "name": "SecurityAlgorithm",
             "restart_required": false
         },
         {
@@ -1183,24 +985,6 @@
             "restart_required": false
         },
         {
-            "description": "Where Vertica sends SNMP traps - 'host_name port CommunityString'. This is a comma-separated list.",
-            "type": "string",
-            "name": "SnmpTrapDestinationsList",
-            "restart_required": false
-        },
-        {
-            "description": "List of events that Vertica traps: Low Disk Space, Read Only File System, Loss of K Safety, Current Fault Tolerance at Critical Level, Too Many ROS Containers, WOS Over Flow, Node State Change, Recovery Failure, Recovery Error, Recovery Lock Error, Recovery Projection Retrieval Error, Refresh Error, Tuple Mover Error, Stale Checkpoint",
-            "type": "string",
-            "name": "SnmpTrapEvents",
-            "restart_required": false
-        },
-        {
-            "description": "Enable sending of SNMP traps",
-            "type": "integer",
-            "name": "SnmpTrapsEnabled",
-            "restart_required": false
-        },
-        {
             "description": "SortCheck to generate SortCheck step in plan",
             "type": "integer",
             "name": "SortCheckOption",
@@ -1219,24 +1003,6 @@
             "restart_required": false
         },
         {
-            "description": "The server's SSL CA certificate",
-            "type": "string",
-            "name": "SSLCA",
-            "restart_required": true
-        },
-        {
-            "description": "The server's SSL certificate",
-            "type": "string",
-            "name": "SSLCertificate",
-            "restart_required": true
-        },
-        {
-            "description": "The server's SSL private key",
-            "type": "string",
-            "name": "SSLPrivateKey",
-            "restart_required": true
-        },
-        {
             "description": "Disable backslash quoting in string constants; required to conform to standard SQL",
             "type": "integer",
             "name": "StandardConformingStrings",
@@ -1246,24 +1012,6 @@
             "description": "Sets the behavior to deal with undeclared UDx function parameters",
             "type": "integer",
             "name": "StrictUDxParameterChecking",
-            "restart_required": false
-        },
-        {
-            "description": "Enable event trapping for Syslog",
-            "type": "integer",
-            "name": "SyslogEnabled",
-            "restart_required": false
-        },
-        {
-            "description": "Low Disk Space, Read Only File System, Loss of K Safety, Current Fault Tolerance at Critical Level, Too Many ROS Containers, WOS Over Flow, Node State Change, Recovery Failure, Recovery Error, Recovery Lock Error, Recovery Projection Retrieval Error, Refresh Error, Tuple Mover Error, Stale Checkpoint",
-            "type": "string",
-            "name": "SyslogEvents",
-            "restart_required": false
-        },
-        {
-            "description": "auth, uucp, authpriv (Linux only) local0, cron, local1, daemon, local2, ftp (Linux only) local3, lpr, local4, mail, local5, news, local6, user (default system) local7",
-            "type": "string",
-            "name": "SyslogFacility",
             "restart_required": false
         },
         {

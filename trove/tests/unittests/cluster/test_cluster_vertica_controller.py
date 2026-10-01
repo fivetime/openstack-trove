@@ -31,6 +31,11 @@ from trove.tests.unittests import trove_testtools
 class TestClusterController(trove_testtools.TestCase):
     def setUp(self):
         super(TestClusterController, self).setUp()
+        # Off by default while the guest side of clusters is missing; the
+        # API side is what is tested here.
+        cfg.CONF.set_override('cluster_support', True, group='vertica')
+        self.addCleanup(cfg.CONF.clear_override, 'cluster_support',
+                        group='vertica')
         self.controller = ClusterController()
         instances = [
             {

@@ -506,7 +506,8 @@ common_opts = [
                     'become active.'),
     cfg.StrOpt('module_aes_cbc_key', default='module_aes_cbc_key',
                help='OpenSSL aes_cbc key for module encryption.'),
-    cfg.ListOpt('module_types', default=['ping', 'new_relic_license'],
+    cfg.ListOpt('module_types', default=['ping', 'new_relic_license',
+                                         'vertica_license'],
                 help='A list of module types supported. A module type '
                      'corresponds to the name of a ModuleDriver.'),
     cfg.IntOpt('module_reapply_max_batch_size', default=50,
@@ -1325,24 +1326,24 @@ vertica_group = cfg.OptGroup(
 vertica_opts = [
     cfg.StrOpt('database_service_uname', default='database',
                help='The name of database service user.'),
-    cfg.StrOpt('database_service_uid',
+    cfg.StrOpt('database_service_uid', default='997',
                help='The UID of database service user.'),
-    cfg.StrOpt('database_service_gid',
+    cfg.StrOpt('database_service_gid', default='995',
                help='The GID of database service user.'),
     cfg.BoolOpt('icmp', default=False,
                 help='Whether to permit ICMP.',
                 deprecated_for_removal=True),
     cfg.ListOpt('tcp_ports', item_type=ListOfPortsType,
-                default=["5433", "5434", "5444", "5450", "4803"],
+                default=["5433"],
                 help='List of TCP ports and/or port ranges to open '
                      'in the security group (only applicable '
                      'if trove_security_groups_support is True).'),
     cfg.ListOpt('udp_ports', item_type=ListOfPortsType,
-                default=["5433", "4803", "4804", "6453"],
+                default=[],
                 help='List of UDP ports and/or port ranges to open '
                      'in the security group (only applicable '
                      'if trove_security_groups_support is True).'),
-    cfg.StrOpt('backup_strategy', default=None,
+    cfg.StrOpt('backup_strategy', default='verticabackup',
                help='Default strategy to perform backups.'),
     cfg.StrOpt('replication_strategy', default=None,
                help='Default strategy for replication.'),
@@ -1361,7 +1362,7 @@ vertica_opts = [
                deprecated_for_removal=True),
     cfg.IntOpt('readahead_size', default=2048,
                help='Size(MB) to be set as readahead_size for data volume'),
-    cfg.BoolOpt('cluster_support', default=True,
+    cfg.BoolOpt('cluster_support', default=False,
                 help='Enable clusters to be created and managed.'),
     cfg.IntOpt('cluster_member_count', default=3,
                help='Number of members in Vertica cluster.'),
@@ -1389,7 +1390,23 @@ vertica_opts = [
     cfg.IntOpt('min_ksafety', default=0,
                help='Minimum k-safety setting permitted for vertica clusters'),
     cfg.IntOpt('default_password_length', default=36,
-               help='Character length of generated passwords.')
+               help='Character length of generated passwords.'),
+    cfg.ListOpt('ignore_users', default=['dbadmin', 'root'],
+                help='Users to exclude when listing users.'),
+    cfg.ListOpt('ignore_dbs', default=['public', 'v_func', 'v_txtindex'],
+                help='Schemas to exclude when listing databases.'),
+    cfg.StrOpt(
+        'docker_image', default='opentext/vertica-k8s',
+        help='Database docker image.'
+    ),
+    cfg.StrOpt(
+        'backup_docker_image',
+        sample_default='your-registry/your-repo/db-backup-vertica',
+        help='The docker image used for backup and restore. Trove will uses'
+             'datastore version as the image tag, for example: '
+             'your-registry/your-repo/db-backup-vertica:25.4.0-0-minimal '
+             'is used for vertica datastore with version 25.4.0-0-minimal'
+    ),
 ]
 
 # DB2
