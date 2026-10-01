@@ -379,6 +379,27 @@ class TestDB2Admin(DB2GuestTestCase):
         self.assertEqual(['OTHERDB'],
                          [d['_name'] for d in adm.list_access('appuser')])
 
+    def test_a_database_being_created_is_left_out(self):
+        # Created, then backed up offline: in exclusive use for minutes.
+        adm, fake, users = self._adm()
+        adm.create_database([models.DB2Schema('appdb').serialize(),
+                             models.DB2Schema('newdb').serialize()])
+        adm.create_user([self._user('appuser', databases=['appdb'])])
+        real_run = fake.run
+
+        def run(statements, database=None):
+            if database == 'NEWDB':
+                raise exception.TroveError(
+                    'SQL1035N  The operation failed because the specified '
+                    'database cannot be connected to in the mode requested.')
+            return real_run(statements, database)
+        adm.run = run
+        self.assertEqual(['APPDB'],
+                         [d['_name'] for d in adm.list_access('appuser')])
+        # Other errors are errors.
+        adm.run = mock.Mock(side_effect=exception.TroveError('SQL0204N'))
+        self.assertRaises(exception.TroveError, adm.list_access, 'appuser')
+
     def test_delete_user_revokes_first(self):
         adm, fake, users = self._adm()
         adm.create_database([models.DB2Schema('appdb').serialize()])

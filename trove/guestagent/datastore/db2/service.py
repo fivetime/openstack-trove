@@ -77,6 +77,9 @@ CLP_OK = (0, 1, 2)
 # The first start sets the instance up, and the image is large: more than
 # the usual time to wait.
 START_TIMEOUT = 900
+# A database that cannot be connected to for now: in exclusive use while
+# it is created or backed up offline, pending a backup or a roll forward.
+UNAVAILABLE = ('SQL1035N', 'SQL1116N', 'SQL1117N')
 # A backup image: <database>.0.<owner>.DBPART000.<timestamp>.001
 BACKUP_IMAGE = re.compile(
     r'^([A-Z@#$][A-Z0-9@#$]{0,7})\.0\.%s\.DBPART000\.(\d{14})\.001$'
@@ -656,12 +659,24 @@ class DB2Admin(object):
                       if name not in ignored)
 
     def _databases_of(self, username):
+        """The databases the user can connect to. A database that cannot
+        be connected to for now, one being created among them, is left
+        out instead of failing the whole answer.
+        """
         databases = []
         for database in self._database_names():
-            rows = self.run(["SELECT %s FROM SYSIBM.SYSDBAUTH WHERE "
-                             "GRANTEE = '%s' AND CONNECTAUTH = 'Y'"
-                             % (self._query("GRANTEE"), username.upper())],
-                            database=database)
+            try:
+                rows = self.run(["SELECT %s FROM SYSIBM.SYSDBAUTH WHERE "
+                                 "GRANTEE = '%s' AND CONNECTAUTH = 'Y'"
+                                 % (self._query("GRANTEE"),
+                                    username.upper())],
+                                database=database)
+            except exception.TroveError as e:
+                if any(code in str(e) for code in UNAVAILABLE):
+                    LOG.warning("Database %s is not available for now, "
+                                "left out: %s", database, e)
+                    continue
+                raise
             if rows:
                 databases.append(database)
         return databases
