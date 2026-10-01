@@ -37,6 +37,7 @@ SERVICE_PARSERS = {
     'pxc': configurations.MySQLConfParser,
     'postgresql': configurations.PostgresqlConfParser,
     'cassandra': configurations.CassandraConfParser,
+    'couchbase': configurations.CouchbaseConfParser,
     'redis': configurations.RedisConfParser,
     'keydb': configurations.RedisConfParser,
     'valkey': configurations.RedisConfParser,

@@ -224,6 +224,19 @@ class TestCouchbaseDatastoreWiring(trove_testtools.TestCase):
         self.assertEqual('100', config['bucket_ramsize'])
         self.assertEqual('0', config['bucket_replicas'])
 
+    def test_the_api_side_parses_the_template(self):
+        # Detaching a configuration group renders the template and parses
+        # it to the settings to put back.
+        ds_version = mock.Mock(datastore_name='couchbase', manager='couchbase',
+                               name='community-7.6.2', version='7.6.2')
+        config = template.SingleInstanceConfigTemplate(
+            ds_version, {'ram': 4096, 'vcpus': 2},
+            'c2a8a4a5-7a8e-4a0c-9d5e-0b4c5d1f2a3b')
+        parsed = dict(config.render_dict())
+        self.assertEqual(2048, parsed['memory_quota'])
+        self.assertEqual('valueOnly', parsed['bucket_eviction_policy'])
+        self.assertEqual(7, len(parsed))
+
 
 class TestCouchbaseApp(CouchbaseGuestTestCase):
 
