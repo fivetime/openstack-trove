@@ -144,7 +144,39 @@ class RedisManager(manager.Manager):
         if use_empty_masters:
             args.append('--cluster-use-empty-masters')
         LOG.info("Rebalancing the cluster: %s", args[1:])
-        self.app.run_cluster_cli(*args)
+        try:
+            self.app.run_cluster_cli(*args)
+        except exception.TroveError:
+            # KeyDB's CLI (Redis 6.2) exits with 1, and says nothing, once
+            # it has moved the last slot off a master without replicas:
+            # that master has turned into a replica of the node that took
+            # the slot, and the CLI's last call on it fails. What counts is
+            # whether the slots did move.
+            drained = [node_id for node_id, weight in (weights or {}).items()
+                       if int(weight) == 0]
+            if not drained or not self._drained(drained):
+                raise
+            LOG.warning("The CLI reported a failure, but the slots are off "
+                        "%s and the cluster is whole.", drained)
+
+    def _drained(self, node_ids):
+        """Whether these nodes hold no slots, every slot has a master and
+        none is half moved.
+        """
+        holding = [node['id'] for node in self.adm.cluster_nodes()
+                   if node['id'] in node_ids and node['has_slots']]
+        if holding:
+            LOG.error("Nodes %s still hold slots.", holding)
+            return False
+        try:
+            output = self.app.run_cluster_cli('check')
+        except exception.TroveError:
+            LOG.exception("The cluster check failed.")
+            return False
+        return ('All 16384 slots covered' in output and
+                'slots are open' not in output and
+                'in migrating state' not in output and
+                'in importing state' not in output)
 
     def cluster_del_node(self, context, node_id):
         LOG.info("Removing node %s from the cluster.", node_id)

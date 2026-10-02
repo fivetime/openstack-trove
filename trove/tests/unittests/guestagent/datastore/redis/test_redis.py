@@ -171,6 +171,52 @@ class TestRedisCluster(trove_testtools.TestCase):
             'rebalance', '--cluster-weight', 'n1=0',
             '--cluster-weight', 'n2=0')
 
+    CHECK_OK = ('[OK] All nodes agree about slots configuration.\n'
+                '>>> Check for open slots...\n'
+                '>>> Check slots coverage...\n'
+                '[OK] All 16384 slots covered.\n')
+
+    def _cli_fails_on_rebalance(self, check_output):
+        def cli(*args):
+            if args[0] == 'rebalance':
+                raise exception.TroveError('rebalance failed')
+            return check_output
+        self.manager.app.run_cluster_cli.side_effect = cli
+
+    def test_rebalance_failure_with_the_slots_moved(self):
+        # KeyDB's CLI exits with 1 once the last slot is off a master
+        # without replicas; the slots did move.
+        self._cli_fails_on_rebalance(self.CHECK_OK)
+        self.manager.adm.cluster_nodes.return_value = [
+            {'id': 'n1', 'has_slots': False},
+            {'id': 'n2', 'has_slots': True}]
+        self.manager.cluster_rebalance(None, weights={'n1': 0})
+        self.manager.app.run_cluster_cli.assert_called_with('check')
+
+    def test_rebalance_failure_with_slots_left(self):
+        self._cli_fails_on_rebalance(self.CHECK_OK)
+        self.manager.adm.cluster_nodes.return_value = [
+            {'id': 'n1', 'has_slots': True}]
+        self.assertRaises(exception.TroveError,
+                          self.manager.cluster_rebalance, None,
+                          weights={'n1': 0})
+
+    def test_rebalance_failure_with_open_slots(self):
+        self._cli_fails_on_rebalance(
+            self.CHECK_OK + '[WARNING] The following slots are open: 12.\n')
+        self.manager.adm.cluster_nodes.return_value = [
+            {'id': 'n1', 'has_slots': False}]
+        self.assertRaises(exception.TroveError,
+                          self.manager.cluster_rebalance, None,
+                          weights={'n1': 0})
+
+    def test_rebalance_failure_when_spreading(self):
+        # Nothing was drained, so nothing tells a failure from a success.
+        self._cli_fails_on_rebalance(self.CHECK_OK)
+        self.assertRaises(exception.TroveError,
+                          self.manager.cluster_rebalance, None,
+                          use_empty_masters=True)
+
     def test_root_password_only_when_enabled(self):
         self.manager.adm.is_root_enabled.return_value = False
         self.assertIsNone(self.manager.get_root_password(None))
