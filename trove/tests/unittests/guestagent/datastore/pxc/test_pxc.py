@@ -59,11 +59,11 @@ class TestPXCDatastoreWiring(trove_testtools.TestCase):
             constants.REGISTRY_EXT_DEFAULTS['pxc'])
 
         self.assertIs(pxc_manager.Manager, manager_cls)
-        self.assertTrue(issubclass(manager_cls, mysql_manager.Manager))
+        self.assertTrue(issubclass(manager_cls, mysql_manager.BaseManager))
         self.assertTrue(
             issubclass(manager_cls, galera_manager.GaleraManagerMixin))
 
-    @mock.patch.object(mysql_manager.Manager, 'docker_client',
+    @mock.patch.object(mysql_manager.BaseManager, 'docker_client',
                        new_callable=mock.PropertyMock)
     def test_manager_runs_the_pxc_app(self, mock_docker_client):
         manager = pxc_manager.Manager()
@@ -71,11 +71,18 @@ class TestPXCDatastoreWiring(trove_testtools.TestCase):
         self.assertIsInstance(manager.app, pxc_service.PXCApp)
         self.assertIs(manager.app, manager.adm.mysql_app)
 
+    def test_no_group_replication(self):
+        # PXC clusters are Galera's: the Group Replication calls of the
+        # MySQL manager are not there.
+        self.assertFalse(issubclass(pxc_manager.Manager,
+                                    mysql_manager.Manager))
+        self.assertFalse(hasattr(pxc_manager.Manager, 'leave_cluster'))
+
     def test_cluster_calls_run_before_the_mysql_ones(self):
         # The mixins only work when they come first.
         for cls, mixin, base in (
                 (pxc_manager.Manager, galera_manager.GaleraManagerMixin,
-                 mysql_manager.Manager),
+                 mysql_manager.BaseManager),
                 (pxc_service.PXCApp, galera_service.GaleraAppMixin,
                  mysql_service.MySqlApp)):
             mro = cls.__mro__
@@ -108,7 +115,10 @@ class TestPXCDatastoreWiring(trove_testtools.TestCase):
             command.split())
 
     def test_has_every_mysql_option(self):
+        # Those of Group Replication clusters aside: PXC's are Galera's.
         for name in CONF.mysql:
+            if name in ('cluster_tcp_ports',):
+                continue
             self.assertIn(name, CONF.pxc,
                           '[pxc] lacks the MySQL option %s' % name)
 

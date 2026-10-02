@@ -107,7 +107,8 @@ class TestClusterController(trove_testtools.TestCase):
         req.environ.get = Mock(return_value=context)
 
         datastore_version = Mock()
-        datastore_version.manager = 'mysql'
+        # Without cluster support.
+        datastore_version.manager = 'postgresql'
         mock_get_datastore_version.return_value = (Mock(), datastore_version)
 
         self.assertRaises(exception.ClusterDatastoreNotSupported,

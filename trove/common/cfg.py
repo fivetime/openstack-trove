@@ -720,6 +720,59 @@ pxc_opts = _build_mysql_family_datastore_opts(
 ]
 
 
+# MySQL Group Replication, for MySQL and Percona Server: a group of three or
+# more members, one of them writable (single-primary) or all of them
+# (multi-primary), as the tenant chooses when creating the cluster. Added
+# after the Percona XtraDB Cluster options are built from the MySQL ones,
+# so that PXC keeps its Galera clusters.
+def _with_group_replication(opts):
+    group_replication = [
+        cfg.BoolOpt('cluster_support', default=True,
+                    help='Enable clusters to be created and managed.'),
+        cfg.IntOpt('min_cluster_member_count', default=3,
+                   help='Minimum number of members in a Group Replication '
+                        'cluster.'),
+        cfg.ListOpt('cluster_tcp_ports', default=["33061"],
+                    item_type=ListOfPortsType,
+                    help='TCP ports the members of a cluster talk to each '
+                         'other on, opened in their security group as well: '
+                         'the group communication port.'),
+        cfg.StrOpt('api_strategy',
+                   default='trove.common.strategies.cluster.experimental.'
+                   'group_replication.api.GroupReplicationAPIStrategy',
+                   help='Class that implements datastore-specific API '
+                        'logic.'),
+        cfg.StrOpt('taskmanager_strategy',
+                   default='trove.common.strategies.cluster.experimental.'
+                   'group_replication.taskmanager.'
+                   'GroupReplicationTaskManagerStrategy',
+                   help='Class that implements datastore-specific task '
+                        'manager logic.'),
+        cfg.StrOpt('guestagent_strategy',
+                   default='trove.common.strategies.cluster.experimental.'
+                   'group_replication.guestagent.'
+                   'GroupReplicationGuestAgentStrategy',
+                   help='Class that implements datastore-specific Guest '
+                        'Agent API logic.'),
+        # Root of a cluster is enabled on a writable member; a single
+        # instance is served as before.
+        cfg.StrOpt('root_controller',
+                   default='trove.extensions.mysql.service.'
+                   'GroupReplicationRootController',
+                   help='Root controller implementation.'),
+        # clusterrepuser is the account the members recover with.
+        cfg.ListOpt('ignore_users',
+                    default=['os_admin', 'root', 'clusterrepuser'],
+                    help='Users to exclude when listing users.'),
+    ]
+    names = {opt.name for opt in group_replication}
+    return [opt for opt in opts if opt.name not in names] + group_replication
+
+
+mysql_opts = _with_group_replication(mysql_opts)
+percona_opts = _with_group_replication(percona_opts)
+
+
 # KeyDB / Valkey / Redis
 def _build_redis_family_datastore_opts(
     datastore_name,

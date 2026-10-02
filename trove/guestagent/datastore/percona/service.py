@@ -10,10 +10,12 @@
 #    See the License for the specific language governing permissions and
 #    limitations under the License.
 
+from trove.guestagent.datastore.group_replication import service as \
+    gr_service
 from trove.guestagent.datastore.mysql import service
 
 
-class PerconaApp(service.MySqlApp):
+class PerconaApp(gr_service.GroupReplicationAppMixin, service.MySqlApp):
     """Percona Server, run from the official ``percona/percona-server`` image.
 
     The image follows the conventions of the ``mysql`` image that the MySQL

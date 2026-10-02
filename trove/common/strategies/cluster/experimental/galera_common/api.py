@@ -75,12 +75,17 @@ class GaleraCommonCluster(cluster_models.Cluster):
         # Checking networks are same for the cluster
         cluster_models.validate_instance_nics(context, instances)
 
-    @staticmethod
-    def _create_instances(context, db_info, datastore, datastore_version,
+    @classmethod
+    def _member_config(cls, db_info, extended_properties):
+        """What a member is given with its creation."""
+        return {"id": db_info.id,
+                "instance_type": "member"}
+
+    @classmethod
+    def _create_instances(cls, context, db_info, datastore, datastore_version,
                           instances, extended_properties, locality,
                           configuration_id, image_id):
-        member_config = {"id": db_info.id,
-                         "instance_type": "member"}
+        member_config = cls._member_config(db_info, extended_properties)
         name_index = int(time.time())
         for instance in instances:
             if not instance.get("name"):

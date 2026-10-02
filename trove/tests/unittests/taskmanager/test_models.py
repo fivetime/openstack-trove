@@ -270,8 +270,13 @@ class FreshInstanceTasksTest(BaseFreshInstanceTasksTest):
                          {p for r in tcp for p in r})
         self.assertEqual({4803, 4804, 5433}, {p for r in udp for p in r})
         # A datastore without cluster ports opens its own.
+        tcp, udp = taskmanager_models.secgroup_ports('postgresql', 'c1')
+        self.assertEqual([[5432]], [list(r) for r in tcp])
+        # A Group Replication member also its group communication port.
         tcp, udp = taskmanager_models.secgroup_ports('mysql', 'c1')
-        self.assertEqual([[3306]], [list(r) for r in tcp])
+        self.assertEqual({3306, 33061}, {p for r in tcp for p in r})
+        tcp, udp = taskmanager_models.secgroup_ports('mysql')
+        self.assertEqual({3306}, {p for r in tcp for p in r})
 
     def test_replication_snapshot_incremental_when_supported(self):
         snapshot_info, get_last = self._replication_snapshot('mysql')

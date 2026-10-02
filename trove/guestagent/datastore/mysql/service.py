@@ -19,6 +19,8 @@ from oslo_log import log as logging
 from oslo_utils.excutils import save_and_reraise_exception
 from trove.common import cfg
 from trove.common import constants
+from trove.guestagent.datastore.group_replication import service as \
+    gr_service
 from trove.guestagent.datastore.mysql_common import service
 from trove.guestagent.utils import docker as docker_util
 from trove.guestagent.utils import mysql as mysql_util
@@ -197,3 +199,7 @@ class MySqlAdmin(service.BaseMySqlAdmin):
     def __init__(self, app):
         root_access = MySqlRootAccess(app)
         super(MySqlAdmin, self).__init__(root_access, app)
+
+
+class GroupReplicationMySqlApp(gr_service.GroupReplicationAppMixin, MySqlApp):
+    """MySQL that can be a member of a Group Replication cluster."""

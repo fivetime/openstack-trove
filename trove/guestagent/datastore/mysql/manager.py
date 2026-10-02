@@ -18,6 +18,8 @@ import semantic_version
 from trove.common import cfg
 from trove.common import exception
 from trove.guestagent.common import operating_system
+from trove.guestagent.datastore.group_replication import manager as \
+    gr_manager
 from trove.guestagent.datastore.mysql import service
 from trove.guestagent.datastore.mysql_common import manager
 from trove.guestagent.datastore import service as base_service
@@ -27,13 +29,15 @@ CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
 
 
-class Manager(manager.MySqlManager):
+class BaseManager(manager.MySqlManager):
+    """MySQL, alone or as a Galera member (Percona XtraDB Cluster)."""
+
     def __init__(self):
         status = base_service.BaseDbStatus(self.docker_client)
         app = service.MySqlApp(status, self.docker_client)
         adm = service.MySqlAdmin(app)
 
-        super(Manager, self).__init__(app, status, adm)
+        super(BaseManager, self).__init__(app, status, adm)
 
     def pre_create_backup(self, context, **kwargs):
         LOG.info("Running pre_create_backup")
@@ -110,7 +114,7 @@ class Manager(manager.MySqlManager):
             # SSL/TLS completely because caching_sha2_password depends on it
             raise exception.TroveError("Not supported for MySQL 8.0 and above")
 
-        return super(Manager, self).disable_ssl_certificate()
+        return super(BaseManager, self).disable_ssl_certificate()
 
     def _get_enable_ssl_overrides(self):
         files = self._get_ssl_files()
@@ -134,3 +138,15 @@ class Manager(manager.MySqlManager):
         }
 
         return overrides
+
+
+class Manager(gr_manager.GroupReplicationManagerMixin, BaseManager):
+    """MySQL, alone or as a member of a Group Replication cluster."""
+
+    def __init__(self):
+        status = base_service.BaseDbStatus(self.docker_client)
+        app = service.GroupReplicationMySqlApp(status, self.docker_client)
+        adm = service.MySqlAdmin(app)
+
+        # Not super().__init__(): BaseManager builds the plain app there.
+        manager.MySqlManager.__init__(self, app, status, adm)

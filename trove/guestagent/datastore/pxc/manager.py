@@ -20,7 +20,7 @@ from trove.guestagent.datastore import service as base_service
 DEFAULTS_FILE = '/etc/mysql/my.cnf'
 
 
-class Manager(galera_manager.GaleraManagerMixin, manager.Manager):
+class Manager(galera_manager.GaleraManagerMixin, manager.BaseManager):
     def __init__(self):
         status = base_service.BaseDbStatus(self.docker_client)
         app = service.PXCApp(status, self.docker_client)
