@@ -382,9 +382,9 @@ class RedisApp(service.BaseDbApp):
             f"{info.get('cluster_known_nodes')} of {expected_nodes} nodes")
 
     def run_cluster_cli(self, *args):
-        """Run redis-cli --cluster in the database container, logged in
+        """Run the CLI's --cluster in the database container, logged in
         as the cluster admin, whose password goes in the environment and
-        not on the command line.
+        not on the command line. valkey-cli reads REDISCLI_AUTH too.
         """
         ip, port = self.get_node_ip()
         command = [self.CLI_BINARY, '--user', manager.CLUSTER_ADMIN_USER,
@@ -397,7 +397,8 @@ class RedisApp(service.BaseDbApp):
         LOG.debug("%s exited %s: %s", ' '.join(command[:5]), ret, output)
         if ret != 0 or '[ERR]' in output or '\n*** ' in output:
             raise exception.TroveError(
-                f"redis-cli --cluster {args[0]} failed: {output[-1000:]}")
+                f"{self.CLI_BINARY} --cluster {args[0]} failed: "
+                f"{output[-1000:]}")
         return output
 
     def enable_aclfile(self):

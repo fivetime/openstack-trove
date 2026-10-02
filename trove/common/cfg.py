@@ -887,27 +887,36 @@ redis_group, redis_opts = _build_redis_family_datastore_opts(
     docker_image='redis',
 )
 
+
 # Redis Cluster: every member is a master holding a share of the 16384
 # hash slots; growing rebalances slots onto the new members, shrinking
-# moves them off the leaving ones first.
-redis_opts += [
-    cfg.BoolOpt('cluster_support', default=True,
-                help='Enable clusters to be created and managed.'),
-    cfg.StrOpt('api_strategy',
-               default='trove.common.strategies.cluster.experimental.'
-               'redis.api.RedisAPIStrategy',
-               help='Class that implements datastore-specific API logic.'),
-    cfg.StrOpt('taskmanager_strategy',
-               default='trove.common.strategies.cluster.experimental.redis.'
-               'taskmanager.RedisTaskManagerStrategy',
-               help='Class that implements datastore-specific task manager '
-                    'logic.'),
-    cfg.StrOpt('guestagent_strategy',
-               default='trove.common.strategies.cluster.experimental.'
-               'redis.guestagent.RedisGuestAgentStrategy',
-               help='Class that implements datastore-specific Guest Agent API '
-                    'logic.'),
-]
+# moves them off the leaving ones first. Valkey speaks the same cluster
+# protocol, and valkey-cli --cluster works as redis-cli --cluster does, so
+# it runs on the same strategies. KeyDB does not, until it is tested.
+def _redis_cluster_opts():
+    return [
+        cfg.BoolOpt('cluster_support', default=True,
+                    help='Enable clusters to be created and managed.'),
+        cfg.StrOpt('api_strategy',
+                   default='trove.common.strategies.cluster.experimental.'
+                   'redis.api.RedisAPIStrategy',
+                   help='Class that implements datastore-specific API '
+                        'logic.'),
+        cfg.StrOpt('taskmanager_strategy',
+                   default='trove.common.strategies.cluster.experimental.'
+                   'redis.taskmanager.RedisTaskManagerStrategy',
+                   help='Class that implements datastore-specific task '
+                        'manager logic.'),
+        cfg.StrOpt('guestagent_strategy',
+                   default='trove.common.strategies.cluster.experimental.'
+                   'redis.guestagent.RedisGuestAgentStrategy',
+                   help='Class that implements datastore-specific Guest '
+                        'Agent API logic.'),
+    ]
+
+
+redis_opts += _redis_cluster_opts()
+valkey_opts += _redis_cluster_opts()
 
 # Cassandra
 cassandra_group = cfg.OptGroup(
