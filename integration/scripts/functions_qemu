@@ -86,6 +86,11 @@ function build_guest_image() {
     fi
 
     export DIB_CLOUD_INIT_DATASOURCES=${DIB_CLOUD_INIT_DATASOURCES:-"ConfigDrive, OpenStack"}
+    # cloud-init writes the network config (netplan, for systemd-networkd)
+    # from the datasource. debootstrap would also write ifupdown files for
+    # eth0 and eth1, names the guest's NICs never have (ens3, ens4), and
+    # networking.service failed on every boot.
+    export DIB_APT_MINIMAL_CREATE_INTERFACES=${DIB_APT_MINIMAL_CREATE_INTERFACES:-0}
 
     # Use PyPI mirror provided by CI, pass env variable to pypi element
     if DIB_PYPI_MIRROR_URL=$(
