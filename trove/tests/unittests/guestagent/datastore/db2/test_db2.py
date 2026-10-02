@@ -281,6 +281,39 @@ class TestDB2App(DB2GuestTestCase):
                          base.call_args[1]['extra_params'])
 
     @mock.patch.object(db2_service, 'operating_system')
+    def test_backup_before_the_first_user(self, mock_os):
+        # Right after the instance turns ACTIVE there is no users file
+        # yet: the backup goes on without it.
+        app = self._app()
+        mock_os.exists.return_value = False
+        with mock.patch.object(db2_service.DB2Admin, 'backup_databases'), \
+                mock.patch.object(base_service.BaseDbApp,
+                                  'create_backup') as base:
+            app.create_backup(mock.Mock(), {'id': 'b1'})
+        mock_os.copy.assert_not_called()
+        base.assert_called_once()
+
+    @mock.patch.object(base_service.conductor_api, 'API')
+    @mock.patch.object(db2_service, 'operating_system')
+    def test_backup_preparation_failure_is_reported(self, mock_os, conductor):
+        # A failure before the backup reports its state used to leave it
+        # NEW, and the instance in BACKUP, for good.
+        app = self._app()
+        with mock.patch.object(db2_service.DB2Admin, 'backup_databases',
+                               side_effect=Exception('SQL1035N')), \
+                mock.patch.object(base_service.BaseDbApp,
+                                  'create_backup') as base:
+            self.assertRaises(exception.TroveError, app.create_backup,
+                              mock.Mock(), {'id': 'b1'})
+        base.assert_not_called()
+        update = conductor.return_value.update_backup
+        update.assert_called_once()
+        self.assertEqual('b1', update.call_args[1]['backup_id'])
+        self.assertEqual('FAILED', update.call_args[1]['state'])
+        # The directory is still cleaned up.
+        self.assertEqual(2, mock_os.remove_dir_contents.call_count)
+
+    @mock.patch.object(db2_service, 'operating_system')
     def test_restore_databases(self, mock_os):
         app = self._app()
         mock_os.exists.return_value = True

@@ -12,6 +12,7 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+import contextlib
 import os
 import re
 import time
@@ -487,6 +488,24 @@ class BaseDbApp(object):
 
     def get_backup_strategy(self):
         return cfg.get_configuration_property('backup_strategy')
+
+    @contextlib.contextmanager
+    def backup_preparation(self, context, backup_info):
+        """Steps a datastore takes before the backup reports its state
+        (a snapshot, stopping the server). Without this a failure there
+        left the backup NEW, and the instance in BACKUP, for good.
+        """
+        try:
+            yield
+        except Exception as err:
+            LOG.exception("Failed to prepare backup %s", backup_info['id'])
+            conductor_api.API(context).update_backup(
+                CONF.guest_id, backup_id=backup_info['id'],
+                sent=timeutils.utcnow_ts(microsecond=True),
+                state=BackupState.FAILED, success=False)
+            raise exception.TroveError(
+                "Failed to create backup %s, error: %s" %
+                (backup_info['id'], err))
 
     def create_backup(self, context, backup_info, volumes_mapping={},
                       need_dbuser=True, extra_params=''):

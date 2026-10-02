@@ -593,7 +593,8 @@ class VerticaApp(service.BaseDbApp):
         running server consistently. The database is down for the time of
         the copy.
         """
-        self.shutdown_database()
+        with self.backup_preparation(context, backup_info):
+            self.shutdown_database()
         try:
             super(VerticaApp, self).create_backup(
                 context, backup_info,

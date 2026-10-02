@@ -505,8 +505,9 @@ class CassandraApp(service.BaseDbApp):
         and the backup container packs.
         """
         snapshot = backup_info['id']
-        self.nodetool('clearsnapshot', '-t', snapshot)
-        self.nodetool('snapshot', '-t', snapshot)
+        with self.backup_preparation(context, backup_info):
+            self.nodetool('clearsnapshot', '-t', snapshot)
+            self.nodetool('snapshot', '-t', snapshot)
         try:
             super(CassandraApp, self).create_backup(
                 context, backup_info,

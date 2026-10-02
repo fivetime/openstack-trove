@@ -364,10 +364,16 @@ class DB2App(service.BaseDbApp):
         backup_dir = self.trove_path(BACKUP_DIR)
         operating_system.remove_dir_contents(backup_dir)
         try:
-            self.adm.backup_databases(self.container_path(BACKUP_DIR))
-            operating_system.copy(self.trove_path(USERS_FILE),
-                                  f'{backup_dir}/{USERS_FILE}',
-                                  preserve=True, as_root=True)
+            with self.backup_preparation(context, backup_info):
+                self.adm.backup_databases(self.container_path(BACKUP_DIR))
+                # There is no users file until Trove created a user, as in
+                # a backup taken right after the instance turned ACTIVE,
+                # while it was still creating its first users.
+                if operating_system.exists(self.trove_path(USERS_FILE),
+                                           as_root=True):
+                    operating_system.copy(self.trove_path(USERS_FILE),
+                                          f'{backup_dir}/{USERS_FILE}',
+                                          preserve=True, as_root=True)
             super(DB2App, self).create_backup(
                 context, backup_info,
                 volumes_mapping=self._backup_volumes(BACKUP_DIR),
