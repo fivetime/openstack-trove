@@ -34,6 +34,9 @@ CONF = cfg.CONF
 
 # The port the members talk to each other on (group_replication_local_address).
 GROUP_PORT = 33061
+# The longest password the recovery channel takes (error 3056): shorter
+# than the passwords Trove generates by default.
+REPLICATION_PASSWORD_LENGTH = 32
 
 
 class GroupReplicationTaskManagerStrategy(
@@ -99,7 +102,8 @@ class GroupReplicationClusterTasks(
 
             replication_user = {
                 "name": self.CLUSTER_REPLICATION_USER,
-                "password": utils.generate_random_password(),
+                "password": utils.generate_random_password(
+                    REPLICATION_PASSWORD_LENGTH),
             }
             # The group name is a UUID, which a member must know to join.
             group_name = utils.generate_uuid()

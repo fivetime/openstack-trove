@@ -184,6 +184,10 @@ class GroupReplicationTasksTest(trove_testtools.TestCase):
 
         self.tasks.create_cluster('ctx', 'c1')
 
+        # The recovery channel takes passwords of 32 characters at most.
+        replication_user = self.guests['i1'].install_cluster.call_args[0][0]
+        self.assertEqual('clusterrepuser', replication_user['name'])
+        self.assertLessEqual(len(replication_user['password']), 32)
         installs = [c for c in self.calls if c[0] == 'install_cluster']
         self.assertEqual([('install_cluster', 'i1'),
                           ('install_cluster', 'i2'),
