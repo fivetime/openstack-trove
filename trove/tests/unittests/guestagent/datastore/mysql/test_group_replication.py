@@ -70,8 +70,9 @@ class TestGroupReplicationApp(trove_testtools.TestCase):
         self.app.status = mock.MagicMock()
         self.sql = []
         self.client = mock.MagicMock()
+        # SqlClient.execute takes the parameters as keywords only.
         self.client.execute.side_effect = (
-            lambda stmt, *a, **k: self.sql.append(str(stmt)))
+            lambda stmt, **k: self.sql.append(str(stmt)))
         client_cls = mock.patch.object(gr_service.mysql_util,
                                        'SqlClient').start()
         client_cls.return_value.__enter__.return_value = self.client
@@ -153,8 +154,8 @@ class TestGroupReplicationApp(trove_testtools.TestCase):
         self.app.write_cluster_configuration_overrides('cfg')
         self.configuration_manager.apply_system_override.\
             assert_called_once_with('cfg', 'cluster')
-        values = [c[0][1]['value'] for c in self.client.execute.call_args_list
-                  if len(c[0]) > 1]
+        values = [c[1]['value'] for c in self.client.execute.call_args_list
+                  if 'value' in c[1]]
         self.assertEqual(['10.0.0.1,10.0.0.4', '10.0.0.1:33061'], values)
 
     def test_stopped_member_only_keeps_the_configuration(self):

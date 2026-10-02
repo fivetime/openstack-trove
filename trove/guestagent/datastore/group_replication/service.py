@@ -123,23 +123,20 @@ class GroupReplicationAppMixin(galera_service.GaleraAppMixin):
         has to exist before the member joins the group.
         """
         LOG.info("Creating the cluster replication user.")
-        name = replication_user['name']
+        account = {'name': replication_user['name'],
+                   'password': replication_user['password']}
         with mysql_util.SqlClient(self.get_engine()) as client:
             client.execute(text("SET SESSION sql_log_bin = 0"))
-            client.execute(
-                text("CREATE USER IF NOT EXISTS :name@'%' "
-                     "IDENTIFIED BY :password"),
-                {'name': name, 'password': replication_user['password']})
-            client.execute(
-                text("ALTER USER :name@'%' IDENTIFIED BY :password"),
-                {'name': name, 'password': replication_user['password']})
-            client.execute(
-                text("GRANT REPLICATION SLAVE, CONNECTION_ADMIN, "
-                     "BACKUP_ADMIN, GROUP_REPLICATION_STREAM "
-                     "ON *.* TO :name@'%'"), {'name': name})
-            client.execute(
-                text("GRANT SELECT ON performance_schema.* TO :name@'%'"),
-                {'name': name})
+            client.execute(text("CREATE USER IF NOT EXISTS :name@'%' "
+                                "IDENTIFIED BY :password"), **account)
+            client.execute(text("ALTER USER :name@'%' "
+                                "IDENTIFIED BY :password"), **account)
+            client.execute(text("GRANT REPLICATION SLAVE, CONNECTION_ADMIN, "
+                                "BACKUP_ADMIN, GROUP_REPLICATION_STREAM "
+                                "ON *.* TO :name@'%'"),
+                           name=account['name'])
+            client.execute(text("GRANT SELECT ON performance_schema.* "
+                                "TO :name@'%'"), name=account['name'])
             client.execute(text("SET SESSION sql_log_bin = 1"))
 
     def _set_recovery_credentials(self, replication_user):
@@ -149,8 +146,8 @@ class GroupReplicationAppMixin(galera_service.GaleraAppMixin):
                 text("CHANGE REPLICATION SOURCE TO SOURCE_USER = :name, "
                      "SOURCE_PASSWORD = :password FOR CHANNEL '%s'"
                      % RECOVERY_CHANNEL),
-                {'name': replication_user['name'],
-                 'password': replication_user['password']})
+                name=replication_user['name'],
+                password=replication_user['password'])
 
     def _member_state(self):
         try:
@@ -261,7 +258,7 @@ class GroupReplicationAppMixin(galera_service.GaleraAppMixin):
                 value = str(configuration.get(option, '')).strip('"')
                 if value:
                     client.execute(text("SET GLOBAL %s = :value" % option),
-                                   {'value': value})
+                                   value=value)
 
     def leave_group(self):
         LOG.info("Leaving the group.")
