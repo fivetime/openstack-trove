@@ -890,9 +890,10 @@ redis_group, redis_opts = _build_redis_family_datastore_opts(
 
 # Redis Cluster: every member is a master holding a share of the 16384
 # hash slots; growing rebalances slots onto the new members, shrinking
-# moves them off the leaving ones first. Valkey speaks the same cluster
-# protocol, and valkey-cli --cluster works as redis-cli --cluster does, so
-# it runs on the same strategies. KeyDB does not, until it is tested.
+# moves them off the leaving ones first. Valkey and KeyDB speak the same
+# cluster protocol, and their CLIs' --cluster works as redis-cli's does,
+# so they run on the same strategies. KeyDB 6.3 is Redis 6.2: it has no
+# CLUSTER ADDSLOTSRANGE, which the guest does not use.
 def _redis_cluster_opts():
     return [
         cfg.BoolOpt('cluster_support', default=True,
@@ -917,6 +918,7 @@ def _redis_cluster_opts():
 
 redis_opts += _redis_cluster_opts()
 valkey_opts += _redis_cluster_opts()
+keydb_opts += _redis_cluster_opts()
 
 # Cassandra
 cassandra_group = cfg.OptGroup(
