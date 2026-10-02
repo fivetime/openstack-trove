@@ -316,6 +316,11 @@ class Cluster(object):
                         instance['name'] = node['name']
                     if 'volume' in node:
                         instance['volume_size'] = int(node['volume']['size'])
+                        # The strategies take a member's volume type from
+                        # here, as they do when the cluster is created; it
+                        # was dropped, and new members got the default.
+                        if node['volume'].get('type'):
+                            instance['volume_type'] = node['volume']['type']
                     if 'modules' in node:
                         instance['modules'] = node['modules']
                     if 'nics' in node:

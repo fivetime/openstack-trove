@@ -45,3 +45,24 @@ class TestClusterModel(trove_testtools.TestCase):
         self.assertIsInstance(cluster, MongoDbCluster)
         self.assertEqual(server_group, cluster.server_group,
                          "Unexpected server group")
+
+
+class TestClusterGrowAction(trove_testtools.TestCase):
+
+    def test_grow_keeps_the_volume_type(self):
+        cluster = models.Cluster.__new__(models.Cluster)
+        cluster.db_info = Mock(id='cid')
+        cluster.ds_version = Mock(image_id='image')
+        cluster.grow = Mock()
+        context = Mock()
+        with patch.object(models, 'StartNotification'), \
+                patch.object(models, 'DBaaSClusterGrow'):
+            cluster.action(context, Mock(), 'grow', [
+                {'flavorRef': 'f1', 'volume': {'size': 2,
+                                               'type': 'nvme-rep3'}},
+                {'flavorRef': 'f1', 'volume': {'size': 2}}])
+        instances, image_id = cluster.grow.call_args[0]
+        self.assertEqual('nvme-rep3', instances[0]['volume_type'])
+        self.assertEqual(2, instances[0]['volume_size'])
+        self.assertNotIn('volume_type', instances[1])
+        self.assertEqual('image', image_id)
