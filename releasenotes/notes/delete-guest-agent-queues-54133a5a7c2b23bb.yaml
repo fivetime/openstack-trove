@@ -1,0 +1,10 @@
+---
+fixes:
+  - |
+    Deleting an instance now deletes the RabbitMQ queues of its guest agent,
+    ``guestagent.<instance id>`` and the agent's own server queue. Nothing
+    removed them since Trove moved to oslo.messaging, so every deleted
+    instance left them behind, with any messages still in them. This needs
+    an oslo.messaging that provides ``delete_rpc_server_queues``; with an
+    older one the queues are left as before. Queues left by instances
+    deleted earlier are not removed.

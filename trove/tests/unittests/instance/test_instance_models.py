@@ -202,6 +202,43 @@ class BaseInstanceTest(trove_testtools.TestCase):
             'user-port')
 
 
+class DeleteResourcesTest(trove_testtools.TestCase):
+
+    def setUp(self):
+        super(DeleteResourcesTest, self).setUp()
+        db_info = Mock(id='instance-id', tenant_id='tenant-id',
+                       datastore_version_id=None, compute_instance_id=None,
+                       region_id=None)
+        self.instance = models.BaseInstance(Mock(), db_info, Mock(), None)
+        self.instance._neutron_client = Mock()
+        self.instance._neutron_client.list_ports.return_value = {'ports': []}
+        self.instance._neutron_client.list_security_groups.return_value = {
+            'security_groups': []}
+        self.instance._volume_client = Mock()
+        self.instance._volume_client.volumes.list.return_value = []
+        self.instance._server_group_loaded = True
+        self.instance._server_group = None
+        self.instance._guest = Mock()
+        for target, name in ((models.srv_grp.ServerGroup, 'delete'),
+                             (models.notification, 'TroveInstanceDelete')):
+            patcher = patch.object(target, name)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_delete_resources_deletes_guest_queues(self):
+        self.instance._delete_resources(Mock())
+
+        self.instance._guest.delete_queue.assert_called_once_with()
+
+    def test_delete_resources_guest_queue_failure(self):
+        # A failure to delete the queues must not stop the deletion.
+        self.instance._guest.delete_queue.side_effect = Exception('boom')
+
+        self.instance._delete_resources(Mock())
+
+        self.instance._volume_client.volumes.list.assert_called_once()
+
+
 class CreateInstanceTest(trove_testtools.TestCase):
 
     @patch.object(task_api.API, 'get_client', Mock(return_value=Mock()))

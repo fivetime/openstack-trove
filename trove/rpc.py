@@ -25,11 +25,13 @@ __all__ = [
     'get_allowed_exmods',
     'get_client',
     'get_server',
+    'delete_server_queues',
     'get_notifier',
 ]
 
 
 from oslo_config import cfg
+from oslo_log import log as logging
 import oslo_messaging as messaging
 from oslo_messaging.rpc import dispatcher
 
@@ -38,6 +40,7 @@ from trove.common.rpc import secure_serializer as ssz
 from trove.common.rpc import serializer as sz
 
 CONF = cfg.CONF
+LOG = logging.getLogger(__name__)
 TRANSPORT = None
 NOTIFICATION_TRANSPORT = None
 NOTIFIER = None
@@ -133,6 +136,21 @@ def get_server(target, endpoints, key, serializer=None,
         executor=executor,
         serializer=serializer,
         access_policy=dispatcher.DefaultRPCAccessPolicy)
+
+
+def delete_server_queues(target, retry=None):
+    """Delete the queues the RPC servers of a target consume from.
+
+    For a topic that is not used again. Does nothing with an oslo.messaging
+    too old to provide delete_rpc_server_queues.
+    """
+    assert TRANSPORT is not None
+    delete = getattr(messaging, 'delete_rpc_server_queues', None)
+    if delete is None:
+        LOG.debug("oslo.messaging has no delete_rpc_server_queues, not "
+                  "deleting the queues of %s", target)
+        return
+    delete(TRANSPORT, target, retry=retry)
 
 
 def get_notifier(service=None, host=None, publisher_id=None):

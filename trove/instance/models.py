@@ -882,6 +882,16 @@ class BaseInstance(SimpleInstance):
                             "Timeout deleting compute server %(vm_id)s",
                             {'instance_id': self.id, 'vm_id': self.server_id})
 
+        # Message queues of the guest agent. After the compute server is
+        # gone, so that the agent does not declare them again.
+        try:
+            LOG.info("Deleting message queues of the guest agent for "
+                     "instance %s", self.id)
+            self.guest.delete_queue()
+        except Exception as e:
+            LOG.warning("Failed to delete message queues of the guest agent "
+                        "for instance %s, error: %s", self.id, str(e))
+
         # Cinder volume.
         vols = self.volume_client.volumes.list(
             search_opts={'name': f'trove-{self.id}'})

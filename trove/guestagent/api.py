@@ -352,6 +352,20 @@ class API(object):
             version = '1.0'
         self._cast("prepare", version=version, **prepare_args)
 
+    def delete_queue(self):
+        """Delete the queues of this instance's guest agent.
+
+        The guest agent consumes from the topic named after the instance and
+        from its own server queue, which _create_guest_queue declares ahead
+        of it. Once the instance is deleted nothing consumes from them again,
+        and RabbitMQ would keep them, with anything left in them, forever.
+        """
+        target = messaging.Target(topic=self._get_routing_key(),
+                                  server=self.id)
+        # A few retries rather than forever: deleting the instance must not
+        # hang on the message bus, and a failure here is only logged.
+        rpc.delete_server_queues(target, retry=3)
+
     def _create_guest_queue(self):
         """Call to construct, start and immediately stop rpc server in order
            to create a queue to communicate with the guestagent. This is
