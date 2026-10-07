@@ -51,3 +51,10 @@ class GroupReplicationGuestAgentAPI(
         """
         return self._call("is_writable_member", self.agent_high_timeout,
                           version=guest_api.API.API_BASE_VERSION)
+
+    def get_member_role(self):
+        """The member's state and role in the group. For a view: a member
+        that does not answer soon counts as unknown.
+        """
+        return self._call("get_member_role", self.agent_low_timeout,
+                          version=guest_api.API.API_BASE_VERSION)

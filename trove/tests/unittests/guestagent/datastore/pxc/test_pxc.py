@@ -117,7 +117,8 @@ class TestPXCDatastoreWiring(trove_testtools.TestCase):
     def test_has_every_mysql_option(self):
         # Those of Group Replication clusters aside: PXC's are Galera's.
         for name in CONF.mysql:
-            if name in ('cluster_tcp_ports',):
+            if name == 'cluster_tcp_ports' or name.startswith(
+                    'group_replication_'):
                 continue
             self.assertIn(name, CONF.pxc,
                           '[pxc] lacks the MySQL option %s' % name)

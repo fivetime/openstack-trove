@@ -19,15 +19,24 @@ default), where one member takes writes and the group elects another when
 it fails, or ``multi-primary``, where every member does.
 """
 
+from oslo_log import log as logging
+
 from trove.common import exception
 from trove.common.i18n import _
 from trove.common.strategies.cluster.experimental.galera_common import (
     api as galera_api)
 
+LOG = logging.getLogger(__name__)
+
 MODE_KEY = 'group_replication_mode'
 SINGLE_PRIMARY = 'single-primary'
 MULTI_PRIMARY = 'multi-primary'
 MODES = (SINGLE_PRIMARY, MULTI_PRIMARY)
+# The roles a member has as the view shows them.
+ROLES = {('ONLINE', 'PRIMARY'): 'primary',
+         ('ONLINE', 'SECONDARY'): 'secondary'}
+# Members in these are asked for their role; the others cannot answer.
+ANSWERING_STATUSES = ('ACTIVE', 'HEALTHY')
 
 
 class GroupReplicationAPIStrategy(galera_api.GaleraCommonAPIStrategy):
@@ -35,6 +44,14 @@ class GroupReplicationAPIStrategy(galera_api.GaleraCommonAPIStrategy):
     @property
     def cluster_class(self):
         return GroupReplicationCluster
+
+    @property
+    def cluster_view_class(self):
+        return GroupReplicationClusterView
+
+    @property
+    def mgmt_cluster_view_class(self):
+        return GroupReplicationMgmtClusterView
 
 
 class GroupReplicationCluster(galera_api.GaleraCommonCluster):
@@ -64,3 +81,45 @@ class GroupReplicationCluster(galera_api.GaleraCommonCluster):
         return super(GroupReplicationCluster, cls).create(
             context, name, datastore, datastore_version, instances,
             properties, locality, configuration, image_id=image_id)
+
+
+class MemberRolesMixin(object):
+    """Each member's role in the group, asked of the member when the view
+    shows the members in full; a list shows none.
+    """
+
+    def _member_role(self, instance):
+        if instance.status not in ANSWERING_STATUSES:
+            return 'unknown'
+        try:
+            answer = self.cluster.get_guest(instance).get_member_role()
+        except Exception as err:
+            LOG.info("Member %s did not tell its role: %s", instance.id, err)
+            return 'unknown'
+        state, role = answer.get('state'), answer.get('role')
+        if (state, role) in ROLES:
+            return ROLES[(state, role)]
+        return state.lower() if state else 'unknown'
+
+    def _build_instances(self, ip_to_be_published_for=[],
+                         instance_dict_to_be_published_for=[]):
+        instances, ip_list = super(MemberRolesMixin, self)._build_instances(
+            ip_to_be_published_for, instance_dict_to_be_published_for)
+        if self.load_servers:
+            by_id = {instance.id: instance
+                     for instance in self.cluster.instances}
+            for instance_dict in instances:
+                instance = by_id.get(instance_dict['id'])
+                if instance is not None:
+                    instance_dict['role'] = self._member_role(instance)
+        return instances, ip_list
+
+
+class GroupReplicationClusterView(MemberRolesMixin,
+                                  galera_api.GaleraCommonClusterView):
+    pass
+
+
+class GroupReplicationMgmtClusterView(MemberRolesMixin,
+                                      galera_api.GaleraCommonMgmtClusterView):
+    pass

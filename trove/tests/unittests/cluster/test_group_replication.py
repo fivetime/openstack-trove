@@ -13,6 +13,7 @@
 import configparser
 from unittest import mock
 
+from trove.cluster import views as cluster_views
 from trove.common import cfg
 from trove.common import exception
 from trove.common.strategies.cluster.experimental.galera_common import (
@@ -249,6 +250,65 @@ class GroupReplicationTasksTest(trove_testtools.TestCase):
                    if c[0] == 'write_cluster_configuration_overrides']
         self.assertEqual(['i1', 'i3'], updates)
         self.tasks.update_statuses_on_failure.assert_not_called()
+
+
+class GroupReplicationViewTest(trove_testtools.TestCase):
+
+    def _view(self, load_servers, roles):
+        cluster = mock.Mock()
+        cluster.instances = [mock.Mock(id=i, status='ACTIVE')
+                             for i in roles]
+        cluster.instances[0].status = 'BUILD'
+
+        def guest(instance):
+            g = mock.Mock()
+            answer = roles[instance.id]
+            if isinstance(answer, Exception):
+                g.get_member_role.side_effect = answer
+            else:
+                g.get_member_role.return_value = answer
+            return g
+        cluster.get_guest = guest
+        return gr_api.GroupReplicationClusterView(cluster,
+                                                  load_servers=load_servers)
+
+    @mock.patch.object(cluster_views.ClusterView, '_build_instances')
+    def test_roles_of_the_members(self, build):
+        roles = {'i1': {'state': 'ONLINE', 'role': 'PRIMARY'},
+                 'i2': {'state': 'ONLINE', 'role': 'PRIMARY'},
+                 'i3': {'state': 'ONLINE', 'role': 'SECONDARY'},
+                 'i4': {'state': 'RECOVERING', 'role': 'SECONDARY'},
+                 'i5': exception.GuestTimeout(),
+                 'i6': {'state': None, 'role': None}}
+        build.return_value = ([{'id': i} for i in roles], [])
+        instances, _ips = self._view(True, roles).build_instances()
+        # i1 is still building and is not asked.
+        self.assertEqual(['unknown', 'primary', 'secondary', 'recovering',
+                          'unknown', 'unknown'],
+                         [i['role'] for i in instances])
+
+    @mock.patch.object(cluster_views.ClusterView, '_build_instances')
+    def test_a_list_asks_nobody(self, build):
+        build.return_value = ([{'id': 'i2'}], [])
+        view = self._view(False, {'i2': {'state': 'ONLINE',
+                                         'role': 'PRIMARY'}})
+        instances, _ips = view.build_instances()
+        self.assertNotIn('role', instances[0])
+
+    def test_strategy_views(self):
+        s = gr_api.GroupReplicationAPIStrategy()
+        self.assertIs(gr_api.GroupReplicationClusterView,
+                      s.cluster_view_class)
+        self.assertIs(gr_api.GroupReplicationMgmtClusterView,
+                      s.mgmt_cluster_view_class)
+
+    def test_the_role_call_has_a_low_timeout(self):
+        api = gr_guestagent.GroupReplicationGuestAgentAPI.__new__(
+            gr_guestagent.GroupReplicationGuestAgentAPI)
+        api.agent_low_timeout = 15
+        with mock.patch.object(api, '_call') as call:
+            api.get_member_role()
+        call.assert_called_once_with('get_member_role', 15, version='1.0')
 
 
 class GroupReplicationRootTest(trove_testtools.TestCase):

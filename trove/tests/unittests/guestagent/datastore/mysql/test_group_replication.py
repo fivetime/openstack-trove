@@ -17,6 +17,7 @@ from oslo_utils import importutils
 from trove.common import constants
 from trove.common import exception
 from trove.guestagent.datastore.group_replication import manager as gr_manager
+from trove.guestagent.datastore.group_replication import probe
 from trove.guestagent.datastore.group_replication import service as gr_service
 from trove.guestagent.datastore.mysql import manager as mysql_manager
 from trove.guestagent.datastore.mysql import service as mysql_service
@@ -42,13 +43,43 @@ class TestGroupReplicationWiring(trove_testtools.TestCase):
             self.assertLess(mro.index(gr_service.GroupReplicationAppMixin),
                             mro.index(mysql_service.MySqlApp))
 
+    @mock.patch.object(probe.RoleProbe, 'start')
     @mock.patch.object(mysql_manager.BaseManager, 'docker_client',
                        new_callable=mock.PropertyMock)
-    def test_mysql_manager_runs_the_group_replication_app(self, _docker):
+    def test_mysql_manager_runs_the_group_replication_app(self, _docker,
+                                                          probe_start):
         manager = mysql_manager.Manager()
         self.assertIsInstance(manager.app,
                               mysql_service.GroupReplicationMySqlApp)
         self.assertIs(manager.app, manager.adm.mysql_app)
+        # With the role probe running.
+        self.assertIsInstance(manager.group_probe, probe.RoleProbe)
+        probe_start.assert_called_once()
+
+    @mock.patch.object(probe.RoleProbe, 'start')
+    @mock.patch.object(mysql_manager.BaseManager, 'docker_client',
+                       new_callable=mock.PropertyMock)
+    def test_cluster_calls_tell_the_probe(self, _docker, _start):
+        manager = mysql_manager.Manager()
+        manager.app = mock.MagicMock()
+        manager.status = mock.MagicMock()
+        manager.group_probe = mock.MagicMock()
+        calls = mock.Mock()
+        calls.attach_mock(manager.group_probe, 'probe')
+        calls.attach_mock(manager.app, 'app')
+
+        manager.cluster_complete(None)
+        manager.group_probe.enable_complete.assert_called_once()
+
+        manager.leave_cluster(None)
+        # The probe is disabled before the member leaves.
+        self.assertEqual([mock.call.probe.disable(),
+                          mock.call.app.leave_group()],
+                         [c for c in calls.mock_calls
+                          if 'disable' in str(c) or 'leave_group' in str(c)])
+
+        manager.app.get_member_role.return_value = {'state': 'ONLINE'}
+        self.assertEqual({'state': 'ONLINE'}, manager.get_member_role(None))
 
 
 class TestGroupReplicationApp(trove_testtools.TestCase):
@@ -195,3 +226,11 @@ class TestGroupReplicationApp(trove_testtools.TestCase):
                                 (('RECOVERING', 'PRIMARY'), False)):
             self._states(state)
             self.assertEqual(writable, self.app.is_writable_member())
+
+    def test_member_role(self):
+        self._states(('ONLINE', 'SECONDARY'))
+        self.assertEqual({'state': 'ONLINE', 'role': 'SECONDARY',
+                          'writable': False}, self.app.get_member_role())
+        self._states((None, None))
+        self.assertEqual({'state': None, 'role': None, 'writable': False},
+                         self.app.get_member_role())

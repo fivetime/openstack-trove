@@ -741,11 +741,27 @@ def _with_group_replication(opts):
         cfg.IntOpt('min_cluster_member_count', default=3,
                    help='Minimum number of members in a Group Replication '
                         'cluster.'),
-        cfg.ListOpt('cluster_tcp_ports', default=["33061"],
+        cfg.ListOpt('cluster_tcp_ports', default=["33061", "3307"],
                     item_type=ListOfPortsType,
                     help='TCP ports the members of a cluster talk to each '
                          'other on, opened in their security group as well: '
-                         'the group communication port.'),
+                         'the group communication port, and the ready port '
+                         'a member that takes writes answers on.'),
+        cfg.IntOpt('group_replication_probe_interval', default=3,
+                   help='Seconds between two checks of the member\'s role '
+                        'in the group by the guest agent, which keeps the '
+                        'ready port open on a member that takes writes. '
+                        '0 turns the probe off.'),
+        cfg.IntOpt('group_replication_probe_timeout', default=5,
+                   help='Seconds a check of the role may take before the '
+                        'role counts as unknown.'),
+        cfg.PortOpt('group_replication_ready_port', default=3307,
+                    help='Port a member that takes writes answers on, '
+                         'redirected to the database port in the database '
+                         'container; a load balancer checks it.'),
+        cfg.IntOpt('group_replication_ready_port_reconcile', default=20,
+                   help='Checks of the role between two unconditional '
+                        'checks that the ready port is as it should be.'),
         cfg.StrOpt('api_strategy',
                    default='trove.common.strategies.cluster.experimental.'
                    'group_replication.api.GroupReplicationAPIStrategy',

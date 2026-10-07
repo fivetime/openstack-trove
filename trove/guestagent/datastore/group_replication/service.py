@@ -268,12 +268,17 @@ class GroupReplicationAppMixin(galera_service.GaleraAppMixin):
             LOG.exception("Could not leave the group; the group will "
                           "expel the member once it is gone.")
 
-    def is_writable_member(self):
-        """Whether this member takes writes: the primary of a single-primary
-        group, any member of a multi-primary one.
+    def get_member_role(self):
+        """The member's state and role in the group, and whether it takes
+        writes: the primary of a single-primary group, any member of a
+        multi-primary one.
         """
         state, role = self._member_state()
-        return state == 'ONLINE' and role == 'PRIMARY'
+        return {'state': state, 'role': role,
+                'writable': state == 'ONLINE' and role == 'PRIMARY'}
+
+    def is_writable_member(self):
+        return self.get_member_role()['writable']
 
     def get_cluster_context(self):
         credentials = operating_system.read_file(
