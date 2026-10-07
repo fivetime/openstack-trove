@@ -517,6 +517,15 @@ class Manager(periodic_task.PeriodicTasks):
             mgmtmodels.publish_exist_events(self.exists_transformer,
                                             self.admin_context)
 
+    if CONF.cluster_recovery_check_interval:
+        @periodic_task.periodic_task(
+            spacing=CONF.cluster_recovery_check_interval)
+        def recover_clusters(self, context):
+            """The clusters whose task manager strategy brings them back
+            after every member went down: one look at each.
+            """
+            models.recover_clusters(self.admin_context)
+
     if CONF.quota_notification_interval:
         @periodic_task.periodic_task(spacing=CONF.quota_notification_interval)
         def publish_quota_notifications(self, context):

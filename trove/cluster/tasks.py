@@ -75,6 +75,9 @@ class ClusterTasks(object):
         0x08, 'RESTARTING_CLUSTER', 'Restarting the cluster.')
     UPDATING_CLUSTER = ClusterTask(
         0x09, 'UPDATING_CLUSTER', 'Updating cluster configuration.')
+    RECOVERING_CLUSTER = ClusterTask(
+        0x0A, 'RECOVERING_CLUSTER',
+        'Forming the cluster again after every member went down.')
 
 
 # Dissuade further additions at run-time.

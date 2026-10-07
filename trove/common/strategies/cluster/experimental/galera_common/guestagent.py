@@ -105,3 +105,17 @@ class GaleraCommonGuestAgentAPI(guest_api.API):
         """
         return self._call("get_member_role", self.agent_low_timeout,
                           version=guest_api.API.API_BASE_VERSION)
+
+    def get_recovery_view(self, timeout=None):
+        """Where the member stands, for the recovery of the cluster: a
+        member that does not answer in time is unreachable.
+        """
+        return self._call("get_recovery_view",
+                          timeout or self.agent_low_timeout,
+                          version=guest_api.API.API_BASE_VERSION)
+
+    def bootstrap_cluster(self):
+        """Form the cluster again on this member."""
+        LOG.debug("Forming the cluster again.")
+        return self._call("bootstrap_cluster", CONF.cluster_usage_timeout,
+                          version=guest_api.API.API_BASE_VERSION)

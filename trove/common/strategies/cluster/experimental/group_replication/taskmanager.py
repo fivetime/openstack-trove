@@ -50,6 +50,10 @@ class GroupReplicationTaskManagerStrategy(
     def task_manager_cluster_tasks_class(self):
         return GroupReplicationClusterTasks
 
+    def cluster_recovery(self, manager):
+        # The members bring the group back by themselves (the probe).
+        return None
+
 
 class GroupReplicationClusterTasks(
         galera_taskmanager.GaleraCommonClusterTasks):

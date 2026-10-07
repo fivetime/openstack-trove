@@ -288,6 +288,12 @@ common_opts = [
     cfg.IntOpt('load_balancer_timeout', default=600,
                help='Seconds to wait for a load balancer to be ACTIVE, or '
                     'gone, after a change.'),
+    cfg.IntOpt('cluster_recovery_check_interval', default=30,
+               help='Seconds between two looks of the task manager at the '
+                    'clusters whose members cannot bring the cluster back '
+                    'by themselves after every member went down (Galera): '
+                    'the members are asked where they stand and one is '
+                    'told to form the cluster again. 0 turns it off.'),
     cfg.StrOpt('cluster_default_locality', default='anti-affinity',
                choices=constants.VALID_LOCALITIES + ('',),
                help='Default Nova server group policy for the members of a '

@@ -107,5 +107,15 @@ class GaleraManagerMixin(object):
     def is_writable_member(self, context):
         return self.app.is_writable_member()
 
+    def get_recovery_view(self, context):
+        """Where the member stands, for the task manager's recovery."""
+        return self.app.recovery_view()
+
+    def bootstrap_cluster(self, context):
+        """Form the cluster again on this member, told by the task
+        manager.
+        """
+        self.app.bootstrap_group()
+
     def get_member_role(self, context):
         return self.app.get_member_role()

@@ -1,0 +1,25 @@
+---
+features:
+  - |
+    A Galera cluster (Percona XtraDB Cluster, MariaDB) is formed again
+    after every member went down. Galera does it by itself when every
+    member of the last primary component returns; when only some do, or
+    after a clean stop, the members wait for a primary component with
+    their database port closed, and the task manager steps in: every
+    ``cluster_recovery_check_interval`` seconds (30, in ``[DEFAULT]``; 0
+    turns it off) it asks the members of each Galera cluster where they
+    stand (``get_recovery_view``: in a primary component, waiting for one,
+    and the position from grastate.dat, from what the server logged when
+    it recovered its position, or from a recovery run of the server with
+    the database stopped, which MariaDB needs), and when a majority of the
+    members has been waiting for ``cluster_recovery_grace`` seconds with
+    no primary component anywhere, it tells the member that holds every
+    transaction any of them holds (the lowest address among several) to
+    form the cluster again (``bootstrap_cluster``: marked safe to
+    bootstrap, started with ``--wsrep-new-cluster``, then as an ordinary
+    member once the others have joined). The ``cluster_recovery_*``,
+    ``cluster_auto_bootstrap``, ``cluster_bootstrap_needs_all_members``
+    and ``cluster_bootstrap_jitter`` options of the datastore apply. The
+    cluster carries the task ``RECOVERING_CLUSTER`` meanwhile. A member
+    whose history differs from the others', or that holds less than
+    another, never forms the cluster again; an operator does.

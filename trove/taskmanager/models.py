@@ -55,6 +55,7 @@ from trove.common import utils
 from trove.common.utils import try_recover
 from trove.conductor import api as conductor_api
 from trove.configuration import models as config_models
+from trove.datastore import models as datastore_models
 from trove.extensions.common import models as common_models
 from trove.instance import models as inst_models
 from trove.instance.models import DBInstance
@@ -2472,3 +2473,32 @@ def load_cluster_tasks(context, cluster_id):
     task_manager_cluster_tasks_class = strat.task_manager_cluster_tasks_class
     return ClusterTasks.load(context, cluster_id,
                              task_manager_cluster_tasks_class)
+
+
+# The recovery of each datastore manager's clusters, kept between two
+# looks: it remembers since when a cluster has been waiting.
+_cluster_recoveries = {}
+
+
+def recover_clusters(context):
+    """One look at every cluster whose task manager strategy brings the
+    cluster back after every member went down.
+    """
+    by_manager = {}
+    for db_cluster in DBCluster.find_all(deleted=False).all():
+        try:
+            manager = datastore_models.DatastoreVersion.load_by_uuid(
+                db_cluster.datastore_version_id).manager
+        except Exception:
+            LOG.exception("No datastore version for cluster %s.",
+                          db_cluster.id)
+            continue
+        by_manager.setdefault(manager, []).append(db_cluster)
+    for manager, db_clusters in by_manager.items():
+        if manager not in _cluster_recoveries:
+            strat = strategy.load_taskmanager_strategy(manager)
+            make = getattr(strat, 'cluster_recovery', None)
+            _cluster_recoveries[manager] = make(manager) if make else None
+        recovery = _cluster_recoveries[manager]
+        if recovery is not None:
+            recovery.run(context, db_clusters)

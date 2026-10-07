@@ -18,14 +18,18 @@ each member in turn, the first with ``bootstrap=True``, and
 ``cluster_complete`` on all of them once every member has joined.
 """
 
+import os
+import re
 import time
 
 import docker
 from oslo_log import log as logging
+from oslo_utils import encodeutils
 from sqlalchemy import exc
 from sqlalchemy.sql.expression import text
 
 from trove.common import cfg
+from trove.common import constants
 from trove.common import exception
 from trove.common.i18n import _
 from trove.guestagent.common import cluster_probe
@@ -68,6 +72,17 @@ WSREP_STATUS = (
     "'wsrep_local_state_uuid', 'wsrep_cluster_size')")
 SYNCED = 'Synced'
 PRIMARY = 'Primary'
+# Where the server keeps where it stands between two runs.
+GRASTATE_FILE = 'grastate.dat'
+SAFE_TO_BOOTSTRAP = re.compile(r'^safe_to_bootstrap:.*$', re.MULTILINE)
+# What a server that starts logs once it has worked out its position: on
+# Percona XtraDB Cluster "Setting GCS initial position to <uuid>:<seqno>",
+# on MariaDB "Setting initial position to <uuid>:<seqno>"; a recovery run
+# prints "Recovered position: <uuid>:<seqno>".
+LOGGED_POSITION = re.compile(
+    r'(?:initial position to|Recovered position:)\s*'
+    r'([0-9a-f-]{36}):(-?\d+)')
+LOG_TAIL = 400
 
 
 def _parse_status(output):
@@ -429,10 +444,256 @@ class GaleraAppMixin(object):
                 role = 'PRIMARY'
             else:
                 role = 'SECONDARY'
-        # A member out of the primary component is not brought back yet:
-        # the next step.
+        # A member out of the primary component is brought back by the
+        # task manager, not by the probe: a member that waits for a
+        # primary view does not open its database port, so the members
+        # cannot ask each other where they stand (see recovery_view).
         return cluster_probe.MemberView(state, role, role == 'PRIMARY',
                                         False)
+
+    # Recovery, after every member went down. A member that comes up and
+    # finds no primary component waits for one, with its database port
+    # closed: where it stands is in grastate.dat (after a clean stop) or in
+    # what the server logged when it recovered its position (after a
+    # crash). The task manager asks every member, decides and tells one
+    # member to form the cluster again.
+
+    def _grastate(self):
+        """What grastate.dat holds: uuid, seqno, safe_to_bootstrap; {}
+        when there is none.
+        """
+        path = os.path.join(self.get_data_dir(), GRASTATE_FILE)
+        try:
+            content = operating_system.read_file(path, as_root=True)
+        except Exception as err:
+            LOG.debug("No grastate.dat: %s", err)
+            return {}
+        state = {}
+        for line in content.splitlines():
+            name, sep, value = line.partition(':')
+            if sep and not name.startswith('#'):
+                state[name.strip()] = value.strip()
+        return state
+
+    def _logged_position(self):
+        """The position the server logged last when it started: a server
+        that crashed has -1 in grastate.dat and recovers its position from
+        the storage engine.
+        """
+        try:
+            container = self.docker_client.containers.get(CONTAINER_NAME)
+            output = encodeutils.safe_decode(
+                container.logs(tail=LOG_TAIL) or b'')
+        except Exception as err:
+            LOG.debug("No container log: %s", err)
+            return None
+        found = None
+        for line in output.splitlines():
+            match = LOGGED_POSITION.search(line)
+            if match:
+                found = (match.group(1), int(match.group(2)))
+        return found
+
+    # The server binary of the image, for a recovery run.
+    SERVER_BINARY = 'mysqld'
+    _recovered = None
+
+    def _recover_position(self):
+        """The position a recovery run of the server finds in the storage
+        engine, with the database stopped: what MariaDB does on every
+        start through galera_recovery, which a container has not. The
+        container is started again after; the answer is kept until the
+        member is in a primary component again, as nothing changes on a
+        member that waits.
+        """
+        state = self._grastate()
+        key = (state.get('uuid'), state.get('seqno'),
+               self._container_started_at())
+        if self._recovered and self._recovered[0] == key:
+            return self._recovered[1]
+        command = self._container_command().split()
+        if not command:
+            return None
+        LOG.info("Running the server's recovery to find the position of "
+                 "the member.")
+        position = None
+        try:
+            self.stop_db()
+            output = encodeutils.safe_decode(
+                self.docker_client.containers.run(
+                    self._image(), command + ['--wsrep-recover'],
+                    entrypoint=self.SERVER_BINARY, remove=True,
+                    user='%s:%s' % (self.database_service_uid,
+                                    self.database_service_gid),
+                    volumes=self._volumes(), stdout=True, stderr=True)
+                or b'')
+            for line in output.splitlines():
+                match = LOGGED_POSITION.search(line)
+                if match:
+                    position = (match.group(1), int(match.group(2)))
+        except Exception as err:
+            LOG.warning("The recovery run did not give a position: %s", err)
+        finally:
+            try:
+                self.docker_client.containers.get(CONTAINER_NAME).start()
+            except Exception as err:
+                LOG.warning("The database container did not start again: "
+                            "%s", err)
+        self._recovered = (key, position)
+        return position
+
+    def _image(self):
+        return '%s:%s' % (CONF.get(CONF.datastore_manager).docker_image,
+                          CONF.datastore_version)
+
+    def _volumes(self):
+        return {
+            "/etc/mysql": {"bind": "/etc/mysql", "mode": "rw"},
+            constants.MYSQL_HOST_SOCKET_PATH: {"bind": "/var/run/mysqld",
+                                               "mode": "rw"},
+            "/var/lib/mysql": {"bind": "/var/lib/mysql", "mode": "rw"},
+        }
+
+    def _container_started_at(self):
+        try:
+            return self.docker_client.containers.get(
+                CONTAINER_NAME).attrs['State'].get('StartedAt')
+        except Exception:
+            return None
+
+    def _position(self):
+        """Where the member stands: (state uuid, seqno), None when not
+        known. As the server last logged it (right after a crash,
+        grastate.dat says -1 and Percona XtraDB Cluster logs what it
+        recovered), else from grastate.dat (after a clean stop), else from
+        a recovery run (MariaDB, which logs nothing and leaves -1 in
+        grastate.dat even after a clean stop).
+        """
+        logged = self._logged_position()
+        if logged is not None:
+            return logged
+        state = self._grastate()
+        try:
+            seqno = int(state.get('seqno', -1))
+        except ValueError:
+            seqno = -1
+        if seqno >= 0 and state.get('uuid'):
+            return (state['uuid'], seqno)
+        if not state:
+            return None
+        return self._recover_position()
+
+    def _not_ahead(self, position, other):
+        """Whether the first position holds nothing the second lacks: the
+        same history (uuid) and a seqno no higher. A member without a
+        known position holds nothing; different histories are never
+        compared, so no member forms the cluster again from them.
+        """
+        if position is None:
+            return True
+        if other is None:
+            return False
+        return position[0] == other[0] and position[1] <= other[1]
+
+    def _waiting_for_primary(self):
+        """Whether the server is up but waiting for a primary component,
+        as it logs while it does.
+        """
+        try:
+            container = self.docker_client.containers.get(CONTAINER_NAME)
+            # MariaDB gives up waiting after a while and the container is
+            # started again: restarting, then.
+            if container.status not in ('running', 'restarting'):
+                return False
+            output = encodeutils.safe_decode(
+                container.logs(tail=LOG_TAIL) or b'')
+        except Exception:
+            return False
+        waiting = False
+        for line in output.splitlines():
+            if 'primary view' in line and 'not possible' in line:
+                waiting = True
+            elif 'Non-primary view' in line or 'Received NON-PRIMARY' in line:
+                waiting = True
+            elif ('Received SELF-LEAVE' in line or
+                  'New COMPONENT: primary = yes' in line):
+                waiting = False
+        return waiting
+
+    def recovery_view(self):
+        """Where the member stands, for the task manager: in a primary
+        component, waiting for one (database port closed, or non-primary),
+        or neither (the server is down or starting); and its position.
+        """
+        status = self._wsrep_status()
+        if status is not None:
+            in_group = (status.get('wsrep_cluster_status') == PRIMARY and
+                        status.get('wsrep_local_state_comment') !=
+                        'Initialized')
+            waiting = not in_group
+            position = (status.get('wsrep_cluster_state_uuid'),
+                        int(status.get('wsrep_last_committed') or 0))
+        else:
+            in_group = False
+            waiting = self._waiting_for_primary()
+            position = self._position()
+        return {'ip': self._self_ip(), 'in_group': in_group,
+                'waiting': waiting, 'position': position,
+                'bootstrapped': self.started_with_bootstrap()}
+
+    def rejoin_group(self, state):
+        # A member that waits for a primary component joins one as soon
+        # as it appears, and a member cut off joins again when the
+        # network is back: Galera does both by itself.
+        LOG.info("Out of the primary component (%s); the member joins by "
+                 "itself once one is there.", state)
+
+    def bootstrap_group(self):
+        """Form the cluster again on this member: mark it safe to
+        bootstrap and start it again as the first member of a new
+        cluster, then as an ordinary member once the others have joined,
+        so that a restart does not form yet another cluster.
+        """
+        LOG.info("Forming the cluster again.")
+        path = os.path.join(self.get_data_dir(), GRASTATE_FILE)
+        state = self._grastate()
+        if state:
+            content = operating_system.read_file(path, as_root=True)
+            if 'safe_to_bootstrap:' in content:
+                content = SAFE_TO_BOOTSTRAP.sub('safe_to_bootstrap: 1',
+                                                content)
+            else:
+                content = content.rstrip('\n') + '\nsafe_to_bootstrap: 1\n'
+            operating_system.write_file(path, content, as_root=True)
+            operating_system.chown(path, self.database_service_uid,
+                                   self.database_service_gid, as_root=True)
+        command = self._container_command()
+        self.stop_db()
+        self.start_cluster_node(command, bootstrap=True)
+        deadline = time.time() + CONF.cluster_usage_timeout
+        while time.time() < deadline:
+            status = self._wsrep_status() or {}
+            if (status.get('wsrep_cluster_status') == PRIMARY and
+                    int(status.get('wsrep_cluster_size') or 0) > 1):
+                LOG.info("The others have joined the cluster formed again.")
+                break
+            time.sleep(5)
+        else:
+            LOG.warning("No member joined the cluster formed again within "
+                        "%s seconds; going on alone.",
+                        CONF.cluster_usage_timeout)
+        self.leave_bootstrap(command)
+
+    def _container_command(self):
+        """The command the database container was created with, the
+        bootstrap option taken out.
+        """
+        try:
+            container = self.docker_client.containers.get(CONTAINER_NAME)
+            cmd = container.attrs['Config'].get('Cmd') or []
+        except Exception:
+            cmd = []
+        return ' '.join(arg for arg in cmd if arg != BOOTSTRAP_OPTION)
 
     def get_member_role(self):
         """The member's state and role in the cluster, and whether it

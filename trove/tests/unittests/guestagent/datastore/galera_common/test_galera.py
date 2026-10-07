@@ -535,7 +535,8 @@ class TestMariaDB(trove_testtools.TestCase):
         self.assertEqual(
             {'install_cluster', 'reset_admin_password', 'cluster_complete',
              'get_cluster_context', 'write_cluster_configuration_overrides',
-             'leave_cluster', 'is_writable_member', 'get_member_role'},
+             'leave_cluster', 'is_writable_member', 'get_member_role',
+             'get_recovery_view', 'bootstrap_cluster'},
             cluster_calls)
         for name in cluster_calls:
             self.assertTrue(
@@ -555,7 +556,9 @@ class TestMariaDB(trove_testtools.TestCase):
                  {'cluster_configuration'}),
                 ('leave_cluster', set()),
                 ('is_writable_member', set()),
-                ('get_member_role', set())):
+                ('get_member_role', set()),
+                ('get_recovery_view', set()),
+                ('bootstrap_cluster', set())):
             parameters = set(inspect.signature(
                 getattr(mariadb_manager.Manager, name)).parameters)
             self.assertEqual(sent | {'self', 'context'}, parameters, name)
@@ -891,3 +894,232 @@ class TestClientCommands(trove_testtools.TestCase):
         manager.do_prepare('ctx', [], [], 512, [], None, None, None, None,
                            None, None, {'id': 'i1'}, None)
         manager.app.keep_writer_mode.assert_called_once()
+
+
+GRASTATE = """# GALERA saved state
+version: 2.1
+uuid:    eb210882-c280-11f1-9bce-6fce320fdaa0
+seqno:   36
+safe_to_bootstrap: 1
+"""
+PXC_LOG = (b"2026-10-07T19:02:48.49Z 0 [Note] [Galera] Assign initial "
+           b"position for certification: eb210882-c280-11f1-9bce-"
+           b"6fce320fdaa0:31, protocol version: -1\n"
+           b"2026-10-07T19:02:48.49Z 0 [Note] [Galera] Setting GCS initial "
+           b"position to eb210882-c280-11f1-9bce-6fce320fdaa0:31\n"
+           b"2026-10-07T19:08:40.95Z 0 [Note] [Galera] No nodes coming from "
+           b"primary view, primary view is not possible\n"
+           b"2026-10-07T19:08:41.45Z 0 [Note] [Galera] Received "
+           b"NON-PRIMARY.\n")
+
+
+class TestRecoveryView(trove_testtools.TestCase):
+    """What a member answers the task manager with after every member
+    went down, and how it forms the cluster again.
+    """
+
+    def setUp(self):
+        super(TestRecoveryView, self).setUp()
+        self.app = FakeApp()
+        self.app.get_data_dir = mock.Mock(return_value='/var/lib/mysql/data')
+        self.app.database_service_uid = 1001
+        self.app.database_service_gid = 1001
+        self.sections = {'mysqld': {'wsrep_node_address': '10.0.0.2'}}
+        self.app.configuration_manager.get_value.side_effect = (
+            lambda section: self.sections.get(section))
+        self.container = self.app.docker_client.containers.get.return_value
+        self.container.status = 'running'
+        self.container.logs.return_value = PXC_LOG
+        self.container.attrs = {'Config': {'Cmd': [
+            '--defaults-file=/etc/mysql/my.cnf',
+            '--datadir=/var/lib/mysql/data']}}
+        self.files = {'/var/lib/mysql/data/grastate.dat': GRASTATE}
+        self.os = mock.patch.object(galera_service, 'operating_system').start()
+        self.os.read_file.side_effect = (
+            lambda path, **k: self.files[path])
+        self.os.write_file.side_effect = (
+            lambda path, data, **k: self.files.__setitem__(path, data))
+        # The database port is closed: the server waits for a primary view.
+        self.app.execute_sql = mock.Mock(side_effect=Exception('refused'))
+        mock.patch.object(galera_service.time, 'sleep').start()
+        self.patch_datastore_manager('pxc')
+        self.addCleanup(mock.patch.stopall)
+
+    def test_grastate(self):
+        self.assertEqual(
+            {'version': '2.1', 'uuid': 'eb210882-c280-11f1-9bce-6fce320fdaa0',
+             'seqno': '36', 'safe_to_bootstrap': '1'},
+            self.app._grastate())
+        del self.files['/var/lib/mysql/data/grastate.dat']
+        self.assertEqual({}, self.app._grastate())
+
+    def test_the_position_the_server_logged_comes_first(self):
+        # After a crash grastate.dat says -1 and the log has it.
+        self.assertEqual(('eb210882-c280-11f1-9bce-6fce320fdaa0', 31),
+                         self.app._position())
+        # After a clean stop the log has none and grastate.dat has it.
+        self.container.logs.return_value = b'nothing yet\n'
+        self.assertEqual(('eb210882-c280-11f1-9bce-6fce320fdaa0', 36),
+                         self.app._position())
+        self.files['/var/lib/mysql/data/grastate.dat'] = GRASTATE.replace(
+            'seqno:   36', 'seqno:   -1')
+        self.assertIsNone(self.app._position())
+        # MariaDB's line, and a recovery run's.
+        for line in (b'[Galera] Setting initial position to ab-cd:7\n',
+                     b'[WSREP] Recovered position: ab-cd:7\n'):
+            self.container.logs.return_value = (
+                b'x\n' + line.replace(b'ab-cd', b'0' * 8 + b'-' + b'0' * 27))
+            self.assertEqual(7, self.app._position()[1])
+
+    def test_not_ahead(self):
+        u, v = ('u1', 10), ('u1', 12)
+        self.assertTrue(self.app._not_ahead(u, v))
+        self.assertTrue(self.app._not_ahead(u, u))
+        self.assertFalse(self.app._not_ahead(v, u))
+        self.assertTrue(self.app._not_ahead(None, u))
+        self.assertFalse(self.app._not_ahead(u, None))
+        self.assertFalse(self.app._not_ahead(('u2', 1), v))
+
+    def test_waiting_for_a_primary_view(self):
+        self.assertEqual(
+            {'ip': '10.0.0.2', 'in_group': False, 'waiting': True,
+             'position': ('eb210882-c280-11f1-9bce-6fce320fdaa0', 31),
+             'bootstrapped': False},
+            self.app.recovery_view())
+        # Until it got one.
+        self.container.logs.return_value = PXC_LOG + (
+            b'[Galera] New COMPONENT: primary = yes, bootstrap = no\n')
+        self.assertFalse(self.app.recovery_view()['waiting'])
+        # A container that is not running waits for nothing.
+        self.container.logs.return_value = PXC_LOG
+        self.container.status = 'exited'
+        self.assertFalse(self.app.recovery_view()['waiting'])
+
+    def test_in_a_primary_component(self):
+        self.app.execute_sql = mock.Mock(side_effect=lambda sql: list(
+            _status(wsrep_last_committed='40').items()))
+        self.assertEqual(
+            {'ip': '10.0.0.2', 'in_group': True, 'waiting': False,
+             'position': ('u1', 40), 'bootstrapped': False},
+            self.app.recovery_view())
+        # Cut off: non-Primary, waiting.
+        self.app.execute_sql = mock.Mock(side_effect=lambda sql: list(
+            _status(wsrep_cluster_status='non-Primary',
+                    wsrep_local_state_comment='Initialized').items()))
+        view = self.app.recovery_view()
+        self.assertEqual((False, True), (view['in_group'], view['waiting']))
+
+    def test_rejoin_does_nothing(self):
+        self.app.rejoin_group('Initialized')
+        self.assertEqual([], self.app.calls)
+
+    @mock.patch.object(galera_service.docker_util, 'remove_container')
+    def test_bootstrap_group(self, _remove):
+        # Marked safe to bootstrap, started with the flag, and once the
+        # others have joined, without it.
+        self.files['/var/lib/mysql/data/grastate.dat'] = GRASTATE.replace(
+            'safe_to_bootstrap: 1', 'safe_to_bootstrap: 0')
+        sizes = iter(['1', '1', '3'])
+        self.app.execute_sql = mock.Mock(side_effect=lambda sql: list(
+            _status(wsrep_cluster_size=next(sizes)).items()))
+        # Started with the flag, as the container will show after.
+        self.container.attrs['Config']['Cmd'].append('--wsrep-new-cluster')
+
+        self.app.bootstrap_group()
+
+        self.assertIn('safe_to_bootstrap: 1',
+                      self.files['/var/lib/mysql/data/grastate.dat'])
+        self.os.chown.assert_called_once()
+        command = ('--defaults-file=/etc/mysql/my.cnf '
+                   '--datadir=/var/lib/mysql/data')
+        self.assertEqual(
+            [('stop_db',),
+             ('start_db', command + ' --wsrep-new-cluster', app_hc(self.app)),
+             ('stop_db',),
+             ('start_db', command, app_hc(self.app))],
+            self.app.calls)
+
+    @mock.patch.object(galera_service.docker_util, 'remove_container')
+    def test_bootstrap_group_alone(self, _remove):
+        # Nobody joined in time: the flag goes all the same.
+        self.app.execute_sql = mock.Mock(side_effect=lambda sql: list(
+            _status(wsrep_cluster_size='1').items()))
+        self.container.attrs['Config']['Cmd'].append('--wsrep-new-cluster')
+        with mock.patch.object(galera_service.time, 'time',
+                               side_effect=[0, 1, 10 ** 9, 10 ** 9]):
+            self.app.bootstrap_group()
+        self.assertEqual(['stop_db', 'start_db', 'stop_db', 'start_db'],
+                         [c[0] for c in self.app.calls])
+        self.assertNotIn('--wsrep-new-cluster', self.app.calls[-1][1])
+
+
+def app_hc(app):
+    return app.HEALTHCHECK
+
+
+class TestRecoveryRun(trove_testtools.TestCase):
+    """MariaDB logs no position and leaves -1 in grastate.dat: a recovery
+    run of the server, with the database stopped, finds it.
+    """
+
+    def setUp(self):
+        super(TestRecoveryRun, self).setUp()
+        self.app = FakeApp()
+        self.app.SERVER_BINARY = 'mariadbd'
+        self.app.get_data_dir = mock.Mock(return_value='/var/lib/mysql/data')
+        self.app.database_service_uid = 1001
+        self.app.database_service_gid = 1001
+        self.container = self.app.docker_client.containers.get.return_value
+        self.container.status = 'running'
+        self.container.logs.return_value = b'WSREP: Non-primary view\n'
+        self.container.attrs = {
+            'Config': {'Cmd': ['--defaults-file=/etc/mysql/my.cnf',
+                               '--datadir=/var/lib/mysql/data']},
+            'State': {'StartedAt': 't1'}}
+        self.app.docker_client.containers.run.return_value = (
+            b'2026-10-07 19:19:43 0 [Note] WSREP: Recovered position: '
+            b'cd7ef434-c283-11f1-b9c7-ff3171d9ab0e:8\n')
+        self.os = mock.patch.object(galera_service, 'operating_system').start()
+        self.os.read_file.return_value = GRASTATE.replace('seqno:   36',
+                                                          'seqno:   -1')
+        self.addCleanup(mock.patch.stopall)
+        self.patch_datastore_manager('mariadb')
+
+    def test_recovery_run(self):
+        self.assertEqual(('cd7ef434-c283-11f1-b9c7-ff3171d9ab0e', 8),
+                         self.app._position())
+        # The database was stopped for it and started again after.
+        self.assertEqual([('stop_db',)], self.app.calls)
+        self.container.start.assert_called_once()
+        run = self.app.docker_client.containers.run
+        args, kwargs = run.call_args
+        self.assertEqual(['--defaults-file=/etc/mysql/my.cnf',
+                          '--datadir=/var/lib/mysql/data', '--wsrep-recover'],
+                         args[1])
+        self.assertEqual('mariadbd', kwargs['entrypoint'])
+        self.assertEqual('1001:1001', kwargs['user'])
+        self.assertTrue(kwargs['remove'])
+        self.assertIn('/var/lib/mysql', kwargs['volumes'])
+        self.assertTrue(args[0].endswith(':' + str(
+            galera_service.CONF.datastore_version)))
+        # Kept: the member waits, nothing changes on it.
+        self.assertEqual(('cd7ef434-c283-11f1-b9c7-ff3171d9ab0e', 8),
+                         self.app._position())
+        run.assert_called_once()
+        # Until the container was started anew.
+        self.container.attrs['State']['StartedAt'] = 't2'
+        self.app._position()
+        self.assertEqual(2, run.call_count)
+
+    def test_a_failed_run_still_starts_the_database_again(self):
+        self.app.docker_client.containers.run.side_effect = Exception('no')
+        self.assertIsNone(self.app._position())
+        self.container.start.assert_called_once()
+        # Not tried again and again.
+        self.assertIsNone(self.app._position())
+        self.app.docker_client.containers.run.assert_called_once()
+
+    def test_no_run_without_grastate(self):
+        self.os.read_file.side_effect = Exception('no such file')
+        self.assertIsNone(self.app._position())
+        self.app.docker_client.containers.run.assert_not_called()

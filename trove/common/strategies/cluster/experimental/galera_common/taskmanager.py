@@ -25,6 +25,8 @@ from trove.common import loadbalancer
 from trove.common.strategies.cluster import base as cluster_base
 from trove.common.strategies.cluster.experimental.galera_common import (
     api as galera_api)
+from trove.common.strategies.cluster.experimental.galera_common import (
+    recovery)
 from trove.common.template import ClusterConfigTemplate
 from trove.common import utils
 from trove.extensions.common import models as ext_models
@@ -50,6 +52,12 @@ class GaleraCommonTaskManagerStrategy(cluster_base.BaseTaskManagerStrategy):
     @property
     def task_manager_cluster_tasks_class(self):
         return GaleraCommonClusterTasks
+
+    def cluster_recovery(self, manager):
+        """What brings the clusters of a datastore manager back after
+        every member went down, run by the task manager periodically.
+        """
+        return recovery.GaleraClusterRecovery(manager)
 
 
 class GaleraCommonClusterTasks(task_models.ClusterTasks):
