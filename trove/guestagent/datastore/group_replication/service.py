@@ -28,11 +28,11 @@ the guest agent starts Group Replication on it once more.
 """
 
 import collections
-import ssl
 import time
 
+import eventlet
 from oslo_log import log as logging
-import pymysql
+from oslo_utils import encodeutils
 from sqlalchemy.sql.expression import text
 
 from trove.common import cfg
@@ -301,27 +301,36 @@ class GroupReplicationAppMixin(galera_service.GaleraAppMixin):
     def _query_peer(self, ip, user, password, timeout):
         """Ask a peer, over its database port with the recovery account,
         where it stands. A peer that does not answer is unreachable.
+
+        The question goes out from the database container, with the
+        client in its image: the tenant NIC, through which the members see
+        each other, lives there (DOCKER_HOST_NIC_MODE), and the guest
+        agent's own namespace has only the management network.
         """
+        # One call, three result sets: the member rows have two columns,
+        # then the server's uuid, then its gtid set (empty for a fresh
+        # server; batch mode escapes the newlines inside it as "\n").
+        command = ['mysql', '--connect-timeout=%d' % timeout,
+                   '--host=%s' % ip, '--port=%d' % DATABASE_PORT,
+                   '--user=%s' % user, '--batch', '--skip-column-names',
+                   '--execute=%s; SELECT @@server_uuid; '
+                   'SELECT @@global.gtid_executed' % MEMBERS_QUERY]
         try:
-            # The server has TLS on by default and may require it; the
-            # recovery account's password is what proves the peer.
-            context = ssl.create_default_context()
-            context.check_hostname = False
-            context.verify_mode = ssl.CERT_NONE
-            connection = pymysql.connect(
-                host=ip, port=DATABASE_PORT, user=user, password=password,
-                connect_timeout=timeout, read_timeout=timeout,
-                write_timeout=timeout, ssl=context)
-            try:
-                with connection.cursor() as cursor:
-                    cursor.execute(MEMBERS_QUERY)
-                    members = cursor.fetchall()
-                    cursor.execute("SELECT @@server_uuid")
-                    uuid = cursor.fetchone()[0]
-                    cursor.execute("SELECT @@global.gtid_executed")
-                    gtid = cursor.fetchone()[0] or ''
-            finally:
-                connection.close()
+            container = self.docker_client.containers.get(
+                galera_service.CONTAINER_NAME)
+            # The connect timeout is the client's; the whole exchange
+            # gets a few times that before it is given up on.
+            with eventlet.Timeout(3 * timeout + 5):
+                code, output = container.exec_run(
+                    command, environment={'MYSQL_PWD': password})
+            output = encodeutils.safe_decode(output or b'')
+            if code != 0:
+                raise exception.TroveError(output.strip())
+            lines = output.rstrip('\n').split('\n')
+            members = [line.split('\t', 1) for line in lines if '\t' in line]
+            scalars = [line for line in lines if '\t' not in line]
+            uuid = scalars[0]
+            gtid = scalars[1].replace('\\n', '') if len(scalars) > 1 else ''
         except Exception as err:
             LOG.debug("Peer %s did not answer: %s", ip, err)
             return PeerView(ip, False, None, False, None)

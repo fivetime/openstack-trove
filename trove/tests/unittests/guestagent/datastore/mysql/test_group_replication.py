@@ -237,26 +237,36 @@ class TestGroupReplicationApp(trove_testtools.TestCase):
                 group_replication_local_address='"10.0.0.2:33061"'):
             self.assertEqual('10.0.0.2', self.app._self_ip())
 
-    @mock.patch.object(gr_service.pymysql, 'connect')
-    def test_query_peer(self, connect):
-        cursor = connect.return_value.cursor.return_value.__enter__.\
-            return_value
-        cursor.fetchall.return_value = [('u-2', 'OFFLINE'),
-                                        ('u-3', 'ONLINE')]
-        cursor.fetchone.side_effect = [('u-2',), ('g:1-5',)]
+    def test_query_peer(self):
+        # The question goes out from the database container: the tenant
+        # NIC is in there.
+        container = self.app.docker_client.containers.get.return_value
+        container.exec_run.return_value = (
+            0, b'u-2\tOFFLINE\nu-3\tONLINE\nu-2\ng:1-5,\\nh:1-2\n')
         peer = self.app._query_peer('10.0.0.2', 'r', 'p', 3)
         self.assertEqual(gr_service.PeerView(
-            '10.0.0.2', True, 'OFFLINE', True, 'g:1-5'), peer)
-        connect.assert_called_once()
-        self.assertEqual(3, connect.call_args.kwargs['connect_timeout'])
-        connect.return_value.close.assert_called_once()
-        # Nobody in the group: its own state is OFFLINE.
-        cursor.fetchall.return_value = []
-        cursor.fetchone.side_effect = [('u-2',), ('',)]
-        self.assertEqual(('OFFLINE', False),
-                         self.app._query_peer('10.0.0.2', 'r', 'p', 3)[2:4])
-        # Not answering.
-        connect.side_effect = Exception('refused')
+            '10.0.0.2', True, 'OFFLINE', True, 'g:1-5,h:1-2'), peer)
+        self.app.docker_client.containers.get.assert_called_with('database')
+        command = container.exec_run.call_args.args[0]
+        self.assertEqual('mysql', command[0])
+        self.assertIn('--connect-timeout=3', command)
+        self.assertIn('--host=10.0.0.2', command)
+        self.assertIn('--user=r', command)
+        self.assertIn('--skip-column-names', command)
+        self.assertEqual({'MYSQL_PWD': 'p'},
+                         container.exec_run.call_args.kwargs['environment'])
+        self.assertNotIn('p', command)
+        # Nobody in the group, nothing executed yet: its own state is
+        # OFFLINE and the gtid set is empty.
+        container.exec_run.return_value = (0, b'u-2\n\n')
+        self.assertEqual(('OFFLINE', False, ''),
+                         self.app._query_peer('10.0.0.2', 'r', 'p', 3)[2:5])
+        # Not answering: the client fails, or the container is not there.
+        container.exec_run.return_value = (
+            1, b"ERROR 2003 (HY000): Can't connect to MySQL server")
+        self.assertFalse(self.app._query_peer('10.0.0.2', 'r', 'p', 3)
+                         .reachable)
+        self.app.docker_client.containers.get.side_effect = Exception('gone')
         self.assertFalse(self.app._query_peer('10.0.0.2', 'r', 'p', 3)
                          .reachable)
 
