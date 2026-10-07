@@ -35,6 +35,8 @@ class MariaDBApp(galera_service.GaleraAppMixin, mysql_service.BaseMySqlApp):
 
     # MariaDB reads the wsrep options from their own section.
     CLUSTER_CONF_SECTION = 'galera'
+    # The image has MariaDB's client, under its own name.
+    PEER_CLIENT = 'mariadb'
 
     HEALTHCHECK = {
         "test": ["CMD", "healthcheck.sh", "--defaults-file",

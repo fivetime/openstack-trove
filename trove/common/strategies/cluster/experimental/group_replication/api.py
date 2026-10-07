@@ -57,11 +57,9 @@ class GroupReplicationCluster(galera_api.GaleraCommonCluster):
     DEFAULT_MODE = SINGLE_PRIMARY
 
 
-class GroupReplicationClusterView(galera_api.MemberRolesMixin,
-                                  galera_api.GaleraCommonClusterView):
+class GroupReplicationClusterView(galera_api.GaleraCommonClusterView):
     ROLES = ROLES
 
 
-class GroupReplicationMgmtClusterView(galera_api.MemberRolesMixin,
-                                      galera_api.GaleraCommonMgmtClusterView):
+class GroupReplicationMgmtClusterView(galera_api.GaleraCommonMgmtClusterView):
     ROLES = ROLES

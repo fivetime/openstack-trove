@@ -861,6 +861,27 @@ mysql_opts = _with_group_replication(mysql_opts)
 percona_opts = _with_group_replication(percona_opts)
 
 
+# A Galera cluster (Percona XtraDB Cluster, MariaDB): the probe, the ready
+# port and the load balancer of the shared layer, with the ready port open
+# in the security group of the members. The writer mode is the tenant's,
+# with the extended property writer_mode.
+def _with_galera_cluster(opts):
+    galera = [
+        cfg.ListOpt('cluster_tcp_ports', default=["3307"],
+                    item_type=ListOfPortsType,
+                    help='TCP ports opened in the security group of the '
+                         'members of a cluster, besides tcp_ports: the '
+                         'ready port a member that takes writes answers '
+                         'on.'),
+    ]
+    names = {opt.name for opt in galera}
+    return _with_cluster_probe_and_entry(
+        [opt for opt in opts if opt.name not in names]) + galera
+
+
+pxc_opts = _with_galera_cluster(pxc_opts)
+
+
 # KeyDB / Valkey / Redis
 def _build_redis_family_datastore_opts(
     datastore_name,
@@ -1935,6 +1956,7 @@ CONF.register_opts(postgresql_opts, postgresql_group)
 CONF.register_opts(couchdb_opts, couchdb_group)
 CONF.register_opts(vertica_opts, vertica_group)
 CONF.register_opts(db2_opts, db2_group)
+mariadb_opts = _with_galera_cluster(mariadb_opts)
 CONF.register_opts(mariadb_opts, mariadb_group)
 CONF.register_opts(network_opts, network_group)
 CONF.register_opts(service_credentials_opts, service_credentials_group)

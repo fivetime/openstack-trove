@@ -17,6 +17,9 @@ from trove.instance import service_status
 
 LOG = logging.getLogger(__name__)
 
+# The extended property a Galera cluster is created with.
+WRITER_MODE_KEY = 'writer_mode'
+
 
 class GaleraManagerMixin(object):
     """The cluster calls of the guest agent, for a MySQL based manager.
@@ -60,6 +63,19 @@ class GaleraManagerMixin(object):
             raise
         if self.cluster_probe:
             self.cluster_probe.enable_member()
+
+    def do_prepare(self, context, packages, databases, memory_mb, users,
+                   device_path, mount_point, backup_info,
+                   config_contents, root_password, overrides,
+                   cluster_config, snapshot, ds_version=None):
+        super(GaleraManagerMixin, self).do_prepare(
+            context, packages, databases, memory_mb, users, device_path,
+            mount_point, backup_info, config_contents, root_password,
+            overrides, cluster_config, snapshot, ds_version=ds_version)
+        if cluster_config and cluster_config.get(WRITER_MODE_KEY):
+            # For the task manager to render the cluster configuration
+            # with; the members of a grown cluster get the cluster's.
+            self.app.keep_writer_mode(cluster_config[WRITER_MODE_KEY])
 
     def reset_admin_password(self, context, admin_password):
         LOG.debug("Storing the admin password of the cluster.")

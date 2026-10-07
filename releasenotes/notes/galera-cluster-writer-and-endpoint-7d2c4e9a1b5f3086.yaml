@@ -1,0 +1,23 @@
+---
+features:
+  - |
+    A Galera cluster (Percona XtraDB Cluster, MariaDB) has an endpoint: a
+    load balancer in front of its members, as a Group Replication cluster
+    has, and each member answers on the ready port when it takes writes.
+    The tenant chooses the writer mode with the extended property
+    ``writer_mode``: ``single`` (the default), where the member with the
+    lowest address among the synced members of the primary component
+    takes the writes that come through the endpoint and another takes
+    over when it fails, or ``multi``, where every synced member does. The
+    cluster's view shows each member's role (``primary`` for a member
+    that takes writes, ``secondary`` for a synced member that does not,
+    ``recovering`` for a joiner, ``offline`` for a member out of the
+    primary component) and the endpoint. A member that is removed closes
+    its ready port before it is deleted, and a grow that fails fails the
+    members that were to join instead of every member. The ``[pxc]`` and
+    ``[mariadb]`` groups take the ``cluster_probe_*``, ``cluster_ready_*``,
+    ``cluster_recovery_*``, ``cluster_*bootstrap*``, ``cluster_peer_timeout``
+    and ``cluster_load_balancer*`` options the Group Replication clusters
+    have, and ``cluster_tcp_ports`` opens the ready port in the security
+    group of a member. The cluster configuration gets a ``[trove]`` section,
+    which the server leaves alone, with the writer mode.

@@ -29,6 +29,7 @@ from trove.guestagent.datastore.galera_common import service as galera_service
 from trove.guestagent.datastore.mariadb import manager as mariadb_manager
 from trove.guestagent.datastore.mariadb import service as mariadb_service
 from trove.guestagent.datastore.mysql_common import service as mysql_service
+from trove.guestagent.datastore.pxc import service as pxc_service
 from trove.instance import service_status
 from trove.tests.unittests import trove_testtools
 
@@ -44,6 +45,8 @@ class FakeBaseApp(object):
 
     HEALTHCHECK = {'test': ['single']}
     CFG_CODEC = stream_codecs.IniCodec()
+    DATABASE_PORT = 3306
+    PEER_CLIENT = 'mysql'
 
     def __init__(self):
         self.calls = []
@@ -349,10 +352,10 @@ class TestClusterContext(trove_testtools.TestCase):
         self.assertEqual(
             {'replication_user': REPLICATION_USER,
              'cluster_name': 'c1',
-             'admin_password': 'admin-pw'},
+             'admin_password': 'admin-pw',
+             'writer_mode': 'single'},
             app.get_cluster_context())
-        app.configuration_manager.get_value.assert_called_once_with(
-            'mysqld')
+        app.configuration_manager.get_value.assert_any_call('mysqld')
 
     def test_password_with_a_colon(self):
         app = self._app({'wsrep_sst_auth': '"clusterrepuser:a:b:c"',
@@ -372,8 +375,7 @@ class TestClusterContext(trove_testtools.TestCase):
 
         app.get_cluster_context()
 
-        app.configuration_manager.get_value.assert_called_once_with(
-            'galera')
+        app.configuration_manager.get_value.assert_any_call('galera')
 
 
 class TestResetAdminPassword(trove_testtools.TestCase):
@@ -405,6 +407,13 @@ class FakeBaseManager(object):
         self.app.get_data_dir.return_value = '/var/lib/mysql/data'
         self.status = mock.Mock()
         self.completed = []
+        self.prepared = []
+
+    def do_prepare(self, context, packages, databases, memory_mb, users,
+                   device_path, mount_point, backup_info, config_contents,
+                   root_password, overrides, cluster_config, snapshot,
+                   ds_version=None):
+        self.prepared.append(cluster_config)
 
     def get_start_db_params(self, data_dir):
         return '--datadir=%s' % data_dir
@@ -593,9 +602,13 @@ class TestMariaDB(trove_testtools.TestCase):
                 instance_name='n1')
 
         codec = mysql_service.BaseMySqlApp.CFG_CODEC
-        section = codec.deserialize(
-            codec.serialize(codec.deserialize(rendered)))['galera']
+        parsed = codec.deserialize(
+            codec.serialize(codec.deserialize(rendered)))
+        section = parsed['galera']
 
+        # Trove's section, which the server leaves alone: single writer
+        # unless the task manager says.
+        self.assertEqual({'cluster_writer_mode': 'single'}, parsed['trove'])
         self.assertEqual('"gcache.size=512M; gcache.page_size=1G"',
                          section['wsrep_provider_options'])
         self.assertEqual('"clusterrepuser:a;b#c:d"',
@@ -603,3 +616,278 @@ class TestMariaDB(trove_testtools.TestCase):
         self.assertEqual('"gcomm://10.0.0.1,10.0.0.2,10.0.0.3"',
                          section['wsrep_cluster_address'])
         self.assertEqual('ON', section['wsrep_on'])
+
+
+def _status(**values):
+    """The wsrep status of a synced member of a primary component of
+    three, with what the test changes.
+    """
+    status = {
+        'wsrep_ready': 'ON', 'wsrep_cluster_status': 'Primary',
+        'wsrep_local_state_comment': 'Synced', 'wsrep_cluster_conf_id': '5',
+        'wsrep_incoming_addresses':
+            '10.0.0.2:3306,10.0.0.3:3306,10.0.0.1:3306',
+        'wsrep_last_committed': '26', 'wsrep_cluster_state_uuid': 'u1',
+        'wsrep_local_state_uuid': 'u1', 'wsrep_cluster_size': '3'}
+    status.update(values)
+    return status
+
+
+def _batch(status):
+    return '\n'.join('%s\t%s' % item for item in status.items()) + '\n'
+
+
+class TestStatusParsing(trove_testtools.TestCase):
+
+    def test_parse_status(self):
+        # The warning is the mariadb client's; the rows are the status.
+        output = ('WARNING: option --ssl-verify-server-cert is disabled\n'
+                  'wsrep_ready\tON\n'
+                  'wsrep_incoming_addresses\t10.0.0.2:3306,10.0.0.1:3306\n')
+        self.assertEqual(
+            {'wsrep_ready': 'ON',
+             'wsrep_incoming_addresses': '10.0.0.2:3306,10.0.0.1:3306'},
+            galera_service._parse_status(output))
+        self.assertEqual({}, galera_service._parse_status(''))
+
+    def test_address(self):
+        for address, parsed in (('10.0.0.1:3306', ('10.0.0.1', '3306')),
+                                ('10.0.0.1:0', ('10.0.0.1', '0')),
+                                ('10.0.0.1', ('10.0.0.1', '')),
+                                (' 10.0.0.1 ', ('10.0.0.1', '')),
+                                ('[fd00::1]:4567', ('fd00::1', '4567')),
+                                ('[fd00::1]', ('fd00::1', ''))):
+            self.assertEqual(parsed, galera_service._address(address))
+
+
+class TestWriterMode(trove_testtools.TestCase):
+
+    def setUp(self):
+        super(TestWriterMode, self).setUp()
+        self.app = FakeApp()
+        self.sections = {}
+        self.app.configuration_manager.get_value.side_effect = (
+            lambda section: self.sections.get(section))
+
+    def test_single_unless_told(self):
+        self.assertEqual('single', self.app.writer_mode)
+        self.sections['trove'] = {'cluster_writer_mode': 'multi'}
+        self.assertEqual('multi', self.app.writer_mode)
+        self.sections['trove'] = {'cluster_writer_mode': '"single"'}
+        self.assertEqual('single', self.app.writer_mode)
+        self.sections['trove'] = {'cluster_writer_mode': 'both'}
+        self.assertEqual('single', self.app.writer_mode)
+
+    def test_keep_writer_mode(self):
+        self.app.keep_writer_mode('multi')
+        self.app.configuration_manager.apply_system_override.\
+            assert_called_once_with({'trove': {'cluster_writer_mode':
+                                               'multi'}}, 'cluster-mode')
+        self.assertRaises(exception.BadRequest, self.app.keep_writer_mode,
+                          'both')
+
+    def test_the_context_carries_the_mode(self):
+        self.sections['trove'] = {'cluster_writer_mode': 'multi'}
+        self.sections['mysqld'] = {
+            'wsrep_sst_auth': '"clusterrepuser:rep-pw"',
+            'wsrep_cluster_name': 'c1'}
+        self.app.get_auth_password = mock.Mock(return_value='admin-pw')
+        self.assertEqual(
+            {'replication_user': {'name': 'clusterrepuser',
+                                  'password': 'rep-pw'},
+             'cluster_name': 'c1', 'admin_password': 'admin-pw',
+             'writer_mode': 'multi'},
+            self.app.get_cluster_context())
+
+    @mock.patch.object(galera_service.docker_util, 'remove_container')
+    def test_complete_cluster_marks_the_cluster_complete(self, _remove):
+        self.app.docker_client.containers.get.return_value = _container(
+            ['--datadir=/var/lib/mysql/data'])
+        self.app.complete_cluster(COMMAND)
+        self.app.configuration_manager.apply_system_override.\
+            assert_called_once_with(
+                {'trove': {'cluster_complete': 'yes'}}, 'cluster-complete')
+        self.app.configuration_manager.has_system_override.return_value = (
+            True)
+        self.assertTrue(self.app.is_cluster_complete())
+        self.app.configuration_manager.has_system_override.\
+            assert_called_with('cluster-complete')
+
+
+class TestMemberView(trove_testtools.TestCase):
+    """The member as the cluster probe sees it, on a member of three,
+    10.0.0.2, asking its peers from the database container.
+    """
+
+    def setUp(self):
+        super(TestMemberView, self).setUp()
+        self.app = FakeApp()
+        self.sections = {
+            'mysqld': {'wsrep_node_address': '10.0.0.2',
+                       'wsrep_cluster_address':
+                           '"gcomm://10.0.0.1:4567,10.0.0.2,[fd00::3]:4567"'},
+            'trove': {}}
+        self.app.configuration_manager.get_value.side_effect = (
+            lambda section: self.sections.get(section))
+        self.status = _status()
+        self.app.execute_sql = mock.Mock(
+            side_effect=lambda sql: list(self.status.items()))
+        self.app._recovery_credentials = mock.Mock(return_value=('r', 'p'))
+        self.peers = {'10.0.0.1': _status(), '10.0.0.3': _status()}
+        self.container = self.app.docker_client.containers.get.return_value
+        self.container.exec_run.side_effect = self._exec
+        mock.patch.object(galera_service.time, 'monotonic',
+                          return_value=1000.0).start()
+        self.addCleanup(mock.patch.stopall)
+        self.patch_datastore_manager('pxc')
+
+    def _exec(self, command, environment=None):
+        host = [a for a in command if a.startswith('--host=')][0][7:]
+        peer = self.peers.get(host)
+        if peer is None:
+            return 1, b"ERROR 2003 (HY000): Can't connect to MySQL server"
+        return 0, _batch(peer).encode()
+
+    def _asked(self):
+        return [[a for a in c.args[0] if a.startswith('--host=')][0][7:]
+                for c in self.container.exec_run.call_args_list]
+
+    def test_addresses_from_the_configuration(self):
+        self.assertEqual('10.0.0.2', self.app._self_ip())
+        self.assertEqual(['10.0.0.1', '10.0.0.2', 'fd00::3'],
+                         self.app._seed_ips())
+
+    def test_no_answer_is_unknown(self):
+        self.app.execute_sql.side_effect = Exception('gone')
+        self.assertEqual(galera_service.cluster_probe.UNKNOWN_MEMBER,
+                         self.app.member_view())
+
+    def test_out_of_the_primary_component(self):
+        # Cut off: Initialized, non-Primary, not ready. No role, no
+        # writes; not brought back yet (the next step).
+        self.status = _status(wsrep_cluster_status='non-Primary',
+                              wsrep_local_state_comment='Initialized',
+                              wsrep_ready='OFF', wsrep_cluster_size='1')
+        self.assertEqual(('Initialized', None, False, False),
+                         tuple(self.app.member_view()))
+        self.assertEqual([], self._asked())
+
+    def test_a_joiner_has_no_role(self):
+        self.status = _status(wsrep_local_state_comment='Joiner',
+                              wsrep_ready='OFF')
+        self.assertEqual(('Joiner', None, False, False),
+                         tuple(self.app.member_view()))
+
+    def test_multi_writer(self):
+        self.sections['trove'] = {'cluster_writer_mode': 'multi'}
+        self.assertEqual(('Synced', 'PRIMARY', True, False),
+                         tuple(self.app.member_view()))
+        # Without asking anybody.
+        self.assertEqual([], self._asked())
+
+    def test_single_writer_is_the_lowest_synced_member(self):
+        # 10.0.0.1 is synced: it is the writer; 10.0.0.3 is above and is
+        # not asked.
+        self.assertEqual(('Synced', 'SECONDARY', False, False),
+                         tuple(self.app.member_view()))
+        self.assertEqual(['10.0.0.1'], self._asked())
+        command = self.container.exec_run.call_args.args[0]
+        self.assertEqual('mysql', command[0])
+        self.assertIn('--user=r', command)
+        self.assertEqual({'MYSQL_PWD': 'p'},
+                         self.container.exec_run.call_args.kwargs[
+                             'environment'])
+        self.assertNotIn('p', command)
+
+    def test_the_lowest_member_asks_nobody(self):
+        self.sections['mysqld']['wsrep_node_address'] = '10.0.0.1'
+        self.assertEqual(('Synced', 'PRIMARY', True, False),
+                         tuple(self.app.member_view()))
+        self.assertEqual([], self._asked())
+
+    def test_the_writer_is_asked_once_per_view(self):
+        self.app.member_view()
+        self.app.member_view()
+        self.assertEqual(['10.0.0.1'], self._asked())
+        # Until the view changes.
+        self.status = _status(wsrep_cluster_conf_id='6')
+        self.app.member_view()
+        self.assertEqual(['10.0.0.1', '10.0.0.1'], self._asked())
+        # Or now and then: 20 checks of 3 seconds.
+        galera_service.time.monotonic.return_value = 1061.0
+        self.app.member_view()
+        self.assertEqual(3, len(self._asked()))
+
+    def test_a_lower_member_that_is_not_synced_yet(self):
+        # 10.0.0.1 is joining: this member takes the writes, and asks
+        # again at the next check, as 10.0.0.1 may be synced by then.
+        self.peers['10.0.0.1'] = _status(wsrep_local_state_comment='Joined')
+        self.assertEqual(('Synced', 'PRIMARY', True, False),
+                         tuple(self.app.member_view()))
+        self.app.member_view()
+        self.assertEqual(['10.0.0.1', '10.0.0.1'], self._asked())
+        self.peers['10.0.0.1'] = _status()
+        self.assertEqual('SECONDARY', self.app.member_view().role)
+
+    def test_a_member_receiving_a_state_transfer_is_not_asked(self):
+        # Port 0: it does not take connections.
+        self.status = _status(
+            wsrep_incoming_addresses='10.0.0.2:3306,10.0.0.3:3306,10.0.0.1:0')
+        self.assertEqual('PRIMARY', self.app.member_view().role)
+        self.assertEqual([], self._asked())
+
+    def test_a_lower_member_that_does_not_answer(self):
+        # Still in the view but not answering: not the writer.
+        del self.peers['10.0.0.1']
+        self.assertEqual('PRIMARY', self.app.member_view().role)
+        self.assertEqual(['10.0.0.1'], self._asked())
+
+    def test_a_lower_member_out_of_the_primary_component(self):
+        self.peers['10.0.0.1'] = _status(wsrep_cluster_status='non-Primary')
+        self.assertEqual('PRIMARY', self.app.member_view().role)
+
+    def test_member_role_and_writable(self):
+        self.assertEqual({'state': 'Synced', 'role': 'SECONDARY',
+                          'writable': False}, self.app.get_member_role())
+        self.assertFalse(self.app.is_writable_member())
+
+    def test_query_peer(self):
+        peer = self.app._query_peer('10.0.0.1', 'r', 'p', 3)
+        self.assertEqual(galera_service.cluster_probe.PeerView(
+            '10.0.0.1', True, True, True, ('u1', '26')), peer)
+        self.peers['10.0.0.1'] = _status(wsrep_cluster_status='non-Primary')
+        self.assertEqual((True, False, False),
+                         self.app._query_peer('10.0.0.1', 'r', 'p', 3)[1:4])
+        self.assertFalse(self.app._query_peer('10.0.0.9', 'r', 'p', 3)
+                         .reachable)
+        self.app.docker_client.containers.get.side_effect = Exception('x')
+        self.assertFalse(self.app._query_peer('10.0.0.1', 'r', 'p', 3)
+                         .reachable)
+
+
+class TestClientCommands(trove_testtools.TestCase):
+
+    def test_the_mariadb_image_has_the_mariadb_client(self):
+        self.assertEqual('mariadb', mariadb_service.MariaDBApp.PEER_CLIENT)
+        self.assertEqual('mysql', pxc_service.PXCApp.PEER_CLIENT)
+
+    @mock.patch.object(galera_manager.cluster_probe.ClusterProbe, 'start')
+    @mock.patch.object(mariadb_manager.Manager, 'docker_client',
+                       new_callable=mock.PropertyMock)
+    def test_the_mariadb_manager_runs_the_probe(self, _docker, start):
+        self.patch_datastore_manager('mariadb')
+        manager = mariadb_manager.Manager()
+        self.assertIsInstance(manager.cluster_probe,
+                              galera_manager.cluster_probe.ClusterProbe)
+        self.assertEqual(3307, manager.cluster_probe.port.port)
+        start.assert_called_once()
+
+    def test_prepare_keeps_the_writer_mode(self):
+        manager = FakeManager()
+        manager.do_prepare('ctx', [], [], 512, [], None, None, None, None,
+                           None, None, {'id': 'i1', 'writer_mode': 'multi'},
+                           None)
+        manager.app.keep_writer_mode.assert_called_once_with('multi')
+        manager.do_prepare('ctx', [], [], 512, [], None, None, None, None,
+                           None, None, {'id': 'i1'}, None)
+        manager.app.keep_writer_mode.assert_called_once()

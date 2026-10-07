@@ -64,13 +64,21 @@ class TestPXCDatastoreWiring(trove_testtools.TestCase):
         self.assertTrue(
             issubclass(manager_cls, galera_manager.GaleraManagerMixin))
 
+    @mock.patch.object(galera_manager.cluster_probe.ClusterProbe, 'start')
     @mock.patch.object(mysql_manager.BaseManager, 'docker_client',
                        new_callable=mock.PropertyMock)
-    def test_manager_runs_the_pxc_app(self, mock_docker_client):
+    def test_manager_runs_the_pxc_app(self, mock_docker_client, start):
+        self.patch_datastore_manager('pxc')
         manager = pxc_manager.Manager()
 
         self.assertIsInstance(manager.app, pxc_service.PXCApp)
         self.assertIs(manager.app, manager.adm.mysql_app)
+        # With the cluster probe running, on the ready port of the pxc
+        # options.
+        self.assertIsInstance(manager.cluster_probe,
+                              galera_manager.cluster_probe.ClusterProbe)
+        self.assertEqual(3307, manager.cluster_probe.port.port)
+        start.assert_called_once()
 
     def test_no_group_replication(self):
         # PXC clusters are Galera's: the Group Replication calls of the
@@ -118,13 +126,23 @@ class TestPXCDatastoreWiring(trove_testtools.TestCase):
             command.split())
 
     def test_has_every_mysql_option(self):
-        # Those of Group Replication clusters, with their probe and load
-        # balancer, aside: PXC's are Galera's.
+        # The cluster options included: the probe, the ready port and the
+        # load balancer are shared with Galera clusters.
         for name in CONF.mysql:
-            if name.startswith('cluster_') and name != 'cluster_support':
-                continue
             self.assertIn(name, CONF.pxc,
                           '[pxc] lacks the MySQL option %s' % name)
+
+    def test_cluster_probe_and_load_balancer_options(self):
+        for conf in (CONF.pxc, CONF.mariadb):
+            self.assertTrue(conf.cluster_load_balancer)
+            self.assertEqual(3306, conf.cluster_load_balancer_port)
+            self.assertEqual(3307, conf.cluster_ready_port)
+            self.assertEqual(3, conf.cluster_probe_interval)
+            self.assertEqual(60, conf.cluster_recovery_grace)
+            # The ready port is opened in the security group of a member;
+            # the Galera ports are in tcp_ports already.
+            self.assertEqual([3307], [port for ports in conf.cluster_tcp_ports
+                                      for port in ports])
 
     def test_cluster_options(self):
         self.assertTrue(CONF.pxc.cluster_support)
@@ -322,5 +340,6 @@ class TestPXCApp(trove_testtools.TestCase):
             {'replication_user': {'name': 'clusterrepuser',
                                   'password': 'a:b'},
              'cluster_name': 'c1',
-             'admin_password': 'admin-pw'},
+             'admin_password': 'admin-pw',
+             'writer_mode': 'single'},
             context)

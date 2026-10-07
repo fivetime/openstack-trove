@@ -97,4 +97,5 @@ class PXCApp(galera_service.GaleraAppMixin, mysql_service.MySqlApp):
             'cluster_name': self.cluster_configuration.get(
                 'wsrep_cluster_name'),
             'admin_password': self.get_auth_password(),
+            'writer_mode': self.writer_mode,
         }

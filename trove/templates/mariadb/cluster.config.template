@@ -21,3 +21,8 @@ wsrep_cluster_address="gcomm://{{ cluster_ips }}"
 wsrep_cluster_name={{ cluster_name }}
 wsrep_node_name={{ instance_name }}
 wsrep_node_address={{ instance_ip }}
+
+# Trove's, which the server leaves alone: how the guest agent runs the
+# member in the cluster.
+[trove]
+cluster_writer_mode = {{ writer_mode|default('single') }}

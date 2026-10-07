@@ -23,6 +23,8 @@ from trove.common.exception import TroveError
 from trove.common.i18n import _
 from trove.common import loadbalancer
 from trove.common.strategies.cluster import base as cluster_base
+from trove.common.strategies.cluster.experimental.galera_common import (
+    api as galera_api)
 from trove.common.template import ClusterConfigTemplate
 from trove.common import utils
 from trove.extensions.common import models as ext_models
@@ -35,6 +37,8 @@ import trove.taskmanager.models as task_models
 
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
+
+SINGLE_WRITER = galera_api.SINGLE_WRITER
 
 
 class GaleraCommonTaskManagerStrategy(cluster_base.BaseTaskManagerStrategy):
@@ -145,7 +149,8 @@ class GaleraCommonClusterTasks(task_models.ClusterTasks):
                               instance_id)
 
     def _render_cluster_config(self, context, instance, cluster_ips,
-                               cluster_name, replication_user):
+                               cluster_name, replication_user,
+                               writer_mode=SINGLE_WRITER):
         client = create_nova_client(context)
         flavor = client.flavors.get(instance.flavor_id)
         instance_ip = self.get_ip(instance)
@@ -158,6 +163,7 @@ class GaleraCommonClusterTasks(task_models.ClusterTasks):
             cluster_name=cluster_name,
             instance_ip=instance_ip,
             instance_name=instance.name,
+            writer_mode=writer_mode,
         )
         return config_rendered
 
@@ -194,6 +200,11 @@ class GaleraCommonClusterTasks(task_models.ClusterTasks):
             # recommended to be 16 chars or less.
             # (this is not currently documented on Galera docs)
             cluster_name = utils.generate_uuid().replace("-", "")[:16]
+            # The writer mode the members kept from their creation.
+            writer_mode = self.get_guest(instances[0]).get_cluster_context(
+            ).get('writer_mode', SINGLE_WRITER)
+            LOG.info("Forming a %s writer cluster of %s.", writer_mode,
+                     cluster_ips)
 
             LOG.debug("Configuring cluster configuration.")
             try:
@@ -213,7 +224,8 @@ class GaleraCommonClusterTasks(task_models.ClusterTasks):
                         instance,
                         ",".join(cluster_ips),
                         cluster_name,
-                        replication_user)
+                        replication_user,
+                        writer_mode=writer_mode)
 
                     # push the cluster config and bootstrap the first instance
                     guest.install_cluster(replication_user,
@@ -224,6 +236,11 @@ class GaleraCommonClusterTasks(task_models.ClusterTasks):
                 LOG.debug("Finalizing cluster configuration.")
                 for guest in instance_guests:
                     guest.cluster_complete()
+
+                # A cluster without its endpoint is of no use: a failure
+                # here fails the cluster like any other step.
+                if self._load_balancer_enabled():
+                    self._sync_load_balancer(context, cluster_id, instances)
             except Exception:
                 LOG.exception("Error creating cluster.")
                 self.update_statuses_on_failure(cluster_id)
@@ -300,7 +317,9 @@ class GaleraCommonClusterTasks(task_models.ClusterTasks):
                     instance,
                     ",".join(existing_cluster_ips),
                     cluster_context['cluster_name'],
-                    cluster_context['replication_user'])
+                    cluster_context['replication_user'],
+                    writer_mode=cluster_context.get('writer_mode',
+                                                    SINGLE_WRITER))
 
                 # push the cluster config and bootstrap the first instance
                 bootstrap = False
@@ -321,7 +340,9 @@ class GaleraCommonClusterTasks(task_models.ClusterTasks):
                     instance,
                     ",".join(existing_cluster_ips + new_cluster_ips),
                     cluster_context['cluster_name'],
-                    cluster_context['replication_user'])
+                    cluster_context['replication_user'],
+                    writer_mode=cluster_context.get('writer_mode',
+                                                    SINGLE_WRITER))
                 guest.write_cluster_configuration_overrides(
                     cluster_configuration)
 
@@ -329,22 +350,24 @@ class GaleraCommonClusterTasks(task_models.ClusterTasks):
                 guest = self.get_guest(instance)
                 guest.cluster_complete()
 
+            self._sync_load_balancer_or_log(
+                context, cluster_id, existing_instances + new_instances)
+
         timeout = Timeout(CONF.cluster_usage_timeout)
         try:
             _grow_cluster()
-            self.reset_task()
         except Timeout as t:
             if t is not timeout:
                 raise  # not my timeout
             LOG.exception("Timeout for growing cluster.")
-            self.update_statuses_on_failure(
-                cluster_id, status=inst_tasks.InstanceTasks.GROWING_ERROR)
+            self._fail_new_members(new_instance_ids)
         except Exception:
             LOG.exception("Error growing cluster %s.", cluster_id)
-            self.update_statuses_on_failure(
-                cluster_id, status=inst_tasks.InstanceTasks.GROWING_ERROR)
+            self._fail_new_members(new_instance_ids)
         finally:
             timeout.cancel()
+            # The cluster goes on, with or without the new members.
+            self.reset_task()
 
         LOG.debug("End grow_cluster for id: %s.", cluster_id)
 
@@ -355,6 +378,13 @@ class GaleraCommonClusterTasks(task_models.ClusterTasks):
             removal_instances = [Instance.load(context, instance_id)
                                  for instance_id in removal_instance_ids]
             for instance in removal_instances:
+                # Its ready port closes before it goes: nothing new is
+                # sent to it.
+                try:
+                    self.get_guest(instance).leave_cluster()
+                except Exception:
+                    LOG.exception("Instance %s could not leave the "
+                                  "cluster.", instance.id)
                 Instance.delete(instance)
 
             # wait for instances to be deleted
@@ -397,9 +427,13 @@ class GaleraCommonClusterTasks(task_models.ClusterTasks):
                     instance,
                     ",".join(leftover_cluster_ips),
                     cluster_context['cluster_name'],
-                    cluster_context['replication_user'])
+                    cluster_context['replication_user'],
+                    writer_mode=cluster_context.get('writer_mode',
+                                                    SINGLE_WRITER))
                 guest.write_cluster_configuration_overrides(
                     cluster_configuration)
+            self._sync_load_balancer_or_log(context, cluster_id,
+                                            leftover_instances)
 
         timeout = Timeout(CONF.cluster_usage_timeout)
         try:

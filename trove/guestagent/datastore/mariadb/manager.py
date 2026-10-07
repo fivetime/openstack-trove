@@ -41,6 +41,7 @@ class Manager(galera_manager.GaleraManagerMixin, manager.MySqlManager):
         adm = service.MariaDBAdmin(app)
 
         super(Manager, self).__init__(app, status, adm)
+        self.init_cluster_probe()
 
     def get_start_db_params(self, data_dir):
         """Get parameters for starting database.

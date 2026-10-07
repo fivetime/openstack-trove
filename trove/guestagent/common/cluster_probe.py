@@ -66,7 +66,7 @@ MemberView = collections.namedtuple('MemberView', 'state role writable down')
 UNKNOWN_MEMBER = MemberView(None, None, False, False)
 
 
-def _ip_key(ip):
+def ip_key(ip):
     try:
         return (0, ipaddress.ip_address(ip))
     except ValueError:
@@ -100,8 +100,8 @@ def decide(self_ip, self_position, peers, n_members, not_ahead,
               if not not_ahead(p.position, self_position)]
     if behind:
         return WAIT, 'missing transactions that %s hold' % ', '.join(behind)
-    for peer in sorted(reachable, key=lambda p: _ip_key(p.ip)):
-        if _ip_key(peer.ip) >= _ip_key(self_ip):
+    for peer in sorted(reachable, key=lambda p: ip_key(p.ip)):
+        if ip_key(peer.ip) >= ip_key(self_ip):
             break
         if not_ahead(self_position, peer.position) and all(
                 not_ahead(other.position, peer.position)

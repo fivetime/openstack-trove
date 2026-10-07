@@ -37,6 +37,20 @@ CONF = cfg.CONF
 
 # Members in these are asked for their role; the others cannot answer.
 ANSWERING_STATUSES = ('ACTIVE', 'HEALTHY')
+# The tenant chooses with the extended property ``writer_mode``: single
+# (the default), where one synced member takes writes and another takes
+# over when it fails, or multi, where every synced member does.
+WRITER_MODE_KEY = 'writer_mode'
+SINGLE_WRITER = 'single'
+MULTI_WRITER = 'multi'
+WRITER_MODES = (SINGLE_WRITER, MULTI_WRITER)
+# The roles a Galera member has as the view shows them: its wsrep state,
+# and PRIMARY or SECONDARY when it is synced.
+ROLES = {('Synced', 'PRIMARY'): 'primary',
+         ('Synced', 'SECONDARY'): 'secondary',
+         ('Joiner', None): 'recovering',
+         ('Joined', None): 'recovering',
+         ('Initialized', None): 'offline'}
 
 
 class GaleraCommonAPIStrategy(cluster_base.BaseAPIStrategy):
@@ -59,9 +73,9 @@ class GaleraCommonCluster(cluster_models.Cluster):
     # A cluster whose tenant chooses a mode with an extended property:
     # the property's key, the modes it takes and the one it gets when the
     # request names none. None: no mode.
-    MODE_KEY = None
-    MODES = ()
-    DEFAULT_MODE = None
+    MODE_KEY = WRITER_MODE_KEY
+    MODES = WRITER_MODES
+    DEFAULT_MODE = SINGLE_WRITER
 
     @staticmethod
     def _validate_cluster_instances(context, instances, datastore,
@@ -306,13 +320,17 @@ class MemberRolesMixin(object):
         return instances, ip_list
 
 
-class GaleraCommonClusterView(ClusterView):
+class GaleraCommonClusterView(MemberRolesMixin, ClusterView):
+
+    ROLES = ROLES
 
     def build_instances(self):
         return self._build_instances(['member'], ['member'])
 
 
-class GaleraCommonMgmtClusterView(MgmtClusterView):
+class GaleraCommonMgmtClusterView(MemberRolesMixin, MgmtClusterView):
+
+    ROLES = ROLES
 
     def build_instances(self):
         return self._build_instances(['member'], ['member'])

@@ -79,6 +79,8 @@ class GaleraClusterTasksTest(trove_testtools.TestCase):
         self.clustertasks = GaleraCommonClusterTasks(
             Mock(), self.db_cluster, datastore=mock_ds1,
             datastore_version=mock_dv1)
+        # Without a load balancer: Octavia is not here.
+        self.clustertasks._load_balancer_enabled = Mock(return_value=False)
         self.cluster_context = {
             'replication_user': {
                 'name': "name",
@@ -179,18 +181,22 @@ class GaleraClusterTasksTest(trove_testtools.TestCase):
             mock_update_status.assert_called_with('1232')
             mock_reset_task.assert_called_with()
 
+    @patch.object(GaleraCommonClusterTasks, 'reset_task')
+    @patch.object(GaleraCommonClusterTasks, '_fail_new_members')
     @patch.object(GaleraCommonClusterTasks, 'update_statuses_on_failure')
     @patch('trove.common.strategies.cluster.experimental.galera_common.'
            'taskmanager.LOG')
     def test_grow_cluster_does_not_exist(self, mock_logging,
-                                         mock_update_status):
+                                         mock_update_status, mock_fail,
+                                         mock_reset_task):
         context = Mock()
         bad_cluster_id = '1234'
-        new_instances = [Mock(), Mock()]
+        new_instances = ['3', '4']
         self.clustertasks.grow_cluster(context, bad_cluster_id, new_instances)
-        mock_update_status.assert_called_with(
-            '1234',
-            status=InstanceTasks.GROWING_ERROR)
+        # The members that were to join are failed; the cluster goes on.
+        mock_fail.assert_called_with(['3', '4'])
+        mock_update_status.assert_not_called()
+        mock_reset_task.assert_called_with()
 
     @patch.object(GaleraCommonClusterTasks, '_check_cluster_for_root')
     @patch.object(GaleraCommonClusterTasks, 'reset_task')

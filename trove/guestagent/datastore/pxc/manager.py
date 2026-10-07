@@ -28,6 +28,7 @@ class Manager(galera_manager.GaleraManagerMixin, manager.BaseManager):
 
         # Not super().__init__(): the MySQL manager builds its own app there.
         common_manager.MySqlManager.__init__(self, app, status, adm)
+        self.init_cluster_probe()
 
     def get_start_db_params(self, data_dir):
         # The image has an /etc/my.cnf of its own, which is read first and
