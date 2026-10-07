@@ -16,10 +16,12 @@ from eventlet.timeout import Timeout
 from oslo_log import log as logging
 
 from trove.common import cfg
+from trove.common import clients
 from trove.common.clients import create_nova_client
 from trove.common.exception import PollTimeOut
 from trove.common.exception import TroveError
 from trove.common.i18n import _
+from trove.common import loadbalancer
 from trove.common.strategies.cluster import base as cluster_base
 from trove.common.template import ClusterConfigTemplate
 from trove.common import utils
@@ -47,8 +49,100 @@ class GaleraCommonTaskManagerStrategy(cluster_base.BaseTaskManagerStrategy):
 
 
 class GaleraCommonClusterTasks(task_models.ClusterTasks):
+    """Create, grow, shrink and delete a Galera cluster, and what the
+    clusters built on it share: the load balancer in front of the members
+    that take writes, and failing a grow without failing the cluster.
+    """
 
     CLUSTER_REPLICATION_USER = "clusterrepuser"
+
+    # The load balancer: the cluster's endpoint, in front of the members
+    # that take writes. A cluster whose datastore has no
+    # cluster_load_balancer option has none.
+
+    def _load_balancer_enabled(self):
+        conf = CONF.get(self.datastore_version.manager)
+        return getattr(conf, 'cluster_load_balancer', False)
+
+    def _member_subnet_id(self, context, instance, address):
+        """The subnet of the member's port on the user's network, where the
+        load balancer reaches it and lives.
+        """
+        ports = clients.create_neutron_client(context).list_ports(
+            name='trove-%s' % instance.id).get('ports', [])
+        for port in ports:
+            for fixed_ip in port.get('fixed_ips', []):
+                if fixed_ip.get('ip_address') == address:
+                    return fixed_ip['subnet_id']
+        if ports and ports[0].get('fixed_ips'):
+            return ports[0]['fixed_ips'][0]['subnet_id']
+        raise TroveError(_("Member %(id)s has no port on the user's "
+                           "network.") % {'id': instance.id})
+
+    def _load_balancer_members(self, context, instances):
+        conf = CONF.get(self.datastore_version.manager)
+        members = []
+        for instance in instances:
+            address = self.get_ip(instance)
+            members.append({
+                'name': instance.id, 'address': address,
+                'protocol_port': conf.cluster_ready_port,
+                'subnet_id': self._member_subnet_id(context, instance,
+                                                    address)})
+        return members
+
+    def _sync_load_balancer(self, context, cluster_id, instances):
+        """The load balancer of the cluster, with these members."""
+        conf = CONF.get(self.datastore_version.manager)
+        members = self._load_balancer_members(context, instances)
+        loadbalancer.ensure_load_balancer(
+            loadbalancer.OctaviaClient(),
+            loadbalancer.cluster_load_balancer_name(cluster_id),
+            members[0]['subnet_id'], members, conf.cluster_load_balancer_port,
+            description='Endpoint of Trove cluster %s' % cluster_id)
+
+    def _delete_load_balancer(self, cluster_id):
+        loadbalancer.delete_load_balancer(
+            loadbalancer.OctaviaClient(),
+            loadbalancer.cluster_load_balancer_name(cluster_id))
+
+    def _sync_load_balancer_or_log(self, context, cluster_id, instances):
+        """For a grow or a shrink: the cluster works without, and the next
+        change tries again.
+        """
+        if not self._load_balancer_enabled():
+            return
+        try:
+            self._sync_load_balancer(context, cluster_id, instances)
+        except Exception:
+            LOG.exception("The load balancer of cluster %s could not be "
+                          "brought up to date.", cluster_id)
+
+    def delete_cluster(self, context, cluster_id):
+        if self._load_balancer_enabled():
+            try:
+                self._delete_load_balancer(cluster_id)
+            except Exception:
+                LOG.exception("The load balancer of cluster %s could not "
+                              "be deleted.", cluster_id)
+        super(GaleraCommonClusterTasks, self).delete_cluster(
+            context, cluster_id)
+
+    def _fail_new_members(self, new_instance_ids):
+        """A grow that failed: the members that were to join are failed,
+        the cluster is left as it was. A member that found no host (strict
+        anti-affinity) is the usual cause, and the cluster is whole
+        without it.
+        """
+        for instance_id in new_instance_ids:
+            try:
+                db_instance = DBInstance.find_by(id=instance_id)
+                db_instance.set_task_status(
+                    inst_tasks.InstanceTasks.GROWING_ERROR)
+                db_instance.save()
+            except Exception:
+                LOG.exception("Could not mark member %s as failed.",
+                              instance_id)
 
     def _render_cluster_config(self, context, instance, cluster_ips,
                                cluster_name, replication_user):

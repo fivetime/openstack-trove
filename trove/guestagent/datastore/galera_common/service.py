@@ -25,6 +25,7 @@ from sqlalchemy.sql.expression import text
 
 from trove.common import cfg
 from trove.common import exception
+from trove.guestagent.common import cluster_probe
 from trove.guestagent.common import guestagent_utils
 from trove.guestagent.common import operating_system
 from trove.guestagent.common import sql_query
@@ -61,6 +62,12 @@ class GaleraAppMixin(object):
 
     def is_cluster_member(self):
         return self.configuration_manager.has_system_override(CNF_CLUSTER)
+
+    def is_cluster_complete(self):
+        """Whether every member has joined, so that a member out of the
+        cluster is one to bring back.
+        """
+        return False
 
     @property
     def cluster_healthcheck_file(self):
@@ -209,6 +216,44 @@ class GaleraAppMixin(object):
                  "join the cluster like the others.")
         self.stop_db()
         self.start_cluster_node(command)
+
+    def complete_cluster(self, command=None):
+        """Every member has joined. The one that formed the cluster can
+        leave and come back without the cluster going down.
+        """
+        self.leave_bootstrap(command)
+
+    def leave_group(self):
+        """The member is about to be deleted. A Galera member leaves the
+        cluster when its database stops; nothing to do before.
+        """
+        pass
+
+    # What the cluster probe asks of the app: where the member stands.
+
+    def member_view(self):
+        """The member as it is now; unknown until a datastore says."""
+        return cluster_probe.UNKNOWN_MEMBER
+
+    def get_member_role(self):
+        """The member's state and role in the cluster, and whether it
+        takes writes, as the cluster's view shows them.
+        """
+        view = self.member_view()
+        return {'state': view.state, 'role': view.role,
+                'writable': bool(view.writable)}
+
+    def is_writable_member(self):
+        return bool(self.member_view().writable)
+
+    def _recovery_credentials(self):
+        """The account the members ask each other with: the health check's,
+        which every member has.
+        """
+        credentials = operating_system.read_file(
+            self.cluster_healthcheck_file, codec=self.CFG_CODEC,
+            as_root=True)['client']
+        return credentials['user'], credentials['password']
 
     def get_cluster_context(self):
         configuration = self.cluster_configuration

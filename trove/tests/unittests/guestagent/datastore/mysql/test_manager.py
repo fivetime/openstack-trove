@@ -14,7 +14,7 @@
 from unittest import mock
 
 from trove.common import cfg
-from trove.guestagent.datastore.group_replication import probe
+from trove.guestagent.common import cluster_probe
 from trove.guestagent.datastore.mysql import manager
 from trove.tests.unittests import trove_testtools
 
@@ -24,8 +24,8 @@ class TestMySqlManager(trove_testtools.TestCase):
         super(TestMySqlManager, self).setUp()
         manager.Manager._docker_client = mock.MagicMock()
         self.patch_datastore_manager('mysql')
-        # The role probe would loop in the test process.
-        mock.patch.object(probe.RoleProbe, 'start').start()
+        # The cluster probe would loop in the test process.
+        mock.patch.object(cluster_probe.ClusterProbe, 'start').start()
         self.addCleanup(mock.patch.stopall)
         self.mysql_manager = manager.Manager()
 

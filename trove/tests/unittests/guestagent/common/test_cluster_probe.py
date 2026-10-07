@@ -12,77 +12,17 @@
 
 from unittest import mock
 
-from trove.common import exception
-from trove.guestagent.datastore.group_replication import probe
+from trove.guestagent.common import cluster_probe as probe
+from trove.guestagent.common import readyport
 from trove.tests.unittests import trove_testtools
 
-RULE = ['PREROUTING', '-p', 'tcp', '--dport', '3307',
-        '-j', 'REDIRECT', '--to-ports', '3306']
 
-
-def _iptables_call(pid, action):
-    return mock.call('nsenter', '-t', str(pid), '-n', 'iptables', '-w', '5',
-                     '-t', 'nat', action, *RULE,
-                     run_as_root=True, root_helper='sudo', timeout=15)
-
-
-class TestReadyPort(trove_testtools.TestCase):
-
-    def setUp(self):
-        super(TestReadyPort, self).setUp()
-        self.docker = mock.MagicMock()
-        self.docker.containers.get.return_value.attrs = {
-            'State': {'Pid': 4242}}
-        self.execute = mock.patch.object(probe.utils,
-                                         'execute_with_timeout').start()
-        self.addCleanup(mock.patch.stopall)
-        self.port = probe.ReadyPort(self.docker, 3307)
-
-    def _rule_absent(self):
-        # -C exits with 1 when there is no such rule.
-        def execute(*args, **kwargs):
-            if '-C' in args:
-                raise exception.ProcessExecutionError(exit_code=1)
-        self.execute.side_effect = execute
-
-    def test_no_container(self):
-        self.docker.containers.get.side_effect = Exception('no such')
-        self.assertIsNone(self.port.ensure(True))
-        self.execute.assert_not_called()
-        self.assertIsNone(self.port.pid)
-
-    def test_opens_a_missing_rule(self):
-        self._rule_absent()
-        self.assertTrue(self.port.ensure(True))
-        self.assertEqual([_iptables_call(4242, '-C'),
-                          _iptables_call(4242, '-A')],
-                         self.execute.call_args_list)
-        self.assertEqual(4242, self.port.pid)
-        self.assertTrue(self.port.applied)
-
-    def test_leaves_a_present_rule(self):
-        self.assertTrue(self.port.ensure(True))
-        self.assertEqual([_iptables_call(4242, '-C')],
-                         self.execute.call_args_list)
-
-    def test_closes_a_present_rule(self):
-        self.assertFalse(self.port.ensure(False))
-        self.assertEqual([_iptables_call(4242, '-C'),
-                          _iptables_call(4242, '-D')],
-                         self.execute.call_args_list)
-        self.assertFalse(self.port.applied)
-
-    def test_leaves_a_missing_rule_closed(self):
-        self._rule_absent()
-        self.assertFalse(self.port.ensure(False))
-        self.assertEqual(1, self.execute.call_count)
-
-    def test_a_failing_check_is_not_an_answer(self):
-        self.execute.side_effect = exception.ProcessExecutionError(
-            exit_code=4)
-        self.assertRaises(exception.ProcessExecutionError,
-                          self.port.ensure, True)
-        self.assertIsNone(self.port.applied)
+def _view(state, role, writable=None, down=None):
+    if writable is None:
+        writable = state == 'ONLINE' and role == 'PRIMARY'
+    if down is None:
+        down = state in ('OFFLINE', 'ERROR')
+    return probe.MemberView(state, role, writable, down)
 
 
 class ProbeTestBase(trove_testtools.TestCase):
@@ -91,56 +31,61 @@ class ProbeTestBase(trove_testtools.TestCase):
     def setUp(self):
         super(ProbeTestBase, self).setUp()
         self.app = mock.MagicMock()
+        self.app.DATABASE_PORT = 3306
         self.app.is_cluster_member.return_value = True
-        self.app.configuration_manager.has_system_override.return_value = (
-            False)
-        self.app._member_state.return_value = ('ONLINE', 'PRIMARY')
-        self.conf = mock.Mock(group_replication_probe_interval=3,
-                              group_replication_probe_timeout=5,
-                              group_replication_ready_port_reconcile=20,
-                              group_replication_ready_port=3307,
-                              group_replication_recovery_grace=60,
-                              group_replication_recovery_interval=30,
-                              group_replication_peer_timeout=3,
-                              group_replication_auto_bootstrap=True,
-                              group_replication_bootstrap_needs_all_members=(
-                                  False),
-                              group_replication_bootstrap_jitter=0)
+        self.app.is_cluster_complete.return_value = False
+        self.app.member_view.return_value = _view('ONLINE', 'PRIMARY')
+        self.conf = mock.Mock(cluster_probe_interval=3,
+                              cluster_probe_timeout=5,
+                              cluster_ready_port_reconcile=20,
+                              cluster_ready_port=3307,
+                              cluster_recovery_grace=60,
+                              cluster_recovery_interval=30,
+                              cluster_peer_timeout=3,
+                              cluster_auto_bootstrap=True,
+                              cluster_bootstrap_needs_all_members=False,
+                              cluster_bootstrap_jitter=0)
         # No eventlet timeout around the query in tests.
         timeout = mock.patch.object(probe.eventlet, 'Timeout').start()
         timeout.return_value.__enter__.return_value = None
         self.addCleanup(mock.patch.stopall)
-        self.probe = probe.RoleProbe(self.app, mock.MagicMock(),
-                                     conf=self.conf)
-        self.probe.port = mock.MagicMock(spec=probe.ReadyPort)
+        self.probe = probe.ClusterProbe(self.app, mock.MagicMock(),
+                                        conf=self.conf)
+        self.probe.port = mock.MagicMock(spec=readyport.ReadyPort)
         self.probe.port.pid = 4242
         self.probe.port.applied = None
         self.probe.port.container_pid.return_value = 4242
 
 
-class TestRoleProbe(ProbeTestBase):
+class TestClusterProbe(ProbeTestBase):
+
+    def test_the_ready_port_redirects_to_the_database_port(self):
+        self.app.DATABASE_PORT = 5432
+        port = probe.ClusterProbe(self.app, mock.MagicMock(),
+                                  conf=self.conf).port
+        self.assertEqual((3307, 5432), (port.port, port.target_port))
 
     def test_flags_are_read_once(self):
         self.probe._tick()
         self.probe._tick()
         self.app.is_cluster_member.assert_called_once()
-        self.app.configuration_manager.has_system_override.\
-            assert_called_once_with('cluster-started')
+        self.app.is_cluster_complete.assert_called_once()
         self.assertTrue(self.probe.member)
         self.assertFalse(self.probe.complete)
 
     def test_not_a_member(self):
         self.app.is_cluster_member.return_value = False
         self.probe._tick()
-        self.app._member_state.assert_not_called()
+        self.app.member_view.assert_not_called()
         self.probe.port.ensure.assert_not_called()
 
-    def test_the_port_follows_the_role(self):
-        for state, wanted in ((('ONLINE', 'PRIMARY'), True),
-                              (('ONLINE', 'SECONDARY'), False),
-                              (('RECOVERING', 'PRIMARY'), False),
-                              ((None, None), False)):
-            self.app._member_state.return_value = state
+    def test_the_port_follows_the_member(self):
+        for view, wanted in ((_view('ONLINE', 'PRIMARY'), True),
+                             (_view('ONLINE', 'SECONDARY'), False),
+                             (_view('RECOVERING', 'PRIMARY'), False),
+                             (_view('Synced', None, writable=True), True),
+                             (probe.UNKNOWN_MEMBER, False)):
+            self.app.member_view.return_value = view
             self.probe.port.ensure.reset_mock()
             self.probe.port.applied = None
             self.probe._tick()
@@ -164,9 +109,9 @@ class TestRoleProbe(ProbeTestBase):
         self.probe.port.ensure.assert_called_once()
 
     def test_a_failure_does_not_stop_the_probe(self):
-        self.app._member_state.side_effect = Exception('gone')
+        self.app.member_view.side_effect = Exception('gone')
         self.probe._tick()
-        self.app._member_state.side_effect = None
+        self.app.member_view.side_effect = None
         self.probe.port.ensure.side_effect = Exception('no sudo')
         self.probe._tick()
         self.assertEqual(('ONLINE', 'PRIMARY'),
@@ -187,6 +132,13 @@ class TestRoleProbe(ProbeTestBase):
         # Told, not read.
         self.app.is_cluster_member.assert_not_called()
 
+    def test_snapshot(self):
+        self.probe.port.applied = True
+        self.probe._tick()
+        self.assertEqual({'state': 'ONLINE', 'role': 'PRIMARY',
+                          'writable': True, 'ready_port': True},
+                         self.probe.snapshot())
+
     @mock.patch.object(probe.loopingcall, 'FixedIntervalLoopingCall')
     def test_start(self, looping_call):
         self.probe.start()
@@ -199,18 +151,20 @@ class TestRoleProbe(ProbeTestBase):
 
     @mock.patch.object(probe.loopingcall, 'FixedIntervalLoopingCall')
     def test_start_turned_off(self, looping_call):
-        self.conf.group_replication_probe_interval = 0
-        probe.RoleProbe(self.app, mock.MagicMock(), conf=self.conf).start()
+        self.conf.cluster_probe_interval = 0
+        probe.ClusterProbe(self.app, mock.MagicMock(),
+                           conf=self.conf).start()
         looping_call.assert_not_called()
 
 
-def _peer(ip, state='OFFLINE', gtid='u:1-10', reachable=True,
+def _peer(ip, in_group=False, position='u:1-10', reachable=True,
           sees_group=False):
-    return probe.gr_service.PeerView(ip, reachable, state, sees_group, gtid)
+    return probe.PeerView(ip, reachable, in_group, sees_group, position)
 
 
-def _subset(a, b):
-    # GTID sets as "u:1-N": a within b when a's N is not above b's.
+def _not_ahead(a, b):
+    # Positions as "u:1-N": a holds nothing b lacks when a's N is not
+    # above b's.
     def last(s):
         return int(s.rsplit('-', 1)[-1]) if s else 0
     return last(a) <= last(b)
@@ -218,14 +172,13 @@ def _subset(a, b):
 
 class TestDecide(trove_testtools.TestCase):
 
-    def decide(self, self_ip, self_gtid, peers, n=3, needs_all=False):
-        return probe.decide(self_ip, self_gtid, peers, n, _subset,
+    def decide(self, self_ip, position, peers, n=3, needs_all=False):
+        return probe.decide(self_ip, position, peers, n, _not_ahead,
                             needs_all)
 
     def test_a_group_that_is_up_is_joined(self):
-        for peer in (_peer('10.0.0.2', 'ONLINE'),
-                     _peer('10.0.0.2', 'RECOVERING'),
-                     _peer('10.0.0.2', 'OFFLINE', sees_group=True)):
+        for peer in (_peer('10.0.0.2', in_group=True),
+                     _peer('10.0.0.2', sees_group=True)):
             action, _ = self.decide('10.0.0.1', 'u:1-10',
                                     [peer, _peer('10.0.0.3')])
             self.assertEqual(probe.REJOIN, action)
@@ -247,7 +200,7 @@ class TestDecide(trove_testtools.TestCase):
     def test_missing_transactions_wait(self):
         action, reason = self.decide(
             '10.0.0.1', 'u:1-10',
-            [_peer('10.0.0.2', gtid='u:1-12'), _peer('10.0.0.3')])
+            [_peer('10.0.0.2', position='u:1-12'), _peer('10.0.0.3')])
         self.assertEqual(probe.WAIT, action)
         self.assertIn('10.0.0.2', reason)
 
@@ -284,14 +237,14 @@ class TestRecovery(ProbeTestBase):
         self.app._self_ip.return_value = '10.0.0.1'
         self.app._seed_ips.return_value = ['10.0.0.1', '10.0.0.2',
                                            '10.0.0.3']
-        self.app._gtid_executed.return_value = 'u:1-10'
-        self.app._gtid_subset.side_effect = _subset
+        self.app._position.return_value = 'u:1-10'
+        self.app._not_ahead.side_effect = _not_ahead
         self.peers = {'10.0.0.2': _peer('10.0.0.2'),
                       '10.0.0.3': _peer('10.0.0.3')}
         self.app._query_peer.side_effect = (
             lambda ip, user, pw, timeout: self.peers[ip])
         mock.patch.object(probe.time, 'sleep').start()
-        self.app._member_state.return_value = ('OFFLINE', None)
+        self.app.member_view.return_value = _view('OFFLINE', None)
 
     def _tick_at(self, seconds):
         with mock.patch.object(probe.time, 'monotonic',
@@ -315,8 +268,15 @@ class TestRecovery(ProbeTestBase):
         self._tick_at(92)
         self.assertEqual(8, self.app._query_peer.call_count)
 
+    def test_only_a_member_that_is_down(self):
+        # Unknown is not down: the database may be starting.
+        self.app.member_view.return_value = probe.UNKNOWN_MEMBER
+        self._tick_at(0)
+        self._tick_at(100)
+        self.app._query_peer.assert_not_called()
+
     def test_rejoins_a_group_that_is_up(self):
-        self.peers['10.0.0.2'] = _peer('10.0.0.2', 'ONLINE')
+        self.peers['10.0.0.2'] = _peer('10.0.0.2', in_group=True)
         self._tick_at(0)
         self._tick_at(100)
         self.app.rejoin_group.assert_called_once_with('OFFLINE')
@@ -330,7 +290,7 @@ class TestRecovery(ProbeTestBase):
 
     def test_does_not_form_the_group_when_the_peers_changed(self):
         answers = [self.peers['10.0.0.2'], self.peers['10.0.0.3'],
-                   _peer('10.0.0.2', 'ONLINE'), self.peers['10.0.0.3']]
+                   _peer('10.0.0.2', in_group=True), self.peers['10.0.0.3']]
         self.app._query_peer.side_effect = lambda *a: answers.pop(0)
         self._tick_at(0)
         self._tick_at(100)

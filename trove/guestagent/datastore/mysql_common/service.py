@@ -16,7 +16,9 @@ import abc
 import os
 import re
 
+import eventlet
 from oslo_log import log as logging
+from oslo_utils import encodeutils
 import sqlalchemy
 from sqlalchemy import event
 from sqlalchemy import exc
@@ -35,6 +37,7 @@ from trove.guestagent.common.configuration import ConfigurationManager
 from trove.guestagent.common.configuration import ImportOverrideStrategy
 from trove.guestagent.common import guestagent_utils
 from trove.guestagent.common import operating_system
+from trove.guestagent.common import readyport
 from trove.guestagent.common import sql_query
 from trove.guestagent.datastore import service
 from trove.guestagent.utils import docker as docker_util
@@ -44,6 +47,9 @@ from trove.instance import service_status
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
 ADMIN_USER_NAME = "os_admin"
+# The port the server listens on in the container, and the members of a
+# cluster reach each other on.
+DATABASE_PORT = 3306
 CONNECTION_STR_FORMAT = ("mysql+pymysql://%s:%s@localhost/?" +
                          f"unix_socket={constants.MYSQL_HOST_SOCKET_PATH}"
                          "/mysqld.sock")
@@ -454,10 +460,34 @@ class BaseMySqlAdmin(object, metaclass=abc.ABCMeta):
                 client.execute(text(stmt))
 
 
+def exec_client_in_container(docker_client, command, environment, timeout,
+                             container_name=readyport.CONTAINER_NAME):
+    """Run a client command in the database container and return what it
+    printed; raise when it failed, did not finish in time or the container
+    is not there.
+
+    For a cluster member asking a peer: the tenant NIC, through which the
+    members see each other, lives in the container (DOCKER_HOST_NIC_MODE),
+    and the guest agent's own namespace has only the management network.
+    The client in the image is used, with the password in the environment
+    and not on the command line.
+    """
+    container = docker_client.containers.get(container_name)
+    with eventlet.Timeout(timeout):
+        code, output = container.exec_run(command, environment=environment)
+    output = encodeutils.safe_decode(output or b'')
+    if code != 0:
+        raise exception.TroveError(output.strip())
+    return output
+
+
 class BaseMySqlApp(service.BaseDbApp):
     _configuration_manager = None
     _extra_envs = {}
     _previledged = False
+    DATABASE_PORT = DATABASE_PORT
+    # The command line client in the image.
+    PEER_CLIENT = 'mysql'
 
     @property
     def configuration_manager(self):

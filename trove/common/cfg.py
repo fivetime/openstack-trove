@@ -742,12 +742,77 @@ pxc_opts = _build_mysql_family_datastore_opts(
 ]
 
 
+# A cluster with a probe on each member and a load balancer in front: the
+# guest agent watches where the member stands, keeps a ready port open on a
+# member that takes writes, which the load balancer checks, and brings a
+# member that fell out of the cluster back. Shared by the clusters built on
+# the MySQL guest agent; a datastore names the options its earlier releases
+# used with a prefix, so that a configuration with those still works.
+def _with_cluster_probe_and_entry(opts, deprecated_prefix=None):
+    def deprecated(name):
+        if not deprecated_prefix:
+            return None
+        return deprecated_prefix + name[len('cluster_'):]
+
+    def opt(cls, name, **kwargs):
+        return cls(name, deprecated_name=deprecated(name), **kwargs)
+
+    cluster = [
+        opt(cfg.IntOpt, 'cluster_probe_interval', default=3,
+            help='Seconds between two checks of where the member stands '
+                 'in the cluster by the guest agent, which keeps the '
+                 'ready port open on a member that takes writes. '
+                 '0 turns the probe off.'),
+        opt(cfg.IntOpt, 'cluster_probe_timeout', default=5,
+            help='Seconds a check may take before the member\'s state '
+                 'counts as unknown.'),
+        opt(cfg.PortOpt, 'cluster_ready_port', default=3307,
+            help='Port a member that takes writes answers on, redirected '
+                 'to the database port in the database container; a load '
+                 'balancer checks it.'),
+        opt(cfg.IntOpt, 'cluster_ready_port_reconcile', default=20,
+            help='Checks of the member between two unconditional checks '
+                 'that the ready port is as it should be.'),
+        opt(cfg.IntOpt, 'cluster_recovery_grace', default=60,
+            help='Seconds a member of a complete cluster stays out of the '
+                 'cluster before the guest agent tries to bring it back.'),
+        opt(cfg.IntOpt, 'cluster_recovery_interval', default=30,
+            help='Seconds between two tries to bring a member back into '
+                 'the cluster.'),
+        opt(cfg.IntOpt, 'cluster_peer_timeout', default=3,
+            help='Seconds to wait for a peer when asking where it '
+                 'stands.'),
+        opt(cfg.BoolOpt, 'cluster_auto_bootstrap', default=True,
+            help='Form the cluster again by itself after every member '
+                 'went down, from the member that holds every transaction '
+                 'a majority holds. Off: a member only rejoins a cluster '
+                 'that is up.'),
+        opt(cfg.BoolOpt, 'cluster_bootstrap_needs_all_members',
+            default=False,
+            help='Form the cluster again only when every member answers, '
+                 'instead of a majority.'),
+        opt(cfg.IntOpt, 'cluster_bootstrap_jitter', default=5,
+            help='Up to this many seconds of waiting before forming the '
+                 'cluster again, against two members doing it at once.'),
+        cfg.BoolOpt('cluster_load_balancer', default=True,
+                    help='Put a load balancer in front of the members of a '
+                         'cluster, on their subnet: the cluster\'s endpoint, '
+                         'sending to the members that take writes.'),
+        cfg.PortOpt('cluster_load_balancer_port', default=3306,
+                    help='Port the load balancer of a cluster listens on.'),
+    ]
+    names = {opt.name for opt in cluster}
+    return [opt for opt in opts if opt.name not in names] + cluster
+
+
 # MySQL Group Replication, for MySQL and Percona Server: a group of three or
 # more members, one of them writable (single-primary) or all of them
 # (multi-primary), as the tenant chooses when creating the cluster. Added
 # after the Percona XtraDB Cluster options are built from the MySQL ones,
 # so that PXC keeps its Galera clusters.
 def _with_group_replication(opts):
+    opts = _with_cluster_probe_and_entry(
+        opts, deprecated_prefix='group_replication_')
     group_replication = [
         cfg.BoolOpt('cluster_support', default=True,
                     help='Enable clusters to be created and managed.'),
@@ -760,50 +825,6 @@ def _with_group_replication(opts):
                          'other on, opened in their security group as well: '
                          'the group communication port, and the ready port '
                          'a member that takes writes answers on.'),
-        cfg.IntOpt('group_replication_probe_interval', default=3,
-                   help='Seconds between two checks of the member\'s role '
-                        'in the group by the guest agent, which keeps the '
-                        'ready port open on a member that takes writes. '
-                        '0 turns the probe off.'),
-        cfg.IntOpt('group_replication_probe_timeout', default=5,
-                   help='Seconds a check of the role may take before the '
-                        'role counts as unknown.'),
-        cfg.PortOpt('group_replication_ready_port', default=3307,
-                    help='Port a member that takes writes answers on, '
-                         'redirected to the database port in the database '
-                         'container; a load balancer checks it.'),
-        cfg.IntOpt('group_replication_ready_port_reconcile', default=20,
-                   help='Checks of the role between two unconditional '
-                        'checks that the ready port is as it should be.'),
-        cfg.IntOpt('group_replication_recovery_grace', default=60,
-                   help='Seconds a member of a complete cluster stays out '
-                        'of the group before the guest agent tries to '
-                        'bring it back.'),
-        cfg.IntOpt('group_replication_recovery_interval', default=30,
-                   help='Seconds between two tries to bring a member back '
-                        'into the group.'),
-        cfg.IntOpt('group_replication_peer_timeout', default=3,
-                   help='Seconds to wait for a peer when asking where it '
-                        'stands.'),
-        cfg.BoolOpt('group_replication_auto_bootstrap', default=True,
-                    help='Form the group again by itself after every '
-                         'member went down, from the member that holds '
-                         'every transaction a majority holds. Off: a '
-                         'member only rejoins a group that is up.'),
-        cfg.BoolOpt('group_replication_bootstrap_needs_all_members',
-                    default=False,
-                    help='Form the group again only when every member '
-                         'answers, instead of a majority.'),
-        cfg.IntOpt('group_replication_bootstrap_jitter', default=5,
-                   help='Up to this many seconds of waiting before forming '
-                        'the group again, against two members doing it at '
-                        'once.'),
-        cfg.BoolOpt('cluster_load_balancer', default=True,
-                    help='Put a load balancer in front of the members of a '
-                         'cluster, on their subnet: the cluster\'s endpoint, '
-                         'sending to the members that take writes.'),
-        cfg.PortOpt('cluster_load_balancer_port', default=3306,
-                    help='Port the load balancer of a cluster listens on.'),
         cfg.StrOpt('api_strategy',
                    default='trove.common.strategies.cluster.experimental.'
                    'group_replication.api.GroupReplicationAPIStrategy',

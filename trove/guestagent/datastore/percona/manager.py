@@ -25,4 +25,4 @@ class Manager(manager.Manager):
 
         # Not super().__init__(): the MySQL manager builds its own app there.
         common_manager.MySqlManager.__init__(self, app, status, adm)
-        self.init_group_probe()
+        self.init_cluster_probe()

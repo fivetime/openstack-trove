@@ -27,17 +27,15 @@ container: it stops, the container's restart policy starts it again, and
 the guest agent starts Group Replication on it once more.
 """
 
-import collections
 import time
 
-import eventlet
 from oslo_log import log as logging
-from oslo_utils import encodeutils
 from sqlalchemy.sql.expression import text
 
 from trove.common import cfg
 from trove.common import exception
 from trove.common.i18n import _
+from trove.guestagent.common import cluster_probe
 from trove.guestagent.common import operating_system
 from trove.guestagent.datastore.galera_common import service as galera_service
 from trove.guestagent.datastore.mysql_common import service as mysql_service
@@ -60,14 +58,10 @@ SINGLE_PRIMARY = 'single-primary'
 MULTI_PRIMARY = 'multi-primary'
 MODES = (SINGLE_PRIMARY, MULTI_PRIMARY)
 RECOVERY_CHANNEL = 'group_replication_recovery'
-# The port the members reach each other's server on.
-DATABASE_PORT = 3306
-# What a peer tells of itself: whether it answered, the state it has in
-# the group (OFFLINE when it is in none), whether it sees a group that is
-# up (ONLINE or RECOVERING members, itself or others), and its executed
-# transactions.
-PeerView = collections.namedtuple(
-    'PeerView', 'ip reachable own_state sees_group gtid_executed')
+# A member in these states is in the group.
+IN_GROUP = ('ONLINE', 'RECOVERING')
+# A member in these states is out of it, and one to bring back.
+OUT_OF_GROUP = ('OFFLINE', 'ERROR')
 MEMBERS_QUERY = ("SELECT MEMBER_ID, MEMBER_STATE FROM "
                  "performance_schema.replication_group_members")
 MEMBER_STATE = ("SELECT MEMBER_STATE, MEMBER_ROLE FROM "
@@ -242,16 +236,19 @@ class GroupReplicationAppMixin(galera_service.GaleraAppMixin):
         self._start_group_replication(bootstrap=bootstrap)
         self._wait_for_group()
 
-    def complete_cluster(self):
-        """From now on the member joins the group when it starts."""
+    def complete_cluster(self, command=None):
+        """From now on the member joins the group when it starts.
+
+        Not Galera's: Group Replication forms the group with a setting it
+        turns off right after, so nothing stays to undo on the first
+        member.
+        """
         self.configuration_manager.apply_system_override(
             {'mysqld': {'group_replication_start_on_boot': 'ON'}},
             CNF_STARTED)
 
-    def leave_bootstrap(self, command):
-        # Group Replication forms the group with a setting it turns off
-        # right after; nothing stays to undo.
-        pass
+    def is_cluster_complete(self):
+        return self.configuration_manager.has_system_override(CNF_STARTED)
 
     def write_cluster_configuration_overrides(self, cluster_configuration):
         """Keep the configuration, and give a running member the members
@@ -273,8 +270,19 @@ class GroupReplicationAppMixin(galera_service.GaleraAppMixin):
                     client.execute(text("SET GLOBAL %s = :value" % option),
                                    value=value)
 
-    # Recovery: what the role probe needs to bring a member back into the
-    # group, or to form the group again after every member went down.
+    # What the cluster probe asks of the app: where the member stands, and
+    # what it takes to bring it back into the group, or to form the group
+    # again after every member went down.
+
+    def member_view(self):
+        """The member's state and role in the group; it takes writes as
+        the primary of a single-primary group, or as any member of a
+        multi-primary one.
+        """
+        state, role = self._member_state()
+        return cluster_probe.MemberView(
+            state, role, state == 'ONLINE' and role == 'PRIMARY',
+            state in OUT_OF_GROUP)
 
     def _self_ip(self):
         configuration = self.cluster_configuration
@@ -292,40 +300,26 @@ class GroupReplicationAppMixin(galera_service.GaleraAppMixin):
         return [seed.strip().rsplit(':', 1)[0].strip('[]')
                 for seed in seeds.split(',') if seed.strip()]
 
-    def _recovery_credentials(self):
-        credentials = operating_system.read_file(
-            self.cluster_healthcheck_file, codec=self.CFG_CODEC,
-            as_root=True)['client']
-        return credentials['user'], credentials['password']
-
     def _query_peer(self, ip, user, password, timeout):
         """Ask a peer, over its database port with the recovery account,
-        where it stands. A peer that does not answer is unreachable.
-
-        The question goes out from the database container, with the
-        client in its image: the tenant NIC, through which the members see
-        each other, lives there (DOCKER_HOST_NIC_MODE), and the guest
-        agent's own namespace has only the management network.
+        where it stands: whether it is in the group (ONLINE or RECOVERING),
+        whether it sees members that are, and its executed transactions. A
+        peer that does not answer is unreachable.
         """
         # One call, three result sets: the member rows have two columns,
         # then the server's uuid, then its gtid set (empty for a fresh
         # server; batch mode escapes the newlines inside it as "\n").
-        command = ['mysql', '--connect-timeout=%d' % timeout,
-                   '--host=%s' % ip, '--port=%d' % DATABASE_PORT,
+        command = [self.PEER_CLIENT, '--connect-timeout=%d' % timeout,
+                   '--host=%s' % ip, '--port=%d' % self.DATABASE_PORT,
                    '--user=%s' % user, '--batch', '--skip-column-names',
                    '--execute=%s; SELECT @@server_uuid; '
                    'SELECT @@global.gtid_executed' % MEMBERS_QUERY]
         try:
-            container = self.docker_client.containers.get(
-                galera_service.CONTAINER_NAME)
             # The connect timeout is the client's; the whole exchange
             # gets a few times that before it is given up on.
-            with eventlet.Timeout(3 * timeout + 5):
-                code, output = container.exec_run(
-                    command, environment={'MYSQL_PWD': password})
-            output = encodeutils.safe_decode(output or b'')
-            if code != 0:
-                raise exception.TroveError(output.strip())
+            output = mysql_service.exec_client_in_container(
+                self.docker_client, command, {'MYSQL_PWD': password},
+                3 * timeout + 5)
             lines = output.rstrip('\n').split('\n')
             members = [line.split('\t', 1) for line in lines if '\t' in line]
             scalars = [line for line in lines if '\t' not in line]
@@ -333,28 +327,29 @@ class GroupReplicationAppMixin(galera_service.GaleraAppMixin):
             gtid = scalars[1].replace('\\n', '') if len(scalars) > 1 else ''
         except Exception as err:
             LOG.debug("Peer %s did not answer: %s", ip, err)
-            return PeerView(ip, False, None, False, None)
-        own_state = 'OFFLINE'
+            return cluster_probe.PeerView(ip, False, False, False, None)
+        in_group = False
         sees_group = False
         for member_id, state in members:
-            if member_id == uuid:
-                own_state = state
-            if state in ('ONLINE', 'RECOVERING'):
+            if state in IN_GROUP:
                 sees_group = True
-        return PeerView(ip, True, own_state, sees_group, gtid)
+                if member_id == uuid:
+                    in_group = True
+        return cluster_probe.PeerView(ip, True, in_group, sees_group, gtid)
 
-    def _gtid_executed(self):
+    def _position(self):
+        """Where the member stands: its executed transactions."""
         rows = list(self.execute_sql("SELECT @@global.gtid_executed"))
         return (rows[0][0] or '') if rows else ''
 
-    def _gtid_subset(self, subset, superset):
-        """Whether every transaction of the first set is in the second,
-        as the server works it out.
+    def _not_ahead(self, position, other):
+        """Whether every transaction of the first gtid set is in the
+        second, as the server works it out.
         """
         with mysql_util.SqlClient(self.get_engine()) as client:
             rows = list(client.execute(
                 text("SELECT GTID_SUBSET(:subset, :superset)"),
-                subset=subset or '', superset=superset or ''))
+                subset=position or '', superset=other or ''))
         return bool(rows and rows[0][0])
 
     def rejoin_group(self, state):
@@ -378,18 +373,6 @@ class GroupReplicationAppMixin(galera_service.GaleraAppMixin):
         except Exception:
             LOG.exception("Could not leave the group; the group will "
                           "expel the member once it is gone.")
-
-    def get_member_role(self):
-        """The member's state and role in the group, and whether it takes
-        writes: the primary of a single-primary group, any member of a
-        multi-primary one.
-        """
-        state, role = self._member_state()
-        return {'state': state, 'role': role,
-                'writable': state == 'ONLINE' and role == 'PRIMARY'}
-
-    def is_writable_member(self):
-        return self.get_member_role()['writable']
 
     def get_cluster_context(self):
         credentials = operating_system.read_file(

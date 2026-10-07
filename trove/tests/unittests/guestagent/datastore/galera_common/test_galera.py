@@ -293,6 +293,22 @@ class TestLeaveBootstrap(trove_testtools.TestCase):
         self.assertFalse(app.started_with_bootstrap())
 
     @mock.patch.object(galera_service.docker_util, 'remove_container')
+    def test_complete_cluster_leaves_bootstrap(self, _remove):
+        # Galera's completion: the member that formed the cluster is
+        # started again as an ordinary member.
+        app = FakeApp()
+        app.docker_client.containers.get.return_value = _container(
+            ['--datadir=/var/lib/mysql/data', '--wsrep-new-cluster'])
+
+        app.complete_cluster(COMMAND)
+
+        self.assertEqual(
+            [('stop_db',), ('start_db', COMMAND, app.HEALTHCHECK)],
+            app.calls)
+        # Nothing marks the cluster complete yet.
+        self.assertFalse(app.is_cluster_complete())
+
+    @mock.patch.object(galera_service.docker_util, 'remove_container')
     def test_the_bootstrap_member_is_started_again_as_a_member(
             self, mock_remove):
         app = FakeApp()
@@ -424,17 +440,73 @@ class TestManager(trove_testtools.TestCase):
         manager.status.set_status.assert_called_once_with(
             service_status.ServiceStatuses.FAILED)
 
-    def test_cluster_complete_leaves_bootstrap_first(self):
+    def test_cluster_complete_completes_the_app_first(self):
         manager = FakeManager()
 
         manager.cluster_complete(mock.sentinel.context)
 
-        manager.app.leave_bootstrap.assert_called_once_with(COMMAND)
+        manager.app.complete_cluster.assert_called_once_with(COMMAND)
         # The base class reports the instance as installed; by then the
         # member has to be running the way it will from now on.
         self.assertEqual(1, len(manager.completed))
-        self.assertIn(mock.call.leave_bootstrap(COMMAND),
+        self.assertIn(mock.call.complete_cluster(COMMAND),
                       manager.completed[0])
+
+    def test_the_cluster_calls_tell_the_probe(self):
+        manager = FakeManager()
+        manager.cluster_probe = mock.Mock()
+        calls = mock.Mock()
+        calls.attach_mock(manager.cluster_probe, 'probe')
+        calls.attach_mock(manager.app, 'app')
+
+        manager.install_cluster(mock.sentinel.context, REPLICATION_USER,
+                                CLUSTER_CONFIGURATION, False)
+        manager.cluster_probe.enable_member.assert_called_once()
+        manager.cluster_complete(mock.sentinel.context)
+        manager.cluster_probe.enable_complete.assert_called_once()
+        manager.leave_cluster(mock.sentinel.context)
+        # The probe is disabled before the member leaves.
+        self.assertEqual([mock.call.probe.disable(),
+                          mock.call.app.leave_group()],
+                         [c for c in calls.mock_calls
+                          if 'disable' in str(c) or 'leave_group' in str(c)])
+        manager.app.get_member_role.return_value = {'state': 'Synced'}
+        self.assertEqual({'state': 'Synced'},
+                         manager.get_member_role(mock.sentinel.context))
+
+    def test_a_failed_install_does_not_enable_the_probe(self):
+        manager = FakeManager()
+        manager.cluster_probe = mock.Mock()
+        manager.app.install_cluster.side_effect = RuntimeError('no')
+
+        self.assertRaises(
+            RuntimeError, manager.install_cluster, mock.sentinel.context,
+            REPLICATION_USER, CLUSTER_CONFIGURATION, False)
+        manager.cluster_probe.enable_member.assert_not_called()
+
+    def test_init_cluster_probe(self):
+        manager = FakeManager()
+        manager.docker_client = mock.Mock()
+        manager.app.DATABASE_PORT = 3306
+        with mock.patch.object(galera_manager.cluster_probe.ClusterProbe,
+                               'start') as start:
+            manager.init_cluster_probe()
+        self.assertIsInstance(manager.cluster_probe,
+                              galera_manager.cluster_probe.ClusterProbe)
+        self.assertIs(manager.app, manager.cluster_probe.app)
+        start.assert_called_once()
+        # A manager whose probe cannot be set up is still a manager.
+        with mock.patch.object(galera_manager.cluster_probe, 'ClusterProbe',
+                               side_effect=RuntimeError('no')):
+            manager.init_cluster_probe()
+
+    def test_without_a_probe(self):
+        manager = FakeManager()
+        manager.install_cluster(mock.sentinel.context, REPLICATION_USER,
+                                CLUSTER_CONFIGURATION, False)
+        manager.cluster_complete(mock.sentinel.context)
+        manager.leave_cluster(mock.sentinel.context)
+        manager.app.leave_group.assert_called_once()
 
 
 class TestMariaDB(trove_testtools.TestCase):
@@ -453,8 +525,8 @@ class TestMariaDB(trove_testtools.TestCase):
 
         self.assertEqual(
             {'install_cluster', 'reset_admin_password', 'cluster_complete',
-             'get_cluster_context',
-             'write_cluster_configuration_overrides'},
+             'get_cluster_context', 'write_cluster_configuration_overrides',
+             'leave_cluster', 'is_writable_member', 'get_member_role'},
             cluster_calls)
         for name in cluster_calls:
             self.assertTrue(
@@ -471,7 +543,10 @@ class TestMariaDB(trove_testtools.TestCase):
                 ('cluster_complete', set()),
                 ('get_cluster_context', set()),
                 ('write_cluster_configuration_overrides',
-                 {'cluster_configuration'})):
+                 {'cluster_configuration'}),
+                ('leave_cluster', set()),
+                ('is_writable_member', set()),
+                ('get_member_role', set())):
             parameters = set(inspect.signature(
                 getattr(mariadb_manager.Manager, name)).parameters)
             self.assertEqual(sent | {'self', 'context'}, parameters, name)

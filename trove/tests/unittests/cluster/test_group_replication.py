@@ -57,10 +57,26 @@ class GroupReplicationConfigTest(trove_testtools.TestCase):
             conf = CONF.get(manager)
             self.assertTrue(conf.cluster_load_balancer)
             self.assertEqual(3306, conf.cluster_load_balancer_port)
-            self.assertEqual(3307, conf.group_replication_ready_port)
+            self.assertEqual(3307, conf.cluster_ready_port)
             self.assertIn('3307', [str(p) for r in conf.cluster_tcp_ports
                                    for p in r])
         self.assertEqual('ovn', CONF.load_balancer_provider)
+
+    def test_the_probe_options_keep_their_old_names(self):
+        # A configuration from before the options were shared with the
+        # other clusters still works.
+        opts = {opt.name: opt for opt in cfg.mysql_opts}
+        for name in ('cluster_probe_interval', 'cluster_probe_timeout',
+                     'cluster_ready_port', 'cluster_ready_port_reconcile',
+                     'cluster_recovery_grace', 'cluster_recovery_interval',
+                     'cluster_peer_timeout', 'cluster_auto_bootstrap',
+                     'cluster_bootstrap_needs_all_members',
+                     'cluster_bootstrap_jitter'):
+            self.assertEqual(
+                'group_replication_' + name[len('cluster_'):],
+                opts[name].deprecated_opts[0].name, name)
+        self.assertEqual(3, CONF.mysql.cluster_probe_interval)
+        self.assertEqual(60, CONF.percona.cluster_recovery_grace)
 
     def test_pxc_keeps_galera(self):
         self.assertIsInstance(strategy.load_api_strategy('pxc'),
@@ -86,20 +102,23 @@ class GroupReplicationAPITest(trove_testtools.TestCase):
             {'id': 'c1', 'instance_type': 'member'},
             gr_api.GroupReplicationCluster._member_config(db_info, None))
 
-    @mock.patch.object(galera_api.GaleraCommonCluster, 'create')
-    def test_create_defaults_to_single_primary(self, create):
-        gr_api.GroupReplicationCluster.create(
-            'ctx', 'c', 'ds', 'dsv', [], None, None, None)
+    def test_create_defaults_to_single_primary(self):
         self.assertEqual({'group_replication_mode': 'single-primary'},
-                         create.call_args[0][5])
+                         gr_api.GroupReplicationCluster._validate_mode(None))
+        self.assertEqual(
+            {'group_replication_mode': 'multi-primary', 'x': 1},
+            gr_api.GroupReplicationCluster._validate_mode(
+                {'group_replication_mode': 'multi-primary', 'x': 1}))
 
-    @mock.patch.object(galera_api.GaleraCommonCluster, 'create')
-    def test_create_refuses_an_unknown_mode(self, create):
+    @mock.patch.object(galera_api.GaleraCommonCluster,
+                       '_validate_cluster_instances')
+    def test_create_refuses_an_unknown_mode(self, validate):
+        datastore_version = mock.Mock(manager='mysql')
         self.assertRaises(
             exception.BadRequest, gr_api.GroupReplicationCluster.create,
-            'ctx', 'c', 'ds', 'dsv', [],
+            'ctx', 'c', 'ds', datastore_version, [{}, {}, {}],
             {'group_replication_mode': 'both'}, None, None)
-        create.assert_not_called()
+        validate.assert_not_called()
 
 
 class GroupReplicationTemplateTest(trove_testtools.TestCase):
@@ -314,21 +333,23 @@ class GroupReplicationTasksTest(trove_testtools.TestCase):
         self.tasks.update_statuses_on_failure.assert_not_called()
         self.assertEqual(2, self.tasks.reset_task.call_count)
 
+    @mock.patch.object(gr_taskmanager.galera_taskmanager, 'DBInstance')
     @mock.patch.object(gr_taskmanager, 'Instance')
     @mock.patch.object(gr_taskmanager, 'DBInstance')
     def test_a_failed_grow_leaves_the_cluster_as_it_was(
-            self, db_instance, instance):
+            self, db_instance, instance, galera_db_instance):
         # The new member never got ready (no host, say).
         db_instance.find_all.return_value.all.return_value = (
             self._instances('i1', 'i2', 'i3', 'i4'))
         instance.load.side_effect = lambda ctx, i: mock.Mock(id=i)
         self.tasks._all_instances_ready.return_value = False
         failed = mock.Mock()
-        db_instance.find_by.return_value = failed
+        # Failing the members is Galera's now.
+        galera_db_instance.find_by.return_value = failed
 
         self.tasks.grow_cluster('ctx', 'c1', ['i4'])
 
-        db_instance.find_by.assert_called_once_with(id='i4')
+        galera_db_instance.find_by.assert_called_once_with(id='i4')
         failed.set_task_status.assert_called_once_with(
             gr_taskmanager.inst_tasks.InstanceTasks.GROWING_ERROR)
         # Not every member, and the cluster's task is cleared.
@@ -349,8 +370,8 @@ class GroupReplicationTasksTest(trove_testtools.TestCase):
 
         self.assertEqual(('sync', ('i1', 'i3')), self.calls[-1])
 
-    @mock.patch.object(gr_taskmanager.galera_taskmanager.
-                       GaleraCommonClusterTasks, 'delete_cluster')
+    @mock.patch.object(gr_taskmanager.galera_taskmanager.task_models.
+                       ClusterTasks, 'delete_cluster')
     def test_delete_takes_the_load_balancer_with_it(self, base_delete):
         base_delete.side_effect = lambda ctx, cid: self.calls.append(
             ('delete_cluster', cid))
@@ -362,7 +383,8 @@ class GroupReplicationTasksTest(trove_testtools.TestCase):
         self.tasks.delete_cluster('ctx', 'c1')
         self.assertEqual(('delete_cluster', 'c1'), self.calls[-1])
 
-    @mock.patch.object(gr_taskmanager.clients, 'create_neutron_client')
+    @mock.patch.object(gr_taskmanager.galera_taskmanager.clients,
+                       'create_neutron_client')
     def test_load_balancer_members(self, neutron):
         neutron.return_value.list_ports.side_effect = lambda name: {
             'ports': [{'fixed_ips': [
@@ -378,8 +400,10 @@ class GroupReplicationTasksTest(trove_testtools.TestCase):
               'subnet_id': 'sub-4'}], members)
         neutron.return_value.list_ports.assert_any_call(name='trove-i1')
 
-    @mock.patch.object(gr_taskmanager.loadbalancer, 'OctaviaClient')
-    @mock.patch.object(gr_taskmanager.loadbalancer, 'ensure_load_balancer')
+    @mock.patch.object(gr_taskmanager.galera_taskmanager.loadbalancer,
+                       'OctaviaClient')
+    @mock.patch.object(gr_taskmanager.galera_taskmanager.loadbalancer,
+                       'ensure_load_balancer')
     def test_sync_load_balancer(self, ensure, client):
         self.tasks._load_balancer_members = mock.Mock(return_value=[
             {'name': 'i1', 'address': '10.0.0.1', 'protocol_port': 3307,
@@ -437,8 +461,8 @@ class GroupReplicationViewTest(trove_testtools.TestCase):
 
     @mock.patch.object(cluster_views.ClusterView, 'data',
                        side_effect=lambda: {'cluster': {'id': 'c1'}})
-    @mock.patch.object(gr_api.loadbalancer, 'OctaviaClient')
-    @mock.patch.object(gr_api.loadbalancer, 'find_endpoint')
+    @mock.patch.object(galera_api.loadbalancer, 'OctaviaClient')
+    @mock.patch.object(galera_api.loadbalancer, 'find_endpoint')
     def test_endpoint(self, find_endpoint, client, data):
         cluster = mock.Mock(id='c1')
         cluster.datastore_version.manager = 'mysql'

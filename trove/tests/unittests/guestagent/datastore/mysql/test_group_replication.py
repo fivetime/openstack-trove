@@ -16,8 +16,8 @@ from oslo_utils import importutils
 
 from trove.common import constants
 from trove.common import exception
+from trove.guestagent.common import cluster_probe
 from trove.guestagent.datastore.group_replication import manager as gr_manager
-from trove.guestagent.datastore.group_replication import probe
 from trove.guestagent.datastore.group_replication import service as gr_service
 from trove.guestagent.datastore.mysql import manager as mysql_manager
 from trove.guestagent.datastore.mysql import service as mysql_service
@@ -43,7 +43,7 @@ class TestGroupReplicationWiring(trove_testtools.TestCase):
             self.assertLess(mro.index(gr_service.GroupReplicationAppMixin),
                             mro.index(mysql_service.MySqlApp))
 
-    @mock.patch.object(probe.RoleProbe, 'start')
+    @mock.patch.object(cluster_probe.ClusterProbe, 'start')
     @mock.patch.object(mysql_manager.BaseManager, 'docker_client',
                        new_callable=mock.PropertyMock)
     def test_mysql_manager_runs_the_group_replication_app(self, _docker,
@@ -52,24 +52,31 @@ class TestGroupReplicationWiring(trove_testtools.TestCase):
         self.assertIsInstance(manager.app,
                               mysql_service.GroupReplicationMySqlApp)
         self.assertIs(manager.app, manager.adm.mysql_app)
-        # With the role probe running.
-        self.assertIsInstance(manager.group_probe, probe.RoleProbe)
+        # With the cluster probe running, on the ready port of the mysql
+        # options.
+        self.assertIsInstance(manager.cluster_probe,
+                              cluster_probe.ClusterProbe)
+        port = manager.cluster_probe.port
+        self.assertEqual((3307, 3306), (port.port, port.target_port))
         probe_start.assert_called_once()
 
-    @mock.patch.object(probe.RoleProbe, 'start')
+    @mock.patch.object(cluster_probe.ClusterProbe, 'start')
     @mock.patch.object(mysql_manager.BaseManager, 'docker_client',
                        new_callable=mock.PropertyMock)
     def test_cluster_calls_tell_the_probe(self, _docker, _start):
         manager = mysql_manager.Manager()
         manager.app = mock.MagicMock()
         manager.status = mock.MagicMock()
-        manager.group_probe = mock.MagicMock()
+        manager.cluster_probe = mock.MagicMock()
         calls = mock.Mock()
-        calls.attach_mock(manager.group_probe, 'probe')
+        calls.attach_mock(manager.cluster_probe, 'probe')
         calls.attach_mock(manager.app, 'app')
 
         manager.cluster_complete(None)
-        manager.group_probe.enable_complete.assert_called_once()
+        # Group Replication's completion, not Galera's.
+        manager.app.complete_cluster.assert_called_once()
+        manager.app.leave_bootstrap.assert_not_called()
+        manager.cluster_probe.enable_complete.assert_called_once()
 
         manager.leave_cluster(None)
         # The probe is disabled before the member leaves.
@@ -168,11 +175,19 @@ class TestGroupReplicationApp(trove_testtools.TestCase):
         self.assertEqual(1, self.sql.count('START GROUP_REPLICATION'))
 
     def test_complete_cluster_starts_on_boot(self):
-        self.app.complete_cluster()
+        # Whatever command the first member was started with: nothing to
+        # undo on it.
+        self.app.complete_cluster('--datadir=x')
         self.configuration_manager.apply_system_override.\
             assert_called_once_with(
                 {'mysqld': {'group_replication_start_on_boot': 'ON'}},
                 gr_service.CNF_STARTED)
+        self.app.stop_db.assert_not_called()
+        # And that is what makes the cluster complete.
+        self.configuration_manager.has_system_override.return_value = True
+        self.assertTrue(self.app.is_cluster_complete())
+        self.configuration_manager.has_system_override.\
+            assert_called_once_with(gr_service.CNF_STARTED)
 
     def test_running_member_gets_the_new_members(self):
         self._states(('ONLINE', 'PRIMARY'))
@@ -244,22 +259,29 @@ class TestGroupReplicationApp(trove_testtools.TestCase):
         container.exec_run.return_value = (
             0, b'u-2\tOFFLINE\nu-3\tONLINE\nu-2\ng:1-5,\\nh:1-2\n')
         peer = self.app._query_peer('10.0.0.2', 'r', 'p', 3)
-        self.assertEqual(gr_service.PeerView(
-            '10.0.0.2', True, 'OFFLINE', True, 'g:1-5,h:1-2'), peer)
+        # Out of the group itself, but it sees a member in it.
+        self.assertEqual(cluster_probe.PeerView(
+            '10.0.0.2', True, False, True, 'g:1-5,h:1-2'), peer)
         self.app.docker_client.containers.get.assert_called_with('database')
         command = container.exec_run.call_args.args[0]
         self.assertEqual('mysql', command[0])
         self.assertIn('--connect-timeout=3', command)
         self.assertIn('--host=10.0.0.2', command)
+        self.assertIn('--port=3306', command)
         self.assertIn('--user=r', command)
         self.assertIn('--skip-column-names', command)
         self.assertEqual({'MYSQL_PWD': 'p'},
                          container.exec_run.call_args.kwargs['environment'])
         self.assertNotIn('p', command)
-        # Nobody in the group, nothing executed yet: its own state is
-        # OFFLINE and the gtid set is empty.
+        # In the group.
+        container.exec_run.return_value = (
+            0, b'u-2\tRECOVERING\nu-3\tONLINE\nu-2\ng:1-5\n')
+        self.assertEqual((True, True, 'g:1-5'),
+                         self.app._query_peer('10.0.0.2', 'r', 'p', 3)[2:5])
+        # Nobody in the group, nothing executed yet: the gtid set is
+        # empty.
         container.exec_run.return_value = (0, b'u-2\n\n')
-        self.assertEqual(('OFFLINE', False, ''),
+        self.assertEqual((False, False, ''),
                          self.app._query_peer('10.0.0.2', 'r', 'p', 3)[2:5])
         # Not answering: the client fails, or the container is not there.
         container.exec_run.return_value = (
@@ -270,9 +292,11 @@ class TestGroupReplicationApp(trove_testtools.TestCase):
         self.assertFalse(self.app._query_peer('10.0.0.2', 'r', 'p', 3)
                          .reachable)
 
-    def test_gtid_subset(self):
+    def test_position_and_not_ahead(self):
+        self.app.execute_sql = mock.Mock(return_value=iter([('a:1-2',)]))
+        self.assertEqual('a:1-2', self.app._position())
         self.client.execute.side_effect = lambda stmt, **k: iter([(1,)])
-        self.assertTrue(self.app._gtid_subset('a:1', 'a:1-2'))
+        self.assertTrue(self.app._not_ahead('a:1', 'a:1-2'))
         stmt, kwargs = self.client.execute.call_args[0][0], \
             self.client.execute.call_args[1]
         self.assertIn('GTID_SUBSET', str(stmt))
@@ -294,10 +318,19 @@ class TestGroupReplicationApp(trove_testtools.TestCase):
              'SET GLOBAL group_replication_bootstrap_group = OFF'],
             self.sql)
 
-    def test_writable_member(self):
-        for state, writable in ((('ONLINE', 'PRIMARY'), True),
-                                (('ONLINE', 'SECONDARY'), False),
-                                (('RECOVERING', 'PRIMARY'), False)):
+    def test_member_view(self):
+        # Writable as the primary that is ONLINE; down when out of the
+        # group, not when the state is not known.
+        for state, writable, down in ((('ONLINE', 'PRIMARY'), True, False),
+                                      (('ONLINE', 'SECONDARY'), False, False),
+                                      (('RECOVERING', 'PRIMARY'), False,
+                                       False),
+                                      (('OFFLINE', None), False, True),
+                                      (('ERROR', None), False, True),
+                                      ((None, None), False, False)):
+            self._states(state)
+            view = self.app.member_view()
+            self.assertEqual(state + (writable, down), tuple(view))
             self._states(state)
             self.assertEqual(writable, self.app.is_writable_member())
 

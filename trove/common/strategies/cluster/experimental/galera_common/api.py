@@ -21,6 +21,8 @@ from trove.cluster.tasks import ClusterTasks
 from trove.cluster.views import ClusterView
 from trove.common import cfg
 from trove.common import exception
+from trove.common.i18n import _
+from trove.common import loadbalancer
 from trove.common import server_group as srv_grp
 from trove.common.strategies.cluster import base as cluster_base
 from trove.extensions.mgmt.clusters.views import MgmtClusterView
@@ -32,6 +34,9 @@ from trove.taskmanager import api as task_api
 
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
+
+# Members in these are asked for their role; the others cannot answer.
+ANSWERING_STATUSES = ('ACTIVE', 'HEALTHY')
 
 
 class GaleraCommonAPIStrategy(cluster_base.BaseAPIStrategy):
@@ -50,6 +55,13 @@ class GaleraCommonAPIStrategy(cluster_base.BaseAPIStrategy):
 
 
 class GaleraCommonCluster(cluster_models.Cluster):
+
+    # A cluster whose tenant chooses a mode with an extended property:
+    # the property's key, the modes it takes and the one it gets when the
+    # request names none. None: no mode.
+    MODE_KEY = None
+    MODES = ()
+    DEFAULT_MODE = None
 
     @staticmethod
     def _validate_cluster_instances(context, instances, datastore,
@@ -77,9 +89,31 @@ class GaleraCommonCluster(cluster_models.Cluster):
 
     @classmethod
     def _member_config(cls, db_info, extended_properties):
-        """What a member is given with its creation."""
-        return {"id": db_info.id,
-                "instance_type": "member"}
+        """What a member is given with its creation: the members of a
+        grown cluster get the cluster's mode from the task manager instead.
+        """
+        config = {"id": db_info.id,
+                  "instance_type": "member"}
+        mode = (extended_properties or {}).get(cls.MODE_KEY)
+        if cls.MODE_KEY and mode:
+            config[cls.MODE_KEY] = mode
+        return config
+
+    @classmethod
+    def _validate_mode(cls, extended_properties):
+        """The extended properties with the mode, or none for a cluster
+        without one.
+        """
+        if not cls.MODE_KEY:
+            return extended_properties
+        properties = dict(extended_properties or {})
+        mode = properties.setdefault(cls.MODE_KEY, cls.DEFAULT_MODE)
+        if mode not in cls.MODES:
+            raise exception.BadRequest(
+                _("The extended property %(key)s must be one of "
+                  "%(modes)s.") % {'key': cls.MODE_KEY,
+                                   'modes': ', '.join(cls.MODES)})
+        return properties
 
     @classmethod
     def _create_instances(cls, context, db_info, datastore, datastore_version,
@@ -125,6 +159,7 @@ class GaleraCommonCluster(cluster_models.Cluster):
         if len(instances) < ds_conf.min_cluster_member_count:
             raise exception.ClusterNumInstancesNotLargeEnough(
                 num_instances=ds_conf.min_cluster_member_count)
+        extended_properties = cls._validate_mode(extended_properties)
         cls._validate_cluster_instances(context, instances, datastore,
                                         datastore_version)
         # Updating Cluster Task
@@ -210,6 +245,65 @@ class GaleraCommonCluster(cluster_models.Cluster):
 
     def configuration_detach(self):
         self.rolling_configuration_remove()
+
+
+class MemberRolesMixin(object):
+    """Each member's role in the cluster, asked of the member when the view
+    shows the members in full, and the cluster's endpoint; a list shows
+    neither. List it before the view class it extends.
+
+    ``ROLES`` maps the (state, role) a member answers with to the role the
+    view shows; a state not in it shows as itself, in lower case.
+    """
+
+    ROLES = {}
+
+    def _endpoint(self):
+        conf = CONF.get(self.cluster.datastore_version.manager)
+        if not getattr(conf, 'cluster_load_balancer', False):
+            return None
+        try:
+            return loadbalancer.find_endpoint(
+                loadbalancer.OctaviaClient(),
+                loadbalancer.cluster_load_balancer_name(self.cluster.id),
+                conf.cluster_load_balancer_port)
+        except Exception as err:
+            LOG.info("No endpoint for cluster %s: %s", self.cluster.id, err)
+            return None
+
+    def data(self):
+        result = super(MemberRolesMixin, self).data()
+        if self.load_servers:
+            endpoint = self._endpoint()
+            if endpoint:
+                result['cluster']['endpoint'] = endpoint
+        return result
+
+    def _member_role(self, instance):
+        if instance.status not in ANSWERING_STATUSES:
+            return 'unknown'
+        try:
+            answer = self.cluster.get_guest(instance).get_member_role()
+        except Exception as err:
+            LOG.info("Member %s did not tell its role: %s", instance.id, err)
+            return 'unknown'
+        state, role = answer.get('state'), answer.get('role')
+        if (state, role) in self.ROLES:
+            return self.ROLES[(state, role)]
+        return state.lower() if state else 'unknown'
+
+    def _build_instances(self, ip_to_be_published_for=[],
+                         instance_dict_to_be_published_for=[]):
+        instances, ip_list = super(MemberRolesMixin, self)._build_instances(
+            ip_to_be_published_for, instance_dict_to_be_published_for)
+        if self.load_servers:
+            by_id = {instance.id: instance
+                     for instance in self.cluster.instances}
+            for instance_dict in instances:
+                instance = by_id.get(instance_dict['id'])
+                if instance is not None:
+                    instance_dict['role'] = self._member_role(instance)
+        return instances, ip_list
 
 
 class GaleraCommonClusterView(ClusterView):

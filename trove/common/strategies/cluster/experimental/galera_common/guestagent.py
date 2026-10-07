@@ -87,3 +87,21 @@ class GaleraCommonGuestAgentAPI(guest_api.API):
                    self.agent_high_timeout,
                    version=version,
                    cluster_configuration=cluster_configuration)
+
+    def leave_cluster(self):
+        """Leave the cluster, before the member is deleted."""
+        LOG.debug("Leaving the cluster.")
+        self._call("leave_cluster", self.agent_high_timeout,
+                   version=guest_api.API.API_BASE_VERSION)
+
+    def is_writable_member(self):
+        """Whether the member takes writes."""
+        return self._call("is_writable_member", self.agent_high_timeout,
+                          version=guest_api.API.API_BASE_VERSION)
+
+    def get_member_role(self):
+        """The member's state and role in the cluster. For a view: a
+        member that does not answer soon counts as unknown.
+        """
+        return self._call("get_member_role", self.agent_low_timeout,
+                          version=guest_api.API.API_BASE_VERSION)

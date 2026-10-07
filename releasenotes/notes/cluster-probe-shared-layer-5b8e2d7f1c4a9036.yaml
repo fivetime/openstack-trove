@@ -1,0 +1,31 @@
+---
+other:
+  - |
+    What the Group Replication clusters had for their members' ready port,
+    their load balancer and their recovery is now shared by every cluster
+    built on the Galera strategies: the cluster probe
+    (``trove.guestagent.common.cluster_probe``) and the ready port
+    (``trove.guestagent.common.readyport``) in the guest agent, and the
+    load balancer hooks, the member roles view and the cluster's mode in
+    ``trove.common.strategies.cluster.experimental.galera_common``. A
+    datastore gives the probe its view of the member through a few app
+    methods. Nothing changes for a cluster.
+deprecations:
+  - |
+    The ``[mysql]`` and ``[percona]`` options of the Group Replication
+    probe and recovery are renamed, as they are now shared:
+    ``group_replication_probe_interval``, ``group_replication_probe_timeout``,
+    ``group_replication_ready_port``,
+    ``group_replication_ready_port_reconcile``,
+    ``group_replication_recovery_grace``,
+    ``group_replication_recovery_interval``,
+    ``group_replication_peer_timeout``,
+    ``group_replication_auto_bootstrap``,
+    ``group_replication_bootstrap_needs_all_members`` and
+    ``group_replication_bootstrap_jitter`` become ``cluster_probe_interval``,
+    ``cluster_probe_timeout``, ``cluster_ready_port``,
+    ``cluster_ready_port_reconcile``, ``cluster_recovery_grace``,
+    ``cluster_recovery_interval``, ``cluster_peer_timeout``,
+    ``cluster_auto_bootstrap``, ``cluster_bootstrap_needs_all_members`` and
+    ``cluster_bootstrap_jitter``. The old names still work, with a
+    deprecation warning.

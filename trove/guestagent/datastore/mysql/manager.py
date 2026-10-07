@@ -150,4 +150,4 @@ class Manager(gr_manager.GroupReplicationManagerMixin, BaseManager):
 
         # Not super().__init__(): BaseManager builds the plain app there.
         manager.MySqlManager.__init__(self, app, status, adm)
-        self.init_group_probe()
+        self.init_cluster_probe()

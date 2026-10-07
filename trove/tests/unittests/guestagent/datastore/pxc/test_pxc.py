@@ -27,6 +27,7 @@ from trove.extensions.common import models as extension_models
 from trove.guestagent import api as guest_api
 from trove.guestagent.datastore.galera_common import manager as galera_manager
 from trove.guestagent.datastore.galera_common import service as galera_service
+from trove.guestagent.datastore.group_replication import manager as gr_manager
 from trove.guestagent.datastore.mysql import manager as mysql_manager
 from trove.guestagent.datastore.mysql import service as mysql_service
 from trove.guestagent.datastore.mysql_common import service as common_service
@@ -76,7 +77,9 @@ class TestPXCDatastoreWiring(trove_testtools.TestCase):
         # MySQL manager are not there.
         self.assertFalse(issubclass(pxc_manager.Manager,
                                     mysql_manager.Manager))
-        self.assertFalse(hasattr(pxc_manager.Manager, 'leave_cluster'))
+        self.assertFalse(issubclass(
+            pxc_manager.Manager, gr_manager.GroupReplicationManagerMixin))
+        self.assertFalse(hasattr(pxc_manager.Manager, 'keep_group_mode'))
 
     def test_cluster_calls_run_before_the_mysql_ones(self):
         # The mixins only work when they come first.
@@ -115,10 +118,10 @@ class TestPXCDatastoreWiring(trove_testtools.TestCase):
             command.split())
 
     def test_has_every_mysql_option(self):
-        # Those of Group Replication clusters aside: PXC's are Galera's.
+        # Those of Group Replication clusters, with their probe and load
+        # balancer, aside: PXC's are Galera's.
         for name in CONF.mysql:
-            if name == 'cluster_tcp_ports' or name.startswith(
-                    ('group_replication_', 'cluster_load_balancer')):
+            if name.startswith('cluster_') and name != 'cluster_support':
                 continue
             self.assertIn(name, CONF.pxc,
                           '[pxc] lacks the MySQL option %s' % name)
