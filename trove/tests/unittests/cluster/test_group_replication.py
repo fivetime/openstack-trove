@@ -52,6 +52,16 @@ class GroupReplicationConfigTest(trove_testtools.TestCase):
                 'trove.extensions.mysql.service.'
                 'GroupReplicationRootController', conf.root_controller)
 
+    def test_load_balancer_options(self):
+        for manager in ('mysql', 'percona'):
+            conf = CONF.get(manager)
+            self.assertTrue(conf.cluster_load_balancer)
+            self.assertEqual(3306, conf.cluster_load_balancer_port)
+            self.assertEqual(3307, conf.group_replication_ready_port)
+            self.assertIn('3307', [str(p) for r in conf.cluster_tcp_ports
+                                   for p in r])
+        self.assertEqual('ovn', CONF.load_balancer_provider)
+
     def test_pxc_keeps_galera(self):
         self.assertIsInstance(strategy.load_api_strategy('pxc'),
                               galera_api.GaleraCommonAPIStrategy)
@@ -142,6 +152,7 @@ class GroupReplicationTasksTest(trove_testtools.TestCase):
         self.tasks = gr_taskmanager.GroupReplicationClusterTasks.__new__(
             gr_taskmanager.GroupReplicationClusterTasks)
         self.tasks._datastore_version = mock.Mock()
+        self.tasks.ds_version = mock.Mock(manager='mysql')
         self.calls = []
         self.guests = {}
 
@@ -166,6 +177,13 @@ class GroupReplicationTasksTest(trove_testtools.TestCase):
         self.tasks._check_cluster_for_root = mock.Mock()
         self.tasks.reset_task = mock.Mock()
         self.tasks.update_statuses_on_failure = mock.Mock()
+        # The load balancer, as the hooks see it.
+        self.tasks._load_balancer_enabled = mock.Mock(return_value=True)
+        self.tasks._sync_load_balancer = mock.Mock(
+            side_effect=lambda ctx, cid, instances: self.calls.append(
+                ('sync', tuple(i.id for i in instances))))
+        self.tasks._delete_load_balancer = mock.Mock(
+            side_effect=lambda cid: self.calls.append(('delete_lb', cid)))
         self.render = mock.patch.object(
             gr_taskmanager.GroupReplicationClusterTasks,
             '_render_cluster_config',
@@ -251,6 +269,128 @@ class GroupReplicationTasksTest(trove_testtools.TestCase):
         self.assertEqual(['i1', 'i3'], updates)
         self.tasks.update_statuses_on_failure.assert_not_called()
 
+    @mock.patch.object(gr_taskmanager, 'Instance')
+    @mock.patch.object(gr_taskmanager, 'DBInstance')
+    def test_create_ends_with_the_load_balancer(self, db_instance, instance):
+        db_instance.find_all.return_value.all.return_value = (
+            self._instances('i1', 'i2', 'i3'))
+        instance.load.side_effect = lambda ctx, i: mock.Mock(id=i)
+
+        self.tasks.create_cluster('ctx', 'c1')
+
+        self.assertEqual(('sync', ('i1', 'i2', 'i3')), self.calls[-1])
+        self.assertEqual(3, len([c for c in self.calls[:-1]
+                                 if c[0] == 'cluster_complete']))
+        self.tasks.update_statuses_on_failure.assert_not_called()
+
+    @mock.patch.object(gr_taskmanager, 'Instance')
+    @mock.patch.object(gr_taskmanager, 'DBInstance')
+    def test_create_fails_without_its_load_balancer(self, db_instance,
+                                                    instance):
+        db_instance.find_all.return_value.all.return_value = (
+            self._instances('i1', 'i2', 'i3'))
+        instance.load.side_effect = lambda ctx, i: mock.Mock(id=i)
+        self.tasks._sync_load_balancer.side_effect = Exception('no octavia')
+
+        self.tasks.create_cluster('ctx', 'c1')
+
+        self.tasks.update_statuses_on_failure.assert_called_once_with('c1')
+
+    @mock.patch.object(gr_taskmanager, 'Instance')
+    @mock.patch.object(gr_taskmanager, 'DBInstance')
+    def test_grow_adds_the_member_to_the_load_balancer(self, db_instance,
+                                                       instance):
+        db_instance.find_all.return_value.all.return_value = (
+            self._instances('i1', 'i2', 'i3', 'i4'))
+        instance.load.side_effect = lambda ctx, i: mock.Mock(id=i)
+
+        self.tasks.grow_cluster('ctx', 'c1', ['i4'])
+
+        self.assertEqual(('sync', ('i1', 'i2', 'i3', 'i4')), self.calls[-1])
+        # A failure there does not fail the grow: the next change tries
+        # again.
+        self.tasks._sync_load_balancer.side_effect = Exception('no octavia')
+        self.tasks.grow_cluster('ctx', 'c1', ['i4'])
+        self.tasks.update_statuses_on_failure.assert_not_called()
+        self.assertEqual(2, self.tasks.reset_task.call_count)
+
+    @mock.patch.object(gr_taskmanager, 'Instance')
+    @mock.patch.object(gr_taskmanager, 'DBInstance')
+    def test_a_failed_grow_leaves_the_cluster_as_it_was(
+            self, db_instance, instance):
+        # The new member never got ready (no host, say).
+        db_instance.find_all.return_value.all.return_value = (
+            self._instances('i1', 'i2', 'i3', 'i4'))
+        instance.load.side_effect = lambda ctx, i: mock.Mock(id=i)
+        self.tasks._all_instances_ready.return_value = False
+        failed = mock.Mock()
+        db_instance.find_by.return_value = failed
+
+        self.tasks.grow_cluster('ctx', 'c1', ['i4'])
+
+        db_instance.find_by.assert_called_once_with(id='i4')
+        failed.set_task_status.assert_called_once_with(
+            gr_taskmanager.inst_tasks.InstanceTasks.GROWING_ERROR)
+        # Not every member, and the cluster's task is cleared.
+        self.tasks.update_statuses_on_failure.assert_not_called()
+        self.tasks.reset_task.assert_called_once()
+        self.assertEqual([], [c for c in self.calls if c[0] == 'sync'])
+
+    @mock.patch.object(gr_taskmanager.utils, 'poll_until')
+    @mock.patch.object(gr_taskmanager, 'Instance')
+    @mock.patch.object(gr_taskmanager, 'DBInstance')
+    def test_shrink_takes_the_member_out_of_the_load_balancer(
+            self, db_instance, instance, poll_until):
+        db_instance.find_all.return_value.all.return_value = (
+            self._instances('i1', 'i3'))
+        instance.load.side_effect = lambda ctx, i: mock.Mock(id=i)
+
+        self.tasks.shrink_cluster('ctx', 'c1', ['i2'])
+
+        self.assertEqual(('sync', ('i1', 'i3')), self.calls[-1])
+
+    @mock.patch.object(gr_taskmanager.galera_taskmanager.
+                       GaleraCommonClusterTasks, 'delete_cluster')
+    def test_delete_takes_the_load_balancer_with_it(self, base_delete):
+        base_delete.side_effect = lambda ctx, cid: self.calls.append(
+            ('delete_cluster', cid))
+        self.tasks.delete_cluster('ctx', 'c1')
+        self.assertEqual([('delete_lb', 'c1'), ('delete_cluster', 'c1')],
+                         self.calls)
+        # Even when the load balancer will not go.
+        self.tasks._delete_load_balancer.side_effect = Exception('stuck')
+        self.tasks.delete_cluster('ctx', 'c1')
+        self.assertEqual(('delete_cluster', 'c1'), self.calls[-1])
+
+    @mock.patch.object(gr_taskmanager.clients, 'create_neutron_client')
+    def test_load_balancer_members(self, neutron):
+        neutron.return_value.list_ports.side_effect = lambda name: {
+            'ports': [{'fixed_ips': [
+                {'ip_address': 'fd00::1', 'subnet_id': 'sub-6'},
+                {'ip_address': '10.0.0.%s' % name[-1],
+                 'subnet_id': 'sub-4'}]}]}
+        members = self.tasks._load_balancer_members(
+            'ctx', self._instances('i1', 'i2'))
+        self.assertEqual(
+            [{'name': 'i1', 'address': '10.0.0.1', 'protocol_port': 3307,
+              'subnet_id': 'sub-4'},
+             {'name': 'i2', 'address': '10.0.0.2', 'protocol_port': 3307,
+              'subnet_id': 'sub-4'}], members)
+        neutron.return_value.list_ports.assert_any_call(name='trove-i1')
+
+    @mock.patch.object(gr_taskmanager.loadbalancer, 'OctaviaClient')
+    @mock.patch.object(gr_taskmanager.loadbalancer, 'ensure_load_balancer')
+    def test_sync_load_balancer(self, ensure, client):
+        self.tasks._load_balancer_members = mock.Mock(return_value=[
+            {'name': 'i1', 'address': '10.0.0.1', 'protocol_port': 3307,
+             'subnet_id': 'sub-4'}])
+        gr_taskmanager.GroupReplicationClusterTasks._sync_load_balancer(
+            self.tasks, 'ctx', 'c1', self._instances('i1'))
+        ensure.assert_called_once_with(
+            client.return_value, 'trove-cluster-c1', 'sub-4',
+            self.tasks._load_balancer_members.return_value, 3306,
+            description='Endpoint of Trove cluster c1')
+
 
 class GroupReplicationViewTest(trove_testtools.TestCase):
 
@@ -294,6 +434,31 @@ class GroupReplicationViewTest(trove_testtools.TestCase):
                                          'role': 'PRIMARY'}})
         instances, _ips = view.build_instances()
         self.assertNotIn('role', instances[0])
+
+    @mock.patch.object(cluster_views.ClusterView, 'data',
+                       side_effect=lambda: {'cluster': {'id': 'c1'}})
+    @mock.patch.object(gr_api.loadbalancer, 'OctaviaClient')
+    @mock.patch.object(gr_api.loadbalancer, 'find_endpoint')
+    def test_endpoint(self, find_endpoint, client, data):
+        cluster = mock.Mock(id='c1')
+        cluster.datastore_version.manager = 'mysql'
+        find_endpoint.return_value = {'address': '10.0.0.50', 'port': 3306}
+
+        view = gr_api.GroupReplicationClusterView(cluster, load_servers=True)
+        self.assertEqual({'address': '10.0.0.50', 'port': 3306},
+                         view.data()['cluster']['endpoint'])
+        find_endpoint.assert_called_once_with(
+            client.return_value, 'trove-cluster-c1', 3306)
+
+        # A list asks Octavia nothing; an unreachable Octavia costs the
+        # detail its endpoint only.
+        view = gr_api.GroupReplicationClusterView(cluster,
+                                                  load_servers=False)
+        self.assertNotIn('endpoint', view.data()['cluster'])
+        find_endpoint.assert_called_once()
+        find_endpoint.side_effect = Exception('octavia down')
+        view = gr_api.GroupReplicationClusterView(cluster, load_servers=True)
+        self.assertNotIn('endpoint', view.data()['cluster'])
 
     def test_strategy_views(self):
         s = gr_api.GroupReplicationAPIStrategy()

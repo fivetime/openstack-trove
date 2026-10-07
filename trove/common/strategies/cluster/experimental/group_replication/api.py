@@ -21,12 +21,15 @@ it fails, or ``multi-primary``, where every member does.
 
 from oslo_log import log as logging
 
+from trove.common import cfg
 from trove.common import exception
 from trove.common.i18n import _
+from trove.common import loadbalancer
 from trove.common.strategies.cluster.experimental.galera_common import (
     api as galera_api)
 
 LOG = logging.getLogger(__name__)
+CONF = cfg.CONF
 
 MODE_KEY = 'group_replication_mode'
 SINGLE_PRIMARY = 'single-primary'
@@ -85,8 +88,30 @@ class GroupReplicationCluster(galera_api.GaleraCommonCluster):
 
 class MemberRolesMixin(object):
     """Each member's role in the group, asked of the member when the view
-    shows the members in full; a list shows none.
+    shows the members in full, and the cluster's endpoint; a list shows
+    neither.
     """
+
+    def _endpoint(self):
+        conf = CONF.get(self.cluster.datastore_version.manager)
+        if not conf.cluster_load_balancer:
+            return None
+        try:
+            return loadbalancer.find_endpoint(
+                loadbalancer.OctaviaClient(),
+                loadbalancer.cluster_load_balancer_name(self.cluster.id),
+                conf.cluster_load_balancer_port)
+        except Exception as err:
+            LOG.info("No endpoint for cluster %s: %s", self.cluster.id, err)
+            return None
+
+    def data(self):
+        result = super(MemberRolesMixin, self).data()
+        if self.load_servers:
+            endpoint = self._endpoint()
+            if endpoint:
+                result['cluster']['endpoint'] = endpoint
+        return result
 
     def _member_role(self, instance):
         if instance.status not in ANSWERING_STATUSES:

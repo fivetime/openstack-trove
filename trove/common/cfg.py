@@ -275,6 +275,19 @@ common_opts = [
                help='Default Nova server group policy for new database '
                     'instances. If None, no server group is created unless '
                     'locality is specified in the request.'),
+    cfg.URIOpt('octavia_url',
+               help='URL of the load balancer API, instead of the one in '
+                    'the service catalog.'),
+    cfg.StrOpt('octavia_service_type', default='load-balancer',
+               help='Service type of the load balancer API in the catalog.'),
+    cfg.StrOpt('octavia_endpoint_type', default='publicURL',
+               help='Service endpoint type to use when searching catalog.'),
+    cfg.StrOpt('load_balancer_provider', default='ovn',
+               help='Octavia provider of the load balancers Trove puts in '
+                    'front of clusters.'),
+    cfg.IntOpt('load_balancer_timeout', default=600,
+               help='Seconds to wait for a load balancer to be ACTIVE, or '
+                    'gone, after a change.'),
     cfg.StrOpt('cluster_default_locality', default='anti-affinity',
                choices=constants.VALID_LOCALITIES + ('',),
                help='Default Nova server group policy for the members of a '
@@ -762,6 +775,12 @@ def _with_group_replication(opts):
         cfg.IntOpt('group_replication_ready_port_reconcile', default=20,
                    help='Checks of the role between two unconditional '
                         'checks that the ready port is as it should be.'),
+        cfg.BoolOpt('cluster_load_balancer', default=True,
+                    help='Put a load balancer in front of the members of a '
+                         'cluster, on their subnet: the cluster\'s endpoint, '
+                         'sending to the members that take writes.'),
+        cfg.PortOpt('cluster_load_balancer_port', default=3306,
+                    help='Port the load balancer of a cluster listens on.'),
         cfg.StrOpt('api_strategy',
                    default='trove.common.strategies.cluster.experimental.'
                    'group_replication.api.GroupReplicationAPIStrategy',

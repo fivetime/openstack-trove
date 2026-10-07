@@ -14,10 +14,12 @@ from eventlet.timeout import Timeout
 from oslo_log import log as logging
 
 from trove.common import cfg
+from trove.common import clients
 from trove.common.clients import create_nova_client
 from trove.common.exception import PollTimeOut
 from trove.common.exception import TroveError
 from trove.common.i18n import _
+from trove.common import loadbalancer
 from trove.common.strategies.cluster.experimental.galera_common import (
     taskmanager as galera_taskmanager)
 from trove.common.strategies.cluster.experimental.group_replication import (
@@ -81,6 +83,76 @@ class GroupReplicationClusterTasks(
             single_primary=(mode == gr_api.SINGLE_PRIMARY),
         )
 
+    # The load balancer: the cluster's endpoint, in front of the members
+    # that take writes.
+
+    def _load_balancer_enabled(self):
+        return CONF.get(self.datastore_version.manager).cluster_load_balancer
+
+    def _member_subnet_id(self, context, instance, address):
+        """The subnet of the member's port on the user's network, where the
+        load balancer reaches it and lives.
+        """
+        ports = clients.create_neutron_client(context).list_ports(
+            name='trove-%s' % instance.id).get('ports', [])
+        for port in ports:
+            for fixed_ip in port.get('fixed_ips', []):
+                if fixed_ip.get('ip_address') == address:
+                    return fixed_ip['subnet_id']
+        if ports and ports[0].get('fixed_ips'):
+            return ports[0]['fixed_ips'][0]['subnet_id']
+        raise TroveError(_("Member %(id)s has no port on the user's "
+                           "network.") % {'id': instance.id})
+
+    def _load_balancer_members(self, context, instances):
+        conf = CONF.get(self.datastore_version.manager)
+        members = []
+        for instance in instances:
+            address = self.get_ip(instance)
+            members.append({
+                'name': instance.id, 'address': address,
+                'protocol_port': conf.group_replication_ready_port,
+                'subnet_id': self._member_subnet_id(context, instance,
+                                                    address)})
+        return members
+
+    def _sync_load_balancer(self, context, cluster_id, instances):
+        """The load balancer of the cluster, with these members."""
+        conf = CONF.get(self.datastore_version.manager)
+        members = self._load_balancer_members(context, instances)
+        loadbalancer.ensure_load_balancer(
+            loadbalancer.OctaviaClient(),
+            loadbalancer.cluster_load_balancer_name(cluster_id),
+            members[0]['subnet_id'], members, conf.cluster_load_balancer_port,
+            description='Endpoint of Trove cluster %s' % cluster_id)
+
+    def _delete_load_balancer(self, cluster_id):
+        loadbalancer.delete_load_balancer(
+            loadbalancer.OctaviaClient(),
+            loadbalancer.cluster_load_balancer_name(cluster_id))
+
+    def _sync_load_balancer_or_log(self, context, cluster_id, instances):
+        """For a grow or a shrink: the cluster works without, and the next
+        change tries again.
+        """
+        if not self._load_balancer_enabled():
+            return
+        try:
+            self._sync_load_balancer(context, cluster_id, instances)
+        except Exception:
+            LOG.exception("The load balancer of cluster %s could not be "
+                          "brought up to date.", cluster_id)
+
+    def delete_cluster(self, context, cluster_id):
+        if self._load_balancer_enabled():
+            try:
+                self._delete_load_balancer(cluster_id)
+            except Exception:
+                LOG.exception("The load balancer of cluster %s could not "
+                              "be deleted.", cluster_id)
+        super(GroupReplicationClusterTasks, self).delete_cluster(
+            context, cluster_id)
+
     def create_cluster(self, context, cluster_id):
         LOG.debug("Begin create_cluster for id: %s.", cluster_id)
 
@@ -132,6 +204,11 @@ class GroupReplicationClusterTasks(
                 LOG.debug("Finalizing cluster configuration.")
                 for guest in guests:
                     guest.cluster_complete()
+
+                # A cluster without its endpoint is of no use: a failure
+                # here fails the cluster like any other step.
+                if self._load_balancer_enabled():
+                    self._sync_load_balancer(context, cluster_id, instances)
             except Exception:
                 LOG.exception("Error creating cluster.")
                 self.update_statuses_on_failure(cluster_id)
@@ -215,24 +292,43 @@ class GroupReplicationClusterTasks(
             for instance in new_instances:
                 self.get_guest(instance).cluster_complete()
 
+            self._sync_load_balancer_or_log(
+                context, cluster_id, existing_instances + new_instances)
+
         timeout = Timeout(CONF.cluster_usage_timeout)
         try:
             _grow_cluster()
-            self.reset_task()
         except Timeout as t:
             if t is not timeout:
                 raise  # not my timeout
             LOG.exception("Timeout for growing cluster.")
-            self.update_statuses_on_failure(
-                cluster_id, status=inst_tasks.InstanceTasks.GROWING_ERROR)
+            self._fail_new_members(new_instance_ids)
         except Exception:
             LOG.exception("Error growing cluster %s.", cluster_id)
-            self.update_statuses_on_failure(
-                cluster_id, status=inst_tasks.InstanceTasks.GROWING_ERROR)
+            self._fail_new_members(new_instance_ids)
         finally:
             timeout.cancel()
+            # The cluster goes on, with or without the new members.
+            self.reset_task()
 
         LOG.debug("End grow_cluster for id: %s.", cluster_id)
+
+    def _fail_new_members(self, new_instance_ids):
+        """A grow that failed: the members that were to join are failed,
+        the cluster is left as it was. Galera's handling marks every
+        member failed and leaves the cluster growing for good; a member
+        that found no host (strict anti-affinity) is the usual cause, and
+        the cluster is whole without it.
+        """
+        for instance_id in new_instance_ids:
+            try:
+                db_instance = DBInstance.find_by(id=instance_id)
+                db_instance.set_task_status(
+                    inst_tasks.InstanceTasks.GROWING_ERROR)
+                db_instance.save()
+            except Exception:
+                LOG.exception("Could not mark member %s as failed.",
+                              instance_id)
 
     def shrink_cluster(self, context, cluster_id, removal_instance_ids):
         LOG.debug("Begin Group Replication shrink_cluster for id: %s.",
@@ -278,6 +374,8 @@ class GroupReplicationClusterTasks(
                 leftover_instances[0]).get_cluster_context()
             self._update_members(context, leftover_instances, cluster_ips,
                                  cluster_context)
+            self._sync_load_balancer_or_log(context, cluster_id,
+                                            leftover_instances)
 
         timeout = Timeout(CONF.cluster_usage_timeout)
         try:
