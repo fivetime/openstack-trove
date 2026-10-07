@@ -109,3 +109,46 @@ class TestServerGroup(trove_testtools.TestCase):
 
     def test_get_locality_none(self):
         self.assertIsNone(srv_grp.ServerGroup.get_locality(None))
+
+    def _nova_with_groups(self, mock_client, *groups):
+        mock_client.return_value.server_groups.list = Mock(
+            return_value=list(groups))
+
+    def _group(self, name, members):
+        group = Mock()
+        group.name = name
+        group.members = members
+        return group
+
+    @patch.object(srv_grp, 'create_nova_client')
+    def test_load_for_cluster_by_a_member(self, mock_client):
+        # The members' servers tell the group of a cluster, whatever its
+        # name, and apart from a group of another cluster with that name.
+        other = self._group('locality_c1', ['id-9'])
+        ours = self._group('locality_old-name', ['id-1', 'id-2'])
+        self._nova_with_groups(mock_client, other, ours)
+        self.assertEqual(ours, srv_grp.ServerGroup.load_for_cluster(
+            self.context, 'c1', ['id-2', 'id-3']))
+
+    @patch.object(srv_grp, 'create_nova_client')
+    def test_load_for_cluster_by_name_before_any_server(self, mock_client):
+        # No member has a server yet: the one empty group of the name.
+        used = self._group('locality_c1', ['id-9'])
+        empty = self._group('locality_c1', [])
+        self._nova_with_groups(mock_client, used, empty)
+        self.assertEqual(empty, srv_grp.ServerGroup.load_for_cluster(
+            self.context, 'c1', []))
+
+    @patch.object(srv_grp, 'create_nova_client')
+    def test_load_for_cluster_ambiguous_names(self, mock_client):
+        self._nova_with_groups(mock_client, self._group('locality_c1', []),
+                               self._group('locality_c1', []))
+        self.assertIsNone(srv_grp.ServerGroup.load_for_cluster(
+            self.context, 'c1', ['id-1']))
+
+    @patch.object(srv_grp, 'create_nova_client')
+    def test_load_for_cluster_without_nova(self, mock_client):
+        mock_client.return_value.server_groups.list = Mock(
+            side_effect=Exception('nova down'))
+        self.assertIsNone(srv_grp.ServerGroup.load_for_cluster(
+            self.context, 'c1', ['id-1']))

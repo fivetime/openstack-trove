@@ -1,0 +1,14 @@
+---
+fixes:
+  - |
+    The server group of a cluster is found again. It is created with the
+    cluster's name, but was looked up with each member's id, so it was never
+    found: the cluster's ``locality`` showed nothing, members added by a
+    grow were scheduled without the group's policy, and the group was left
+    behind when the cluster was deleted. The group is now found through the
+    members' servers, or by its name while no member has a server yet.
+features:
+  - |
+    A new option ``cluster_default_locality`` (default ``anti-affinity``)
+    gives the members of a cluster created without a ``locality`` a Nova
+    server group policy. Set it empty to create no group unless asked.

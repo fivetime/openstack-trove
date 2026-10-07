@@ -222,6 +222,8 @@ class ClusterController(wsgi.Controller):
                               "modules": modules})
 
         locality = body['cluster'].get('locality')
+        if locality is None:
+            locality = CONF.cluster_default_locality or None
         utils.validate_locality(locality)
 
         configuration = body['cluster'].get('configuration')

@@ -332,6 +332,23 @@ class ClusterTest(trove_testtools.TestCase):
     @patch.object(DBCluster, 'update')
     @patch.object(galera_api, 'CONF')
     @patch.object(inst_models.Instance, 'create')
+    @patch.object(task_api, 'load')
+    @patch.object(QUOTAS, 'check_quotas')
+    @patch.object(clients, 'create_nova_client')
+    @patch.object(clients, 'create_neutron_client')
+    def test_grow_keeps_the_members_in_the_server_group(
+            self, mock_neutron_client, mock_nova_client, mock_check_quotas,
+            mock_task_api, mock_inst_create, mock_conf, mock_update):
+        mock_nova_client.return_value.flavors = Mock()
+        mock_neutron_client.return_value.find_resource = Mock()
+        self.cluster._server_group = Mock(id='sg-1')
+        self.cluster.grow(self.instances)
+        for call in mock_inst_create.call_args_list:
+            self.assertEqual({'group': 'sg-1'}, call.kwargs['locality'])
+
+    @patch.object(DBCluster, 'update')
+    @patch.object(galera_api, 'CONF')
+    @patch.object(inst_models.Instance, 'create')
     @patch.object(QUOTAS, 'check_quotas')
     @patch.object(clients, 'create_nova_client')
     @patch.object(clients, 'create_neutron_client')

@@ -25,18 +25,22 @@ from trove.tests.unittests import trove_testtools
 
 class TestClusterModel(trove_testtools.TestCase):
 
+    @patch.object(models.srv_grp.ServerGroup, 'load_for_cluster')
     @patch.object(datastore_models.Datastore, 'load')
     @patch.object(datastore_models.DatastoreVersion, 'load_by_uuid')
     @patch.object(models.DBCluster, 'find_by')
-    @patch.object(instance_models.Instances, 'load_all_by_cluster_id')
-    def test_load(self, mock_inst_load, mock_find_by,
-                  mock_load_dsv_by_uuid, mock_ds_load):
+    @patch.object(instance_models.DBInstance, 'find_all')
+    def test_load(self, mock_find_all, mock_find_by,
+                  mock_load_dsv_by_uuid, mock_ds_load, mock_load_group):
         context = trove_testtools.TroveTestContext(self)
         id = Mock()
-        inst_mock = Mock()
+        mock_find_by.return_value.name = 'c1'
+        # The group is the cluster's, found through its members' servers.
+        mock_find_all.return_value.all.return_value = [
+            Mock(compute_instance_id='server-1'),
+            Mock(compute_instance_id=None)]
         server_group = Mock()
-        inst_mock.server_group = server_group
-        mock_inst_load.return_value = [inst_mock]
+        mock_load_group.return_value = server_group
 
         dsv = Mock()
         dsv.manager = 'mongodb'
@@ -45,6 +49,10 @@ class TestClusterModel(trove_testtools.TestCase):
         self.assertIsInstance(cluster, MongoDbCluster)
         self.assertEqual(server_group, cluster.server_group,
                          "Unexpected server group")
+        mock_load_group.assert_called_once_with(context, 'c1', ['server-1'])
+        # Cached, nova is not asked again.
+        cluster.server_group
+        mock_load_group.assert_called_once()
 
 
 class TestClusterGrowAction(trove_testtools.TestCase):

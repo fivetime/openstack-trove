@@ -275,6 +275,15 @@ common_opts = [
                help='Default Nova server group policy for new database '
                     'instances. If None, no server group is created unless '
                     'locality is specified in the request.'),
+    cfg.StrOpt('cluster_default_locality', default='anti-affinity',
+               choices=constants.VALID_LOCALITIES + ('',),
+               help='Default Nova server group policy for the members of a '
+                    'new cluster, when the request gives no locality. The '
+                    'strict policies need one host per member, and one more '
+                    'for each member a cluster grows by; on a small cloud '
+                    'soft-anti-affinity places members as far apart as the '
+                    'hosts allow. Empty: no server group unless the request '
+                    'asks for one.'),
     cfg.StrOpt('datastore_manager', default=None,
                help='Manager class in the Guest Agent, set up by the '
                     'Taskmanager on instance provision.'),

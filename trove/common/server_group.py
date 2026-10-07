@@ -43,6 +43,42 @@ class ServerGroup(object):
         return server_group
 
     @classmethod
+    def load_for_cluster(cls, context, cluster_name, server_ids):
+        """The server group of a cluster: the one any of its servers is a
+        member of, or, while none of them has been scheduled yet, the empty
+        one named after the cluster, as build_scheduler_hint names it.
+
+        The group is created before the cluster has an id, so it carries the
+        cluster's name, which is not unique; the servers tell the groups of
+        two clusters of one name apart. A name match is trusted only when it
+        is the one empty group of that name.
+        """
+        expected_name = "locality_%s" % cluster_name
+        server_ids = set(server_ids or ())
+        named = []
+        try:
+            for sg in create_nova_client(context).server_groups.list():
+                if server_ids.intersection(sg.members or ()):
+                    return sg
+                if sg.name == expected_name and not sg.members:
+                    named.append(sg)
+        except Exception:
+            LOG.exception("Could not load the server group of cluster %s",
+                          cluster_name)
+            return None
+
+        if len(named) == 1:
+            return named[0]
+        if named:
+            LOG.warning("%(count)s empty server groups are named %(name)s; "
+                        "none of them can be told to be cluster %(cluster)s'.",
+                        {'count': len(named), 'name': expected_name,
+                         'cluster': cluster_name})
+        else:
+            LOG.info("No server group found for cluster %s", cluster_name)
+        return None
+
+    @classmethod
     def create(cls, context, locality, name_suffix):
         client = create_nova_client(context)
         server_group_name = "%s_%s" % ('locality', name_suffix)

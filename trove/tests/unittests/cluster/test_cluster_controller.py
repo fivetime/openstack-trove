@@ -264,6 +264,54 @@ class TestClusterController(trove_testtools.TestCase):
                     context, 'products', datastore, datastore_version,
                     instances, {}, locality, None, None)
 
+    @patch.object(Cluster, 'create')
+    @patch.object(utils, 'get_id_from_href')
+    @patch.object(datastore_models, 'get_datastore_version')
+    def test_create_cluster_default_locality(self,
+                                             mock_get_datastore_version,
+                                             mock_id_from_href,
+                                             mock_cluster_create):
+        body = self.cluster
+        body['cluster'].pop('locality', None)
+        tenant_id = Mock()
+        context = trove_testtools.TroveTestContext(self)
+        req = Mock()
+        req.environ = Mock()
+        req.environ.__getitem__ = Mock(return_value=context)
+        datastore_version = Mock()
+        datastore_version.manager = 'mongodb'
+        mock_get_datastore_version.return_value = (Mock(),
+                                                   datastore_version)
+        mock_id_from_href.return_value = '1234'
+        mock_cluster = Mock()
+        mock_cluster.instances = []
+        mock_cluster.instances_without_server = []
+        mock_cluster.datastore_version.manager = 'mongodb'
+        mock_cluster_create.return_value = mock_cluster
+
+        def locality_passed():
+            return mock_cluster_create.call_args[0][6]
+
+        # The platform's default stands in for a request without locality.
+        self.controller.create(req, body, tenant_id)
+        self.assertEqual('anti-affinity', locality_passed())
+
+        cfg.CONF.set_override('cluster_default_locality',
+                              'soft-anti-affinity')
+        self.addCleanup(cfg.CONF.clear_override, 'cluster_default_locality')
+        self.controller.create(req, body, tenant_id)
+        self.assertEqual('soft-anti-affinity', locality_passed())
+
+        # An empty default means no server group.
+        cfg.CONF.set_override('cluster_default_locality', '')
+        self.controller.create(req, body, tenant_id)
+        self.assertIsNone(locality_passed())
+
+        # The request's own value wins over the default.
+        body['cluster']['locality'] = 'affinity'
+        self.controller.create(req, body, tenant_id)
+        self.assertEqual('affinity', locality_passed())
+
     @patch.object(Cluster, 'load')
     def test_show_cluster(self,
                           mock_cluster_load):
