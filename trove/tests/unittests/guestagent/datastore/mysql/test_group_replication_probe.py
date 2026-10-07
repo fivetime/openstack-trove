@@ -85,10 +85,11 @@ class TestReadyPort(trove_testtools.TestCase):
         self.assertIsNone(self.port.applied)
 
 
-class TestRoleProbe(trove_testtools.TestCase):
+class ProbeTestBase(trove_testtools.TestCase):
+    """A probe on a mocked app, container and configuration."""
 
     def setUp(self):
-        super(TestRoleProbe, self).setUp()
+        super(ProbeTestBase, self).setUp()
         self.app = mock.MagicMock()
         self.app.is_cluster_member.return_value = True
         self.app.configuration_manager.has_system_override.return_value = (
@@ -97,7 +98,14 @@ class TestRoleProbe(trove_testtools.TestCase):
         self.conf = mock.Mock(group_replication_probe_interval=3,
                               group_replication_probe_timeout=5,
                               group_replication_ready_port_reconcile=20,
-                              group_replication_ready_port=3307)
+                              group_replication_ready_port=3307,
+                              group_replication_recovery_grace=60,
+                              group_replication_recovery_interval=30,
+                              group_replication_peer_timeout=3,
+                              group_replication_auto_bootstrap=True,
+                              group_replication_bootstrap_needs_all_members=(
+                                  False),
+                              group_replication_bootstrap_jitter=0)
         # No eventlet timeout around the query in tests.
         timeout = mock.patch.object(probe.eventlet, 'Timeout').start()
         timeout.return_value.__enter__.return_value = None
@@ -108,6 +116,9 @@ class TestRoleProbe(trove_testtools.TestCase):
         self.probe.port.pid = 4242
         self.probe.port.applied = None
         self.probe.port.container_pid.return_value = 4242
+
+
+class TestRoleProbe(ProbeTestBase):
 
     def test_flags_are_read_once(self):
         self.probe._tick()
@@ -191,3 +202,155 @@ class TestRoleProbe(trove_testtools.TestCase):
         self.conf.group_replication_probe_interval = 0
         probe.RoleProbe(self.app, mock.MagicMock(), conf=self.conf).start()
         looping_call.assert_not_called()
+
+
+def _peer(ip, state='OFFLINE', gtid='u:1-10', reachable=True,
+          sees_group=False):
+    return probe.gr_service.PeerView(ip, reachable, state, sees_group, gtid)
+
+
+def _subset(a, b):
+    # GTID sets as "u:1-N": a within b when a's N is not above b's.
+    def last(s):
+        return int(s.rsplit('-', 1)[-1]) if s else 0
+    return last(a) <= last(b)
+
+
+class TestDecide(trove_testtools.TestCase):
+
+    def decide(self, self_ip, self_gtid, peers, n=3, needs_all=False):
+        return probe.decide(self_ip, self_gtid, peers, n, _subset,
+                            needs_all)
+
+    def test_a_group_that_is_up_is_joined(self):
+        for peer in (_peer('10.0.0.2', 'ONLINE'),
+                     _peer('10.0.0.2', 'RECOVERING'),
+                     _peer('10.0.0.2', 'OFFLINE', sees_group=True)):
+            action, _ = self.decide('10.0.0.1', 'u:1-10',
+                                    [peer, _peer('10.0.0.3')])
+            self.assertEqual(probe.REJOIN, action)
+
+    def test_no_majority_waits(self):
+        action, reason = self.decide(
+            '10.0.0.1', 'u:1-10',
+            [_peer('10.0.0.2', reachable=False),
+             _peer('10.0.0.3', reachable=False)])
+        self.assertEqual(probe.WAIT, action)
+        self.assertIn('1 of 3', reason)
+
+    def test_the_lowest_address_with_everything_forms_the_group(self):
+        action, _ = self.decide(
+            '10.0.0.1', 'u:1-10',
+            [_peer('10.0.0.2'), _peer('10.0.0.3', reachable=False)])
+        self.assertEqual(probe.BOOTSTRAP, action)
+
+    def test_missing_transactions_wait(self):
+        action, reason = self.decide(
+            '10.0.0.1', 'u:1-10',
+            [_peer('10.0.0.2', gtid='u:1-12'), _peer('10.0.0.3')])
+        self.assertEqual(probe.WAIT, action)
+        self.assertIn('10.0.0.2', reason)
+
+    def test_a_lower_address_with_everything_goes_first(self):
+        action, reason = self.decide(
+            '10.0.0.3', 'u:1-10', [_peer('10.0.0.1'), _peer('10.0.0.2')])
+        self.assertEqual(probe.WAIT, action)
+        self.assertIn('deferring to 10.0.0.1', reason)
+        # Unless the lower one lacks transactions: then this member goes,
+        # whatever its address.
+        action, _ = self.decide(
+            '10.0.0.3', 'u:1-12', [_peer('10.0.0.1'), _peer('10.0.0.2')])
+        self.assertEqual(probe.BOOTSTRAP, action)
+
+    def test_addresses_compare_as_numbers(self):
+        action, _ = self.decide(
+            '10.0.0.9', 'u:1-10', [_peer('10.0.0.10'), _peer('10.0.0.11')])
+        self.assertEqual(probe.BOOTSTRAP, action)
+
+    def test_every_member_when_asked(self):
+        peers = [_peer('10.0.0.2'), _peer('10.0.0.3', reachable=False)]
+        self.assertEqual(probe.BOOTSTRAP,
+                         self.decide('10.0.0.1', 'u:1-10', peers)[0])
+        self.assertEqual(probe.WAIT, self.decide(
+            '10.0.0.1', 'u:1-10', peers, needs_all=True)[0])
+
+
+class TestRecovery(ProbeTestBase):
+
+    def setUp(self):
+        super(TestRecovery, self).setUp()
+        self.probe.enable_complete()
+        self.app._recovery_credentials.return_value = ('r', 'p')
+        self.app._self_ip.return_value = '10.0.0.1'
+        self.app._seed_ips.return_value = ['10.0.0.1', '10.0.0.2',
+                                           '10.0.0.3']
+        self.app._gtid_executed.return_value = 'u:1-10'
+        self.app._gtid_subset.side_effect = _subset
+        self.peers = {'10.0.0.2': _peer('10.0.0.2'),
+                      '10.0.0.3': _peer('10.0.0.3')}
+        self.app._query_peer.side_effect = (
+            lambda ip, user, pw, timeout: self.peers[ip])
+        mock.patch.object(probe.time, 'sleep').start()
+        self.app._member_state.return_value = ('OFFLINE', None)
+
+    def _tick_at(self, seconds):
+        with mock.patch.object(probe.time, 'monotonic',
+                               return_value=seconds):
+            self.probe._tick()
+
+    def test_recovery_waits_for_the_grace_period(self):
+        # The first tick sees the member out of the group; the grace
+        # period counts from then.
+        self._tick_at(0)
+        self._tick_at(59)
+        self.app._query_peer.assert_not_called()
+        self._tick_at(61)
+        # Two peers, asked twice: once to decide, once more before forming
+        # the group.
+        self.assertEqual(4, self.app._query_peer.call_count)
+        self.app._query_peer.assert_any_call('10.0.0.2', 'r', 'p', 3)
+        # And between two tries.
+        self._tick_at(80)
+        self.assertEqual(4, self.app._query_peer.call_count)
+        self._tick_at(92)
+        self.assertEqual(8, self.app._query_peer.call_count)
+
+    def test_rejoins_a_group_that_is_up(self):
+        self.peers['10.0.0.2'] = _peer('10.0.0.2', 'ONLINE')
+        self._tick_at(0)
+        self._tick_at(100)
+        self.app.rejoin_group.assert_called_once_with('OFFLINE')
+        self.app.bootstrap_group.assert_not_called()
+
+    def test_forms_the_group_again(self):
+        self._tick_at(0)
+        self._tick_at(100)
+        self.app.bootstrap_group.assert_called_once()
+        self.app.rejoin_group.assert_not_called()
+
+    def test_does_not_form_the_group_when_the_peers_changed(self):
+        answers = [self.peers['10.0.0.2'], self.peers['10.0.0.3'],
+                   _peer('10.0.0.2', 'ONLINE'), self.peers['10.0.0.3']]
+        self.app._query_peer.side_effect = lambda *a: answers.pop(0)
+        self._tick_at(0)
+        self._tick_at(100)
+        self.app.bootstrap_group.assert_not_called()
+
+    def test_auto_bootstrap_off(self):
+        self.probe.auto_bootstrap = False
+        self._tick_at(0)
+        self._tick_at(100)
+        self.app.bootstrap_group.assert_not_called()
+        self.app.rejoin_group.assert_not_called()
+
+    def test_not_before_the_cluster_is_complete(self):
+        self.probe.complete = False
+        self._tick_at(0)
+        self._tick_at(100)
+        self.app._query_peer.assert_not_called()
+
+    def test_not_while_leaving(self):
+        self.probe.disable()
+        self._tick_at(0)
+        self._tick_at(100)
+        self.app._query_peer.assert_not_called()

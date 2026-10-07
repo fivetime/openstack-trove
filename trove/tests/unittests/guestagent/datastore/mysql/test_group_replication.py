@@ -220,6 +220,70 @@ class TestGroupReplicationApp(trove_testtools.TestCase):
                     return_value=configuration):
                 self.assertEqual(mode, self.app._group_mode())
 
+    def _configuration(self, **values):
+        return mock.patch.object(
+            mysql_service.GroupReplicationMySqlApp, 'cluster_configuration',
+            new_callable=mock.PropertyMock, return_value=values)
+
+    def test_self_and_seed_addresses(self):
+        with self._configuration(
+                report_host='10.0.0.2',
+                group_replication_group_seeds=(
+                    '"10.0.0.1:33061, 10.0.0.2:33061,[fd00::3]:33061"')):
+            self.assertEqual('10.0.0.2', self.app._self_ip())
+            self.assertEqual(['10.0.0.1', '10.0.0.2', 'fd00::3'],
+                             self.app._seed_ips())
+        with self._configuration(
+                group_replication_local_address='"10.0.0.2:33061"'):
+            self.assertEqual('10.0.0.2', self.app._self_ip())
+
+    @mock.patch.object(gr_service.pymysql, 'connect')
+    def test_query_peer(self, connect):
+        cursor = connect.return_value.cursor.return_value.__enter__.\
+            return_value
+        cursor.fetchall.return_value = [('u-2', 'OFFLINE'),
+                                        ('u-3', 'ONLINE')]
+        cursor.fetchone.side_effect = [('u-2',), ('g:1-5',)]
+        peer = self.app._query_peer('10.0.0.2', 'r', 'p', 3)
+        self.assertEqual(gr_service.PeerView(
+            '10.0.0.2', True, 'OFFLINE', True, 'g:1-5'), peer)
+        connect.assert_called_once()
+        self.assertEqual(3, connect.call_args.kwargs['connect_timeout'])
+        connect.return_value.close.assert_called_once()
+        # Nobody in the group: its own state is OFFLINE.
+        cursor.fetchall.return_value = []
+        cursor.fetchone.side_effect = [('u-2',), ('',)]
+        self.assertEqual(('OFFLINE', False),
+                         self.app._query_peer('10.0.0.2', 'r', 'p', 3)[2:4])
+        # Not answering.
+        connect.side_effect = Exception('refused')
+        self.assertFalse(self.app._query_peer('10.0.0.2', 'r', 'p', 3)
+                         .reachable)
+
+    def test_gtid_subset(self):
+        self.client.execute.side_effect = lambda stmt, **k: iter([(1,)])
+        self.assertTrue(self.app._gtid_subset('a:1', 'a:1-2'))
+        stmt, kwargs = self.client.execute.call_args[0][0], \
+            self.client.execute.call_args[1]
+        self.assertIn('GTID_SUBSET', str(stmt))
+        self.assertEqual({'subset': 'a:1', 'superset': 'a:1-2'}, kwargs)
+
+    def test_rejoin_and_bootstrap(self):
+        self.app.rejoin_group('ERROR')
+        self.assertEqual(['STOP GROUP_REPLICATION', 'START GROUP_REPLICATION'],
+                         [s for s in self.sql if 'GROUP_REPLICATION' in s])
+        self.sql.clear()
+        self.app.rejoin_group('OFFLINE')
+        self.assertEqual(['START GROUP_REPLICATION'],
+                         [s for s in self.sql if 'GROUP_REPLICATION' in s])
+        self.sql.clear()
+        self.app.bootstrap_group()
+        self.assertEqual(
+            ['SET GLOBAL group_replication_bootstrap_group = ON',
+             'START GROUP_REPLICATION',
+             'SET GLOBAL group_replication_bootstrap_group = OFF'],
+            self.sql)
+
     def test_writable_member(self):
         for state, writable in ((('ONLINE', 'PRIMARY'), True),
                                 (('ONLINE', 'SECONDARY'), False),

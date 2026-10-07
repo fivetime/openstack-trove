@@ -12,3 +12,6 @@ group_replication_ip_allowlist = "{{ cluster_ips }}"
 group_replication_single_primary_mode = {{ 'ON' if single_primary else 'OFF' }}
 group_replication_enforce_update_everywhere_checks = {{ 'OFF' if single_primary else 'ON' }}
 group_replication_recovery_get_public_key = ON
+group_replication_autorejoin_tries = 3
+group_replication_unreachable_majority_timeout = 30
+group_replication_exit_state_action = READ_ONLY

@@ -775,6 +775,29 @@ def _with_group_replication(opts):
         cfg.IntOpt('group_replication_ready_port_reconcile', default=20,
                    help='Checks of the role between two unconditional '
                         'checks that the ready port is as it should be.'),
+        cfg.IntOpt('group_replication_recovery_grace', default=60,
+                   help='Seconds a member of a complete cluster stays out '
+                        'of the group before the guest agent tries to '
+                        'bring it back.'),
+        cfg.IntOpt('group_replication_recovery_interval', default=30,
+                   help='Seconds between two tries to bring a member back '
+                        'into the group.'),
+        cfg.IntOpt('group_replication_peer_timeout', default=3,
+                   help='Seconds to wait for a peer when asking where it '
+                        'stands.'),
+        cfg.BoolOpt('group_replication_auto_bootstrap', default=True,
+                    help='Form the group again by itself after every '
+                         'member went down, from the member that holds '
+                         'every transaction a majority holds. Off: a '
+                         'member only rejoins a group that is up.'),
+        cfg.BoolOpt('group_replication_bootstrap_needs_all_members',
+                    default=False,
+                    help='Form the group again only when every member '
+                         'answers, instead of a majority.'),
+        cfg.IntOpt('group_replication_bootstrap_jitter', default=5,
+                   help='Up to this many seconds of waiting before forming '
+                        'the group again, against two members doing it at '
+                        'once.'),
         cfg.BoolOpt('cluster_load_balancer', default=True,
                     help='Put a load balancer in front of the members of a '
                          'cluster, on their subnet: the cluster\'s endpoint, '

@@ -27,9 +27,12 @@ container: it stops, the container's restart policy starts it again, and
 the guest agent starts Group Replication on it once more.
 """
 
+import collections
+import ssl
 import time
 
 from oslo_log import log as logging
+import pymysql
 from sqlalchemy.sql.expression import text
 
 from trove.common import cfg
@@ -57,6 +60,16 @@ SINGLE_PRIMARY = 'single-primary'
 MULTI_PRIMARY = 'multi-primary'
 MODES = (SINGLE_PRIMARY, MULTI_PRIMARY)
 RECOVERY_CHANNEL = 'group_replication_recovery'
+# The port the members reach each other's server on.
+DATABASE_PORT = 3306
+# What a peer tells of itself: whether it answered, the state it has in
+# the group (OFFLINE when it is in none), whether it sees a group that is
+# up (ONLINE or RECOVERING members, itself or others), and its executed
+# transactions.
+PeerView = collections.namedtuple(
+    'PeerView', 'ip reachable own_state sees_group gtid_executed')
+MEMBERS_QUERY = ("SELECT MEMBER_ID, MEMBER_STATE FROM "
+                 "performance_schema.replication_group_members")
 MEMBER_STATE = ("SELECT MEMBER_STATE, MEMBER_ROLE FROM "
                 "performance_schema.replication_group_members "
                 "WHERE MEMBER_ID = @@server_uuid")
@@ -259,6 +272,95 @@ class GroupReplicationAppMixin(galera_service.GaleraAppMixin):
                 if value:
                     client.execute(text("SET GLOBAL %s = :value" % option),
                                    value=value)
+
+    # Recovery: what the role probe needs to bring a member back into the
+    # group, or to form the group again after every member went down.
+
+    def _self_ip(self):
+        configuration = self.cluster_configuration
+        host = str(configuration.get('report_host') or '').strip('"')
+        if host:
+            return host
+        local = str(configuration.get(
+            'group_replication_local_address') or '').strip('"')
+        return local.rsplit(':', 1)[0].strip('[]')
+
+    def _seed_ips(self):
+        """The members the configuration names, this one included."""
+        seeds = str(self.cluster_configuration.get(
+            'group_replication_group_seeds') or '').strip('"')
+        return [seed.strip().rsplit(':', 1)[0].strip('[]')
+                for seed in seeds.split(',') if seed.strip()]
+
+    def _recovery_credentials(self):
+        credentials = operating_system.read_file(
+            self.cluster_healthcheck_file, codec=self.CFG_CODEC,
+            as_root=True)['client']
+        return credentials['user'], credentials['password']
+
+    def _query_peer(self, ip, user, password, timeout):
+        """Ask a peer, over its database port with the recovery account,
+        where it stands. A peer that does not answer is unreachable.
+        """
+        try:
+            # The server has TLS on by default and may require it; the
+            # recovery account's password is what proves the peer.
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            connection = pymysql.connect(
+                host=ip, port=DATABASE_PORT, user=user, password=password,
+                connect_timeout=timeout, read_timeout=timeout,
+                write_timeout=timeout, ssl=context)
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(MEMBERS_QUERY)
+                    members = cursor.fetchall()
+                    cursor.execute("SELECT @@server_uuid")
+                    uuid = cursor.fetchone()[0]
+                    cursor.execute("SELECT @@global.gtid_executed")
+                    gtid = cursor.fetchone()[0] or ''
+            finally:
+                connection.close()
+        except Exception as err:
+            LOG.debug("Peer %s did not answer: %s", ip, err)
+            return PeerView(ip, False, None, False, None)
+        own_state = 'OFFLINE'
+        sees_group = False
+        for member_id, state in members:
+            if member_id == uuid:
+                own_state = state
+            if state in ('ONLINE', 'RECOVERING'):
+                sees_group = True
+        return PeerView(ip, True, own_state, sees_group, gtid)
+
+    def _gtid_executed(self):
+        rows = list(self.execute_sql("SELECT @@global.gtid_executed"))
+        return (rows[0][0] or '') if rows else ''
+
+    def _gtid_subset(self, subset, superset):
+        """Whether every transaction of the first set is in the second,
+        as the server works it out.
+        """
+        with mysql_util.SqlClient(self.get_engine()) as client:
+            rows = list(client.execute(
+                text("SELECT GTID_SUBSET(:subset, :superset)"),
+                subset=subset or '', superset=superset or ''))
+        return bool(rows and rows[0][0])
+
+    def rejoin_group(self, state):
+        """Join the group that is up. A member in ERROR has to stop
+        first: the server refuses to start it again before.
+        """
+        LOG.info("Rejoining the group from %s.", state)
+        if state == 'ERROR':
+            self.execute_sql("STOP GROUP_REPLICATION")
+        self._start_group_replication()
+
+    def bootstrap_group(self):
+        """Form the group again, after every member went down."""
+        LOG.info("Forming the group again.")
+        self._start_group_replication(bootstrap=True)
 
     def leave_group(self):
         LOG.info("Leaving the group.")

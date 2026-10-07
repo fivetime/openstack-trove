@@ -24,6 +24,8 @@ tasks, which run every report interval: a failover has to show on the
 ready port within seconds.
 """
 
+import ipaddress
+import random
 import time
 
 import eventlet
@@ -41,6 +43,52 @@ CONF = cfg.CONF
 
 # The port the database listens on in the container.
 DATABASE_PORT = 3306
+# What the recovery decides.
+REJOIN, BOOTSTRAP, WAIT = 'rejoin', 'bootstrap', 'wait'
+DOWN = ('OFFLINE', 'ERROR')
+UP = ('ONLINE', 'RECOVERING')
+
+
+def _ip_key(ip):
+    try:
+        return (0, ipaddress.ip_address(ip))
+    except ValueError:
+        return (1, ip)
+
+
+def decide(self_ip, self_gtid, peers, n_members, subset, needs_all=False):
+    """What a member that is out of the group should do, given what its
+    peers told: join a group that is up, form the group again, or wait.
+
+    Forming the group again loses whatever only the members that are not
+    here hold, so it takes a majority that is here (every member, with
+    needs_all), all of it out of the group, and this member holding every
+    transaction any of them holds; when more than one member qualifies,
+    the one with the lowest address goes. Transactions the group committed
+    were certified by a majority, so a majority that is here holds them.
+
+    :param peers: PeerView of every other member
+    :param subset: subset(a, b) -> whether gtid set a is within b
+    """
+    reachable = [p for p in peers if p.reachable]
+    if any(p.sees_group or p.own_state in UP for p in reachable):
+        return REJOIN, 'a peer is in the group'
+    quorum = n_members if needs_all else n_members // 2 + 1
+    if 1 + len(reachable) < quorum:
+        return WAIT, '%s of %s members here, %s needed' % (
+            1 + len(reachable), n_members, quorum)
+    behind = [p.ip for p in reachable
+              if not subset(p.gtid_executed, self_gtid)]
+    if behind:
+        return WAIT, 'missing transactions that %s hold' % ', '.join(behind)
+    for peer in sorted(reachable, key=lambda p: _ip_key(p.ip)):
+        if _ip_key(peer.ip) >= _ip_key(self_ip):
+            break
+        if subset(self_gtid, peer.gtid_executed) and all(
+                subset(other.gtid_executed, peer.gtid_executed)
+                for other in reachable):
+            return WAIT, 'deferring to %s' % peer.ip
+    return BOOTSTRAP, 'majority here, out of the group, nothing missing'
 
 
 class ReadyPort(object):
@@ -134,6 +182,13 @@ class RoleProbe(object):
         self.interval = conf.group_replication_probe_interval
         self.query_timeout = conf.group_replication_probe_timeout
         self.reconcile_every = conf.group_replication_ready_port_reconcile
+        self.recovery_grace = conf.group_replication_recovery_grace
+        self.recovery_interval = conf.group_replication_recovery_interval
+        self.peer_timeout = conf.group_replication_peer_timeout
+        self.auto_bootstrap = conf.group_replication_auto_bootstrap
+        self.needs_all = conf.group_replication_bootstrap_needs_all_members
+        self.jitter = conf.group_replication_bootstrap_jitter
+        self.last_recovery = 0
         self.port = ReadyPort(docker_client, conf.group_replication_ready_port)
         self.state = None
         self.role = None
@@ -233,6 +288,49 @@ class RoleProbe(object):
             except Exception:
                 LOG.exception("Could not set the ready port.")
         self.ticks += 1
+
+        now = time.monotonic()
+        if (self.complete and not self.leaving and state in DOWN and
+                now - self.since >= self.recovery_grace and
+                now - self.last_recovery >= self.recovery_interval):
+            self.last_recovery = now
+            self.recover(state)
+
+    def _scan_peers(self):
+        user, password = self.app._recovery_credentials()
+        self_ip = self.app._self_ip()
+        seeds = self.app._seed_ips()
+        peers = [self.app._query_peer(ip, user, password, self.peer_timeout)
+                 for ip in seeds if ip != self_ip]
+        return self_ip, len(seeds), peers
+
+    def recover(self, state):
+        """Out of the group past the grace period: rejoin the group if it
+        is up, form it again if it is safe, else wait and say why.
+        """
+        self_ip, n_members, peers = self._scan_peers()
+        self_gtid = self.app._gtid_executed()
+        action, reason = decide(self_ip, self_gtid, peers, n_members,
+                                self.app._gtid_subset, self.needs_all)
+        if action == BOOTSTRAP and not self.auto_bootstrap:
+            action, reason = WAIT, 'auto bootstrap is off; an operator ' \
+                                   'forms the group again'
+        LOG.info("Recovery from %s: %s (%s). Peers: %s", state, action,
+                 reason, [(p.ip, p.reachable, p.own_state, p.sees_group)
+                          for p in peers])
+        if action == REJOIN:
+            self.app.rejoin_group(state)
+        elif action == BOOTSTRAP:
+            # Another member may be deciding the same: look again after a
+            # moment, and only go when nothing changed.
+            time.sleep(random.uniform(0, self.jitter))
+            _ip, _n, again = self._scan_peers()
+            if (sorted(p for p in again if p.reachable) ==
+                    sorted(p for p in peers if p.reachable)):
+                self.app.bootstrap_group()
+            else:
+                LOG.info("The peers changed meanwhile; not forming the "
+                         "group now.")
 
     def snapshot(self):
         return {'state': self.state, 'role': self.role,
