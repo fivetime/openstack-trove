@@ -980,6 +980,53 @@ class TestRecoveryView(trove_testtools.TestCase):
                 b'x\n' + line.replace(b'ab-cd', b'0' * 8 + b'-' + b'0' * 27))
             self.assertEqual(7, self.app._position()[1])
 
+    def test_a_logged_minus_one_is_no_position(self):
+        # What a server logs that does not know either, as MariaDB does
+        # after a crash: the recovery run is asked.
+        self.container.logs.return_value = PXC_LOG.replace(b':31', b':-1')
+        self.files['/var/lib/mysql/data/grastate.dat'] = GRASTATE.replace(
+            'seqno:   36', 'seqno:   -1')
+        self.app._recover_position = mock.Mock(return_value=None)
+        self.assertIsNone(self.app._position())
+        self.app._recover_position.assert_called_once_with()
+
+    def test_the_recovery_run_is_kept_until_the_member_is_in_a_group(self):
+        uuid = 'eb210882-c280-11f1-9bce-6fce320fdaa0'
+        self.container.logs.return_value = b'nothing\n'
+        self.files['/var/lib/mysql/data/grastate.dat'] = GRASTATE.replace(
+            'seqno:   36', 'seqno:   -1')
+        run = self.app.docker_client.containers.run
+        run.return_value = (b'x\n[Note] WSREP: Recovered position: ' +
+                            uuid.encode() + b':8\n')
+
+        self.assertEqual((uuid, 8), self.app._position())
+        self.assertEqual((uuid, 8), self.app._position())
+
+        # Run once, with the database stopped and the container started
+        # again after; the answer is kept while the member waits.
+        self.assertEqual(1, run.call_count)
+        self.assertIn('--wsrep-recover', run.call_args[0][1])
+        self.assertEqual('mysqld', run.call_args[1]['entrypoint'])
+        self.assertEqual([('stop_db',)], self.app.calls)
+        self.container.start.assert_called_once_with()
+        # In a primary component again: forgotten, so a later wait asks
+        # again.
+        self.app.execute_sql = mock.Mock(side_effect=lambda sql: list(
+            _status().items()))
+        self.assertTrue(self.app.recovery_view()['in_group'])
+        self.app.execute_sql = mock.Mock(side_effect=Exception('refused'))
+        self.app._position()
+        self.assertEqual(2, run.call_count)
+
+    def test_the_recovery_run_without_a_position(self):
+        self.container.logs.return_value = b'nothing\n'
+        self.files['/var/lib/mysql/data/grastate.dat'] = GRASTATE.replace(
+            'seqno:   36', 'seqno:   -1')
+        self.app.docker_client.containers.run.return_value = b'no luck\n'
+        self.assertIsNone(self.app._position())
+        self.assertIsNone(self.app._position())
+        self.assertEqual(1, self.app.docker_client.containers.run.call_count)
+
     def test_not_ahead(self):
         u, v = ('u1', 10), ('u1', 12)
         self.assertTrue(self.app._not_ahead(u, v))
@@ -990,18 +1037,25 @@ class TestRecoveryView(trove_testtools.TestCase):
         self.assertFalse(self.app._not_ahead(('u2', 1), v))
 
     def test_waiting_for_a_primary_view(self):
+        # The database port does not answer while the container runs.
         self.assertEqual(
             {'ip': '10.0.0.2', 'in_group': False, 'waiting': True,
              'position': ('eb210882-c280-11f1-9bce-6fce320fdaa0', 31),
              'bootstrapped': False},
             self.app.recovery_view())
-        # Until it got one.
+        # Whatever the log says: it holds every run of the container.
         self.container.logs.return_value = PXC_LOG + (
-            b'[Galera] New COMPONENT: primary = yes, bootstrap = no\n')
-        self.assertFalse(self.app.recovery_view()['waiting'])
-        # A container that is not running waits for nothing.
-        self.container.logs.return_value = PXC_LOG
+            b'[Galera] New COMPONENT: primary = yes, bootstrap = no\n'
+            b'[Galera] Received SELF-LEAVE.\n')
+        self.assertTrue(self.app.recovery_view()['waiting'])
+        # Started again and again: still waiting.
+        self.container.status = 'restarting'
+        self.assertTrue(self.app.recovery_view()['waiting'])
+        # A container that is not running, or none, waits for nothing.
         self.container.status = 'exited'
+        self.assertFalse(self.app.recovery_view()['waiting'])
+        self.app.docker_client.containers.get.side_effect = (
+            docker.errors.NotFound('gone'))
         self.assertFalse(self.app.recovery_view()['waiting'])
 
     def test_in_a_primary_component(self):
@@ -1144,10 +1198,12 @@ class TestRecoveryRun(trove_testtools.TestCase):
         self.assertEqual(('cd7ef434-c283-11f1-b9c7-ff3171d9ab0e', 8),
                          self.app._position())
         run.assert_called_once()
-        # Until the container was started anew.
+        # Even after the container was started anew: MariaDB gives up
+        # waiting and starts again and again, and the run itself starts
+        # the container again.
         self.container.attrs['State']['StartedAt'] = 't2'
         self.app._position()
-        self.assertEqual(2, run.call_count)
+        run.assert_called_once()
 
     def test_a_failed_run_still_starts_the_database_again(self):
         self.app.docker_client.containers.run.side_effect = Exception('no')

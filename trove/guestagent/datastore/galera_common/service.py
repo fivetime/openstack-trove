@@ -491,7 +491,8 @@ class GaleraAppMixin(object):
         found = None
         for line in output.splitlines():
             match = LOGGED_POSITION.search(line)
-            if match:
+            # -1: the server does not know either.
+            if match and int(match.group(2)) >= 0:
                 found = (match.group(1), int(match.group(2)))
         return found
 
@@ -504,12 +505,11 @@ class GaleraAppMixin(object):
         engine, with the database stopped: what MariaDB does on every
         start through galera_recovery, which a container has not. The
         container is started again after; the answer is kept until the
-        member is in a primary component again, as nothing changes on a
-        member that waits.
+        member is in a primary component again (recovery_view forgets
+        it then), as nothing changes on a member that waits.
         """
         state = self._grastate()
-        key = (state.get('uuid'), state.get('seqno'),
-               self._container_started_at())
+        key = (state.get('uuid'), state.get('seqno'))
         if self._recovered and self._recovered[0] == key:
             return self._recovered[1]
         command = self._container_command().split()
@@ -530,8 +530,14 @@ class GaleraAppMixin(object):
                 or b'')
             for line in output.splitlines():
                 match = LOGGED_POSITION.search(line)
-                if match:
+                if match and int(match.group(2)) >= 0:
                     position = (match.group(1), int(match.group(2)))
+            if position:
+                LOG.info("The recovery run found position %s:%s.",
+                         *position)
+            else:
+                LOG.warning("The recovery run found no position; it ended "
+                            "with: %s", ' | '.join(output.splitlines()[-5:]))
         except Exception as err:
             LOG.warning("The recovery run did not give a position: %s", err)
         finally:
@@ -554,13 +560,6 @@ class GaleraAppMixin(object):
                                                "mode": "rw"},
             "/var/lib/mysql": {"bind": "/var/lib/mysql", "mode": "rw"},
         }
-
-    def _container_started_at(self):
-        try:
-            return self.docker_client.containers.get(
-                CONTAINER_NAME).attrs['State'].get('StartedAt')
-        except Exception:
-            return None
 
     def _position(self):
         """Where the member stands: (state uuid, seqno), None when not
@@ -597,29 +596,19 @@ class GaleraAppMixin(object):
         return position[0] == other[0] and position[1] <= other[1]
 
     def _waiting_for_primary(self):
-        """Whether the server is up but waiting for a primary component,
-        as it logs while it does.
+        """Whether the server is up but waiting for a primary component:
+        its container runs (or is being started again: MariaDB gives up
+        waiting after a while, Percona XtraDB Cluster too when it cannot
+        restore the view it saved) while its database port, which asked
+        first, does not answer. What the server logs meanwhile is not
+        looked at: the log of a container started again and again holds
+        every run, and the last line of it says nothing dependable.
         """
         try:
             container = self.docker_client.containers.get(CONTAINER_NAME)
-            # MariaDB gives up waiting after a while and the container is
-            # started again: restarting, then.
-            if container.status not in ('running', 'restarting'):
-                return False
-            output = encodeutils.safe_decode(
-                container.logs(tail=LOG_TAIL) or b'')
         except Exception:
             return False
-        waiting = False
-        for line in output.splitlines():
-            if 'primary view' in line and 'not possible' in line:
-                waiting = True
-            elif 'Non-primary view' in line or 'Received NON-PRIMARY' in line:
-                waiting = True
-            elif ('Received SELF-LEAVE' in line or
-                  'New COMPONENT: primary = yes' in line):
-                waiting = False
-        return waiting
+        return container.status in ('running', 'restarting')
 
     def recovery_view(self):
         """Where the member stands, for the task manager: in a primary
@@ -634,6 +623,9 @@ class GaleraAppMixin(object):
             waiting = not in_group
             position = (status.get('wsrep_cluster_state_uuid'),
                         int(status.get('wsrep_last_committed') or 0))
+            if in_group:
+                # The next wait starts from a new position.
+                self._recovered = None
         else:
             in_group = False
             waiting = self._waiting_for_primary()

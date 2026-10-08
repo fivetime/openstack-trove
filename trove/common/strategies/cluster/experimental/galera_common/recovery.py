@@ -167,13 +167,20 @@ class GaleraClusterRecovery(object):
         for member, answer in views:
             if not answer or not answer.get('waiting'):
                 continue
-            action, reason = cluster_probe.decide(
-                answer.get('ip'), self._position(answer),
-                self._peers_of(views, member), len(members),
-                self._not_ahead,
-                self.conf.cluster_bootstrap_needs_all_members)
-            LOG.info("Cluster %s, member %s (%s): %s (%s).", cluster_id,
-                     member.id, answer.get('ip'), action, reason)
+            position = self._position(answer)
+            if position is None:
+                # Not knowing what it holds, it never forms the cluster.
+                action, reason = cluster_probe.WAIT, 'position unknown'
+            else:
+                action, reason = cluster_probe.decide(
+                    answer.get('ip'), position,
+                    self._peers_of(views, member), len(members),
+                    self._not_ahead,
+                    self.conf.cluster_bootstrap_needs_all_members)
+            LOG.info("Cluster %s, member %s (%s) at %s: %s (%s).",
+                     cluster_id, member.id, answer.get('ip'),
+                     '%s:%s' % position if position else 'unknown',
+                     action, reason)
             if action == cluster_probe.BOOTSTRAP:
                 chosen = member
                 break

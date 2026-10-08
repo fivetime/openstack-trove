@@ -138,6 +138,13 @@ class GaleraRecoveryTest(trove_testtools.TestCase):
         self._check_at(100)
         self.assertEqual(['i2'], self._bootstraps())
 
+    def test_nobody_knowing_a_position_nobody_forms_the_cluster(self):
+        for i in ('i1', 'i2', 'i3'):
+            self.answers[i] = _answer('10.0.0.%s' % i[1], seqno=None)
+        self._check_at(0)
+        self._check_at(100)
+        self.assertEqual([], self._bootstraps())
+
     def test_different_histories_wait(self):
         self.answers['i1'] = _answer('10.0.0.1', uuid='other')
         self._check_at(0)
