@@ -200,14 +200,16 @@ class GaleraCommonClusterTasks(task_models.ClusterTasks):
             # recommended to be 16 chars or less.
             # (this is not currently documented on Galera docs)
             cluster_name = utils.generate_uuid().replace("-", "")[:16]
-            # The writer mode the members kept from their creation.
-            writer_mode = self.get_guest(instances[0]).get_cluster_context(
-            ).get('writer_mode', SINGLE_WRITER)
-            LOG.info("Forming a %s writer cluster of %s.", writer_mode,
-                     cluster_ips)
 
             LOG.debug("Configuring cluster configuration.")
             try:
+                # The writer mode the members kept from their creation.
+                writer_mode = self.get_guest(
+                    instances[0]).get_cluster_context().get(
+                        'writer_mode', SINGLE_WRITER)
+                LOG.info("Forming a %s writer cluster of %s.", writer_mode,
+                         cluster_ips)
+
                 # Set the admin password for all the instances because the
                 # password in the my.cnf will be wrong after the joiner
                 # instances syncs with the donor instance.

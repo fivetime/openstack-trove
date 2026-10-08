@@ -85,14 +85,18 @@ class PXCApp(galera_service.GaleraAppMixin, mysql_service.MySqlApp):
     def get_cluster_context(self):
         # Percona XtraDB Cluster 8 has no wsrep_sst_auth: state transfers
         # use an account of their own. The replication user is kept where
-        # the health check reads it.
-        credentials = operating_system.read_file(
-            self.cluster_healthcheck_file, codec=self.CFG_CODEC,
-            as_root=True)['client']
+        # the health check reads it, from install_cluster on; before (the
+        # task manager asks for the writer mode first) there is none.
+        credentials = {}
+        if operating_system.exists(self.cluster_healthcheck_file,
+                                   as_root=True):
+            credentials = operating_system.read_file(
+                self.cluster_healthcheck_file, codec=self.CFG_CODEC,
+                as_root=True)['client']
         return {
             'replication_user': {
-                'name': credentials['user'],
-                'password': credentials['password'],
+                'name': credentials.get('user'),
+                'password': credentials.get('password'),
             },
             'cluster_name': self.cluster_configuration.get(
                 'wsrep_cluster_name'),

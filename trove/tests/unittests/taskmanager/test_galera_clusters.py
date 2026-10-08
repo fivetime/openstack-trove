@@ -181,6 +181,37 @@ class GaleraClusterTasksTest(trove_testtools.TestCase):
             mock_update_status.assert_called_with('1232')
             mock_reset_task.assert_called_with()
 
+    @patch.object(GaleraCommonClusterTasks, 'update_statuses_on_failure')
+    @patch.object(GaleraCommonClusterTasks, 'reset_task')
+    @patch.object(GaleraCommonClusterTasks, 'get_ip')
+    @patch.object(GaleraCommonClusterTasks, '_all_instances_ready')
+    @patch.object(Instance, 'load')
+    @patch.object(DBInstance, 'find_all')
+    @patch.object(datastore_models.Datastore, 'load')
+    @patch.object(datastore_models.DatastoreVersion, 'load_by_uuid')
+    @patch('trove.common.strategies.cluster.experimental.galera_common.'
+           'taskmanager.LOG')
+    def test_create_cluster_fails_when_the_writer_mode_cannot_be_read(
+            self, mock_logging, mock_dv, mock_ds, mock_find_all, mock_load,
+            mock_ready, mock_ip, mock_reset_task, mock_update_status):
+        # Asked of a member before the cluster is installed: a failure
+        # there fails the members and frees the cluster like any other.
+        mock_find_all.return_value.all.return_value = [self.dbinst1]
+        mock_load.return_value = BaseInstance(Mock(),
+                                              self.dbinst1, Mock(),
+                                              InstanceServiceStatus(
+                                                  ServiceStatuses.NEW))
+        mock_ip.return_value = "10.0.0.2"
+        guest_client = Mock()
+        guest_client.get_cluster_context = Mock(
+            side_effect=GuestError("Error"))
+        with patch.object(GaleraCommonClusterTasks, 'get_guest',
+                          return_value=guest_client):
+            self.clustertasks.create_cluster(Mock(), self.cluster_id)
+            guest_client.install_cluster.assert_not_called()
+            mock_update_status.assert_called_with('1232')
+            mock_reset_task.assert_called_with()
+
     @patch.object(GaleraCommonClusterTasks, 'reset_task')
     @patch.object(GaleraCommonClusterTasks, '_fail_new_members')
     @patch.object(GaleraCommonClusterTasks, 'update_statuses_on_failure')

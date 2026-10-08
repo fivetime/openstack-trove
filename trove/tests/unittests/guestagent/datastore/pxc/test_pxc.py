@@ -343,3 +343,35 @@ class TestPXCApp(trove_testtools.TestCase):
              'admin_password': 'admin-pw',
              'writer_mode': 'single'},
             context)
+
+    @mock.patch.object(pxc_service, 'operating_system')
+    def test_cluster_context_before_the_cluster_is_installed(self, mock_os):
+        # The task manager asks for the writer mode before install_cluster
+        # wrote the health check file.
+        app = self._app()
+        configuration_manager = mock.Mock()
+        configuration_manager.get_value.return_value = {}
+        mock_os.exists.return_value = False
+
+        with mock.patch.object(
+                pxc_service.PXCApp, 'configuration_manager',
+                new_callable=mock.PropertyMock,
+                return_value=configuration_manager), \
+            mock.patch.object(
+                pxc_service.PXCApp, 'cluster_healthcheck_file',
+                new_callable=mock.PropertyMock,
+                return_value='/var/lib/mysql/conf.d/x.cnf'), \
+            mock.patch.object(pxc_service.PXCApp, 'writer_mode',
+                              new_callable=mock.PropertyMock,
+                              return_value='multi'), \
+            mock.patch.object(pxc_service.PXCApp, 'get_auth_password',
+                              return_value='admin-pw'):
+            context = app.get_cluster_context()
+
+        mock_os.read_file.assert_not_called()
+        self.assertEqual(
+            {'replication_user': {'name': None, 'password': None},
+             'cluster_name': None,
+             'admin_password': 'admin-pw',
+             'writer_mode': 'multi'},
+            context)
