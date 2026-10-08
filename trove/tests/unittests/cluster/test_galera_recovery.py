@@ -32,10 +32,10 @@ CONF = cfg.CONF
 U = 'u1'
 
 
-def _answer(ip, waiting=True, in_group=False, seqno=10, uuid=U):
+def _answer(ip, waiting=True, in_group=False, seqno=10, uuid=U, safe=False):
     return {'ip': ip, 'waiting': waiting, 'in_group': in_group,
             'position': [uuid, seqno] if seqno is not None else None,
-            'bootstrapped': False}
+            'safe_to_bootstrap': safe, 'bootstrapped': False}
 
 
 class GaleraRecoveryTest(trove_testtools.TestCase):
@@ -159,6 +159,52 @@ class GaleraRecoveryTest(trove_testtools.TestCase):
 
     def test_different_histories_wait(self):
         self.answers['i1'] = _answer('10.0.0.1', uuid='other')
+        self._check_at(0)
+        self._check_at(100)
+        self.assertEqual([], self._bootstraps())
+
+    def test_every_member_when_galera_asks(self):
+        # Galera goes on committing after members leave: two of three
+        # may lack what the third holds.
+        self.recovery.conf.cluster_bootstrap_needs_all_members = True
+        del self.answers['i3']
+        with mock.patch.object(recovery.LOG, 'info') as info:
+            self._check_at(0)
+            self._check_at(100)
+        self.assertEqual([], self._bootstraps())
+        reasons = [c[0][-1] for c in info.call_args_list
+                   if c[0][0].startswith('Cluster %s, member')]
+        self.assertEqual(['2 of 3 members here, 3 needed'] * 2, reasons)
+        self.answers['i3'] = _answer('10.0.0.3')
+        self._check_at(200)
+        self.assertEqual(['i1'], self._bootstraps())
+
+    def test_the_last_to_leave_forms_the_cluster_alone(self):
+        self.recovery.conf.cluster_bootstrap_needs_all_members = True
+        del self.answers['i1']
+        del self.answers['i2']
+        self.answers['i3'] = _answer('10.0.0.3', safe=True)
+        with mock.patch.object(recovery.LOG, 'info') as info:
+            self._check_at(0)
+            self._check_at(100)
+        self.assertEqual(['i3'], self._bootstraps())
+        self.assertIn('the last to leave the cluster',
+                      [c[0][0] for c in info.call_args_list
+                       if 'bootstrap' in c[0][0]][0])
+
+    def test_the_last_to_leave_is_not_trusted_when_another_holds_more(self):
+        self.recovery.conf.cluster_bootstrap_needs_all_members = True
+        self.answers['i3'] = _answer('10.0.0.3', safe=True, seqno=10)
+        self.answers['i1'] = _answer('10.0.0.1', seqno=12)
+        self._check_at(0)
+        self._check_at(100)
+        # Everyone is here and i1 holds the most: i1 goes, not i3.
+        self.assertEqual(['i1'], self._bootstraps())
+
+    def test_the_last_to_leave_without_a_position_is_not_trusted(self):
+        self.recovery.conf.cluster_bootstrap_needs_all_members = True
+        del self.answers['i1']
+        self.answers['i3'] = _answer('10.0.0.3', safe=True, seqno=None)
         self._check_at(0)
         self._check_at(100)
         self.assertEqual([], self._bootstraps())

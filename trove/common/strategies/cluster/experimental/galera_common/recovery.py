@@ -161,11 +161,36 @@ class GaleraClusterRecovery(object):
 
     def _decide(self, context, db_cluster, members, views):
         cluster_id = db_cluster.id
-        # Every waiting member decides for itself from the same views, as
-        # the probe would, and every decision is logged; the first member
-        # the decision falls on goes.
+        # The last member to leave the cluster holds everything it
+        # committed, and Galera marked it so: it forms the cluster again
+        # without the others, unless one of them holds more, which would
+        # mean the mark is stale.
         chosen = None
         for member, answer in views:
+            if not (answer and answer.get('waiting') and
+                    answer.get('safe_to_bootstrap')):
+                continue
+            position = self._position(answer)
+            if position is None:
+                continue
+            ahead = [a.get('ip') for m, a in views
+                     if a and m is not member and
+                     not self._not_ahead(self._position(a), position)]
+            if ahead:
+                LOG.warning("Cluster %s, member %s (%s) at %s:%s was the "
+                            "last to leave, yet %s hold more; not trusted.",
+                            cluster_id, member.id, answer.get('ip'),
+                            position[0], position[1], ', '.join(ahead))
+                continue
+            LOG.info("Cluster %s, member %s (%s) at %s:%s: bootstrap (the "
+                     "last to leave the cluster).", cluster_id, member.id,
+                     answer.get('ip'), position[0], position[1])
+            chosen = member
+            break
+        # Otherwise every waiting member decides for itself from the same
+        # views, as the probe would, and every decision is logged; the
+        # first member the decision falls on goes.
+        for member, answer in views if chosen is None else []:
             if not answer or not answer.get('waiting'):
                 continue
             position = self._position(answer)

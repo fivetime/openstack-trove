@@ -1052,11 +1052,16 @@ class TestRecoveryView(trove_testtools.TestCase):
 
     def test_waiting_for_a_primary_view(self):
         # The database port does not answer while the container runs.
+        # grastate.dat marks it the last to leave the cluster.
         self.assertEqual(
             {'ip': '10.0.0.2', 'in_group': False, 'waiting': True,
              'position': ('eb210882-c280-11f1-9bce-6fce320fdaa0', 31),
-             'bootstrapped': False},
+             'safe_to_bootstrap': True, 'bootstrapped': False},
             self.app.recovery_view())
+        self.files['/var/lib/mysql/data/grastate.dat'] = GRASTATE.replace(
+            'safe_to_bootstrap: 1', 'safe_to_bootstrap: 0')
+        self.assertFalse(self.app.recovery_view()['safe_to_bootstrap'])
+        self.files['/var/lib/mysql/data/grastate.dat'] = GRASTATE
         # Whatever the log says: it holds every run of the container.
         self.container.logs.return_value = PXC_LOG + (
             b'[Galera] New COMPONENT: primary = yes, bootstrap = no\n'
@@ -1077,7 +1082,8 @@ class TestRecoveryView(trove_testtools.TestCase):
             _status(wsrep_last_committed='40').items()))
         self.assertEqual(
             {'ip': '10.0.0.2', 'in_group': True, 'waiting': False,
-             'position': ('u1', 40), 'bootstrapped': False},
+             'position': ('u1', 40), 'safe_to_bootstrap': False,
+             'bootstrapped': False},
             self.app.recovery_view())
         # Cut off: non-Primary, waiting.
         self.app.execute_sql = mock.Mock(side_effect=lambda sql: list(
@@ -1098,7 +1104,10 @@ class TestRecoveryView(trove_testtools.TestCase):
         # a member in the view but not synced yet, then everyone synced.
         self.files['/var/lib/mysql/data/grastate.dat'] = GRASTATE.replace(
             'safe_to_bootstrap: 1', 'safe_to_bootstrap: 0')
+        # The port is closed when the member looks before forming the
+        # cluster; then its own statuses as the cluster forms.
         own = iter([
+            None,
             _status(wsrep_cluster_size='1',
                     wsrep_incoming_addresses='10.0.0.2:3306'),
             _status(wsrep_cluster_size='2',
@@ -1107,14 +1116,25 @@ class TestRecoveryView(trove_testtools.TestCase):
             _status(wsrep_cluster_size='2',
                     wsrep_incoming_addresses='10.0.0.2:3306,10.0.0.3:3306'),
             _status(wsrep_cluster_size='3')])
-        self.app.execute_sql = mock.Mock(side_effect=lambda sql: list(
-            next(own).items()))
+        def own_status(sql):
+            status = next(own)
+            if status is None:
+                raise Exception('refused')
+            return list(status.items())
+        self.app.execute_sql = mock.Mock(side_effect=own_status)
         self.app._recovery_credentials = mock.Mock(return_value=('r', 'p'))
         peers = iter([_status(wsrep_local_state_comment='Joined'),
                       _status(), _status()])
         self.app._peer_status = mock.Mock(side_effect=lambda *a: next(peers))
         # Started with the flag, as the container will show after.
         self.container.attrs['Config']['Cmd'].append('--wsrep-new-cluster')
+        # The waiting server is killed, then grastate.dat is marked.
+        self.container.kill.side_effect = (
+            lambda: self.app.calls.append(('kill',)))
+        write_file = self.os.write_file.side_effect
+        self.os.write_file.side_effect = (
+            lambda path, data, **k: (self.app.calls.append(('grastate',)),
+                                     write_file(path, data, **k)))
 
         self.app.bootstrap_group()
 
@@ -1124,7 +1144,7 @@ class TestRecoveryView(trove_testtools.TestCase):
         command = ('--defaults-file=/etc/mysql/my.cnf '
                    '--datadir=/var/lib/mysql/data')
         self.assertEqual(
-            [('stop_db',),
+            [('kill',), ('grastate',),
              ('start_db', command + ' --wsrep-new-cluster', app_hc(self.app)),
              ('stop_db',),
              ('start_db', command, app_hc(self.app))],
@@ -1147,16 +1167,44 @@ class TestRecoveryView(trove_testtools.TestCase):
     @mock.patch.object(galera_service.docker_util, 'remove_container')
     def test_bootstrap_group_alone(self, _remove):
         # Nobody joined in time: the flag goes all the same.
-        self.app.execute_sql = mock.Mock(side_effect=lambda sql: list(
-            _status(wsrep_cluster_size='1',
-                    wsrep_incoming_addresses='10.0.0.2:3306').items()))
+        alone = iter([None])
+
+        def own_status(sql):
+            if next(alone, 1) is None:
+                raise Exception('refused')
+            return list(_status(
+                wsrep_cluster_size='1',
+                wsrep_incoming_addresses='10.0.0.2:3306').items())
+        self.app.execute_sql = mock.Mock(side_effect=own_status)
         self.container.attrs['Config']['Cmd'].append('--wsrep-new-cluster')
         with mock.patch.object(galera_service.time, 'time',
                                side_effect=[0, 1, 10 ** 9, 10 ** 9]):
             self.app.bootstrap_group()
-        self.assertEqual(['stop_db', 'start_db', 'stop_db', 'start_db'],
+        self.container.kill.assert_called_once_with()
+        self.assertEqual(['start_db', 'stop_db', 'start_db'],
                          [c[0] for c in self.app.calls])
         self.assertNotIn('--wsrep-new-cluster', self.app.calls[-1][1])
+
+    def test_not_forming_when_a_primary_component_appeared_meanwhile(self):
+        # On this member: the database port answers from a primary
+        # component.
+        self.app.execute_sql = mock.Mock(side_effect=lambda sql: list(
+            _status().items()))
+        self.app.bootstrap_group()
+        self.container.kill.assert_not_called()
+        self.assertEqual([], self.app.calls)
+        # On another member of the cluster: it is joined, not rivalled.
+        self.app.execute_sql = mock.Mock(side_effect=Exception('refused'))
+        self.sections['mysqld']['wsrep_cluster_address'] = (
+            'gcomm://10.0.0.1,10.0.0.2,10.0.0.3')
+        self.app._recovery_credentials = mock.Mock(return_value=('r', 'p'))
+        self.app._peer_status = mock.Mock(side_effect=[
+            _status(wsrep_cluster_status='non-Primary'), _status()])
+        self.app.bootstrap_group()
+        self.container.kill.assert_not_called()
+        self.assertEqual([], self.app.calls)
+        self.assertEqual(['10.0.0.1', '10.0.0.3'],
+                         [c[0][0] for c in self.app._peer_status.call_args_list])
 
 
 def app_hc(app):

@@ -139,10 +139,17 @@ class TestPXCDatastoreWiring(trove_testtools.TestCase):
             self.assertEqual(3307, conf.cluster_ready_port)
             self.assertEqual(3, conf.cluster_probe_interval)
             self.assertEqual(60, conf.cluster_recovery_grace)
+            # Galera goes on committing after members leave: every member
+            # is needed to form the cluster again, not a majority.
+            self.assertTrue(conf.cluster_bootstrap_needs_all_members)
             # The ready port is opened in the security group of a member;
             # the Galera ports are in tcp_ports already.
             self.assertEqual([3307], [port for ports in conf.cluster_tcp_ports
                                       for port in ports])
+
+    def test_group_replication_forms_the_group_from_a_majority(self):
+        self.assertFalse(CONF.mysql.cluster_bootstrap_needs_all_members)
+        self.assertFalse(CONF.percona.cluster_bootstrap_needs_all_members)
 
     def test_cluster_options(self):
         self.assertTrue(CONF.pxc.cluster_support)

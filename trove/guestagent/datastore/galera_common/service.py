@@ -659,8 +659,13 @@ class GaleraAppMixin(object):
             in_group = False
             waiting = self._waiting_for_primary()
             position = self._position()
+        # The last member to leave the cluster holds everything it
+        # committed, and Galera marks it so.
+        safe = (not in_group and
+                self._grastate().get('safe_to_bootstrap') == '1')
         return {'ip': self._self_ip(), 'in_group': in_group,
                 'waiting': waiting, 'position': position,
+                'safe_to_bootstrap': safe,
                 'bootstrapped': self.started_with_bootstrap()}
 
     def rejoin_group(self, state):
@@ -688,7 +693,14 @@ class GaleraAppMixin(object):
     _forming = threading.Lock()
 
     def _form_group(self):
+        if self._primary_component_meanwhile():
+            return
         LOG.info("Forming the cluster again.")
+        # The server waiting for a primary component holds no
+        # transaction in flight and does not answer a polite stop: killed
+        # before grastate.dat is marked, as a server that stops rewrites
+        # the file.
+        self._kill_db()
         path = os.path.join(self.get_data_dir(), GRASTATE_FILE)
         state = self._grastate()
         if state:
@@ -702,7 +714,6 @@ class GaleraAppMixin(object):
             operating_system.chown(path, self.database_service_uid,
                                    self.database_service_gid, as_root=True)
         command = self._container_command()
-        self.stop_db()
         self.start_cluster_node(command, bootstrap=True)
         deadline = time.time() + CONF.cluster_usage_timeout
         while time.time() < deadline:
@@ -715,6 +726,49 @@ class GaleraAppMixin(object):
                         "%s seconds; going on alone.",
                         CONF.cluster_usage_timeout)
         self.leave_bootstrap(command)
+
+    def _primary_component_meanwhile(self):
+        """Whether a primary component appeared since the task manager
+        decided: on this member, or on a member of the cluster (then this
+        one joins it by itself, or is receiving its state from it).
+        Forming another cluster next to it would split the cluster.
+        """
+        status = self._wsrep_status() or {}
+        if status.get('wsrep_cluster_status') == PRIMARY:
+            LOG.info("In a primary component meanwhile; not forming the "
+                     "cluster again.")
+            return True
+        conf = CONF.get(CONF.datastore_manager or 'mysql')
+        self_ip = self._self_ip()
+        try:
+            user, password = self._recovery_credentials()
+        except Exception as err:
+            LOG.warning("Cannot ask the other members before forming the "
+                        "cluster again: %s", err)
+            return False
+        for ip in self._seed_ips():
+            if ip == self_ip:
+                continue
+            peer = self._peer_status(ip, user, password,
+                                     conf.cluster_peer_timeout)
+            if peer and peer.get('wsrep_cluster_status') == PRIMARY:
+                LOG.info("Member %s is in a primary component meanwhile; "
+                         "not forming the cluster again.", ip)
+                return True
+        return False
+
+    def _kill_db(self):
+        """Kill the database container's server: for a server that
+        waits for a primary component, which does not answer a stop
+        until state_change_wait_time runs out and is killed then anyway.
+        """
+        try:
+            self.docker_client.containers.get(CONTAINER_NAME).kill()
+        except docker.errors.NotFound:
+            return
+        except Exception as err:
+            # Not running: nothing to kill.
+            LOG.debug("The database container was not killed: %s", err)
 
     def _others_synced(self, status):
         """Whether the member that formed the cluster may leave it for a

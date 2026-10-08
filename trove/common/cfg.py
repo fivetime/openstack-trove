@@ -754,7 +754,8 @@ pxc_opts = _build_mysql_family_datastore_opts(
 # member that fell out of the cluster back. Shared by the clusters built on
 # the MySQL guest agent; a datastore names the options its earlier releases
 # used with a prefix, so that a configuration with those still works.
-def _with_cluster_probe_and_entry(opts, deprecated_prefix=None):
+def _with_cluster_probe_and_entry(opts, deprecated_prefix=None,
+                                  needs_all=False):
     def deprecated(name):
         if not deprecated_prefix:
             return None
@@ -794,9 +795,13 @@ def _with_cluster_probe_and_entry(opts, deprecated_prefix=None):
                  'a majority holds. Off: a member only rejoins a cluster '
                  'that is up.'),
         opt(cfg.BoolOpt, 'cluster_bootstrap_needs_all_members',
-            default=False,
+            default=needs_all,
             help='Form the cluster again only when every member answers, '
-                 'instead of a majority.'),
+                 'instead of a majority. A Galera cluster goes on '
+                 'committing after members leave it, so a majority may '
+                 'lack what the last member to leave holds: Galera '
+                 'clusters need every member, unless one of them was the '
+                 'last to leave (safe_to_bootstrap).'),
         opt(cfg.IntOpt, 'cluster_bootstrap_jitter', default=5,
             help='Up to this many seconds of waiting before forming the '
                  'cluster again, against two members doing it at once.'),
@@ -892,7 +897,8 @@ def _with_galera_cluster(opts):
     ]
     names = {opt.name for opt in galera}
     return _with_cluster_probe_and_entry(
-        [opt for opt in opts if opt.name not in names]) + galera
+        [opt for opt in opts if opt.name not in names],
+        needs_all=True) + galera
 
 
 pxc_opts = _with_galera_cluster(pxc_opts)
