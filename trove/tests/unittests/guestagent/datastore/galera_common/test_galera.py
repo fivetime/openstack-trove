@@ -543,6 +543,15 @@ class TestMariaDB(trove_testtools.TestCase):
                 callable(getattr(mariadb_manager.Manager, name, None)),
                 'the MariaDB manager does not implement %s' % name)
 
+    def test_bootstrap_cluster_is_told_not_waited_for(self):
+        api = galera_guest_api.GaleraCommonGuestAgentAPI.__new__(
+            galera_guest_api.GaleraCommonGuestAgentAPI)
+        api._cast, api._call = mock.Mock(), mock.Mock()
+        api.bootstrap_cluster()
+        api._cast.assert_called_once_with(
+            'bootstrap_cluster', version=guest_api.API.API_BASE_VERSION)
+        api._call.assert_not_called()
+
     def test_arguments_match_the_task_manager(self):
         # The arguments travel by name.
         for name, sent in (
@@ -1016,12 +1025,26 @@ class TestRecoveryView(trove_testtools.TestCase):
     @mock.patch.object(galera_service.docker_util, 'remove_container')
     def test_bootstrap_group(self, _remove):
         # Marked safe to bootstrap, started with the flag, and once the
-        # others have joined, without it.
+        # others have joined and are synced, without it: alone, then a
+        # joiner receiving the state (port 0, this member its donor), then
+        # a member in the view but not synced yet, then everyone synced.
         self.files['/var/lib/mysql/data/grastate.dat'] = GRASTATE.replace(
             'safe_to_bootstrap: 1', 'safe_to_bootstrap: 0')
-        sizes = iter(['1', '1', '3'])
+        own = iter([
+            _status(wsrep_cluster_size='1',
+                    wsrep_incoming_addresses='10.0.0.2:3306'),
+            _status(wsrep_cluster_size='2',
+                    wsrep_local_state_comment='Donor/Desynced',
+                    wsrep_incoming_addresses='10.0.0.2:3306,10.0.0.3:0'),
+            _status(wsrep_cluster_size='2',
+                    wsrep_incoming_addresses='10.0.0.2:3306,10.0.0.3:3306'),
+            _status(wsrep_cluster_size='3')])
         self.app.execute_sql = mock.Mock(side_effect=lambda sql: list(
-            _status(wsrep_cluster_size=next(sizes)).items()))
+            next(own).items()))
+        self.app._recovery_credentials = mock.Mock(return_value=('r', 'p'))
+        peers = iter([_status(wsrep_local_state_comment='Joined'),
+                      _status(), _status()])
+        self.app._peer_status = mock.Mock(side_effect=lambda *a: next(peers))
         # Started with the flag, as the container will show after.
         self.container.attrs['Config']['Cmd'].append('--wsrep-new-cluster')
 
@@ -1038,12 +1061,27 @@ class TestRecoveryView(trove_testtools.TestCase):
              ('stop_db',),
              ('start_db', command, app_hc(self.app))],
             self.app.calls)
+        # The joiner at port 0 was not asked; the other two were, with the
+        # cluster account.
+        self.assertEqual([mock.call('10.0.0.3', 'r', 'p', 3)] +
+                         [mock.call(ip, 'r', 'p', 3)
+                          for ip in ('10.0.0.3', '10.0.0.1')],
+                         self.app._peer_status.call_args_list)
+
+    def test_a_member_forming_the_cluster_does_not_start_over(self):
+        self.app._form_group = mock.Mock()
+        with galera_service.GaleraAppMixin._forming:
+            self.app.bootstrap_group()
+        self.app._form_group.assert_not_called()
+        self.app.bootstrap_group()
+        self.app._form_group.assert_called_once_with()
 
     @mock.patch.object(galera_service.docker_util, 'remove_container')
     def test_bootstrap_group_alone(self, _remove):
         # Nobody joined in time: the flag goes all the same.
         self.app.execute_sql = mock.Mock(side_effect=lambda sql: list(
-            _status(wsrep_cluster_size='1').items()))
+            _status(wsrep_cluster_size='1',
+                    wsrep_incoming_addresses='10.0.0.2:3306').items()))
         self.container.attrs['Config']['Cmd'].append('--wsrep-new-cluster')
         with mock.patch.object(galera_service.time, 'time',
                                side_effect=[0, 1, 10 ** 9, 10 ** 9]):

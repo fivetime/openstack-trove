@@ -800,6 +800,10 @@ def _with_cluster_probe_and_entry(opts, deprecated_prefix=None):
         opt(cfg.IntOpt, 'cluster_bootstrap_jitter', default=5,
             help='Up to this many seconds of waiting before forming the '
                  'cluster again, against two members doing it at once.'),
+        opt(cfg.IntOpt, 'cluster_recovery_timeout', default=3600,
+            help='Seconds the member told to form the cluster again has '
+                 'to bring a primary component up before the task manager '
+                 'looks at the cluster anew.'),
         cfg.BoolOpt('cluster_load_balancer', default=True,
                     help='Put a load balancer in front of the members of a '
                          'cluster, on their subnet: the cluster\'s endpoint, '

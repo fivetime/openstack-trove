@@ -115,7 +115,10 @@ class GaleraCommonGuestAgentAPI(guest_api.API):
                           version=guest_api.API.API_BASE_VERSION)
 
     def bootstrap_cluster(self):
-        """Form the cluster again on this member."""
+        """Form the cluster again on this member: told, not waited for.
+        Forming takes as long as a state transfer, and the task manager
+        follows it through the members' recovery views.
+        """
         LOG.debug("Forming the cluster again.")
-        return self._call("bootstrap_cluster", CONF.cluster_usage_timeout,
-                          version=guest_api.API.API_BASE_VERSION)
+        self._cast("bootstrap_cluster",
+                   version=guest_api.API.API_BASE_VERSION)

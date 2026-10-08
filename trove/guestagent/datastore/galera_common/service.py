@@ -20,6 +20,7 @@ each member in turn, the first with ``bootstrap=True``, and
 
 import os
 import re
+import threading
 import time
 
 import docker
@@ -654,6 +655,18 @@ class GaleraAppMixin(object):
         cluster, then as an ordinary member once the others have joined,
         so that a restart does not form yet another cluster.
         """
+        if not self._forming.acquire(blocking=False):
+            LOG.info("The cluster is being formed again already; not "
+                     "starting over.")
+            return
+        try:
+            self._form_group()
+        finally:
+            self._forming.release()
+
+    _forming = threading.Lock()
+
+    def _form_group(self):
         LOG.info("Forming the cluster again.")
         path = os.path.join(self.get_data_dir(), GRASTATE_FILE)
         state = self._grastate()
@@ -672,9 +685,7 @@ class GaleraAppMixin(object):
         self.start_cluster_node(command, bootstrap=True)
         deadline = time.time() + CONF.cluster_usage_timeout
         while time.time() < deadline:
-            status = self._wsrep_status() or {}
-            if (status.get('wsrep_cluster_status') == PRIMARY and
-                    int(status.get('wsrep_cluster_size') or 0) > 1):
+            if self._others_synced(self._wsrep_status() or {}):
                 LOG.info("The others have joined the cluster formed again.")
                 break
             time.sleep(5)
@@ -683,6 +694,31 @@ class GaleraAppMixin(object):
                         "%s seconds; going on alone.",
                         CONF.cluster_usage_timeout)
         self.leave_bootstrap(command)
+
+    def _others_synced(self, status):
+        """Whether the member that formed the cluster may leave it for a
+        moment: it is synced in a primary component, and so is every
+        other member of the component, over its own database port. A
+        joiner still receiving the state dies with the transfer when its
+        donor stops, and the member would come back to no component at
+        all.
+        """
+        if (status.get('wsrep_cluster_status') != PRIMARY or
+                status.get('wsrep_local_state_comment') != SYNCED):
+            return False
+        self_ip = self._self_ip()
+        others = [(ip, port) for ip, port in self._incoming(status)
+                  if ip != self_ip]
+        if not others or any(port == '0' for _ip, port in others):
+            return False
+        conf = CONF.get(CONF.datastore_manager or 'mysql')
+        user, password = self._recovery_credentials()
+        for ip, _port in others:
+            peer = self._peer_status(ip, user, password,
+                                     conf.cluster_peer_timeout)
+            if not peer or peer.get('wsrep_local_state_comment') != SYNCED:
+                return False
+        return True
 
     def _container_command(self):
         """The command the database container was created with, the

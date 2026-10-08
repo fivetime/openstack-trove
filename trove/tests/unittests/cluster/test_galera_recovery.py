@@ -70,7 +70,7 @@ class GaleraRecoveryTest(trove_testtools.TestCase):
             cluster_peer_timeout=3, cluster_recovery_grace=60,
             cluster_recovery_interval=30, cluster_auto_bootstrap=True,
             cluster_bootstrap_needs_all_members=False,
-            cluster_bootstrap_jitter=0)
+            cluster_bootstrap_jitter=0, cluster_recovery_timeout=3600)
         self.db_cluster = mock.Mock(id='c1', task_status=ClusterTasks.NONE)
         mock.patch.object(recovery.cluster_models.DBCluster, 'find_by',
                           return_value=self.db_cluster).start()
@@ -178,30 +178,73 @@ class GaleraRecoveryTest(trove_testtools.TestCase):
         self._check_at(100)
         self.assertEqual([], self._bootstraps())
 
-    def test_the_cluster_is_locked_while_it_is_formed_again(self):
+    def _lock_updates(self):
         updates = []
-        self.db_cluster.update.side_effect = (
-            lambda **kw: updates.append(kw['task_status']))
+
+        def update(**kw):
+            updates.append(kw['task_status'])
+            self.db_cluster.task_status = kw['task_status']
+        self.db_cluster.update.side_effect = update
+        return updates
+
+    def test_the_cluster_is_locked_while_it_is_formed_again(self):
+        # The member is told and not waited for; the cluster keeps its
+        # task, and is not decided again, until a member is in a primary
+        # component.
+        updates = self._lock_updates()
         self._check_at(0)
         self._check_at(100)
+        self.assertEqual([ClusterTasks.RECOVERING_CLUSTER], updates)
+        self.assertEqual(['i1'], self._bootstraps())
+        self._check_at(200)
+        self._check_at(300)
+        self.assertEqual([ClusterTasks.RECOVERING_CLUSTER], updates)
+        self.assertEqual(['i1'], self._bootstraps())
+        self.answers['i1'] = _answer('10.0.0.1', waiting=False,
+                                     in_group=True)
+        self._check_at(400)
         self.assertEqual([ClusterTasks.RECOVERING_CLUSTER,
                           ClusterTasks.NONE], updates)
-        # And not when another task manager got there first.
-        self.calls.clear()
-        self.db_cluster.task_status = ClusterTasks.RECOVERING_CLUSTER
-        self.recovery.waiting_since['c1'] = -100
-        self._check_at(200)
-        self.assertEqual([], self._bootstraps())
+        self.assertNotIn('c1', self.recovery.forming_since)
+        self.assertNotIn('c1', self.recovery.waiting_since)
+        # Not decided again while the component is up.
+        self._check_at(500)
+        self.assertEqual(['i1'], self._bootstraps())
 
-    def test_a_failed_bootstrap_frees_the_cluster(self):
-        updates = []
-        self.db_cluster.update.side_effect = (
-            lambda **kw: updates.append(kw['task_status']))
+    def test_a_cluster_formed_by_another_task_manager_is_followed(self):
+        updates = self._lock_updates()
+        self.db_cluster.task_status = ClusterTasks.RECOVERING_CLUSTER
+        self._check_at(0)
+        self.assertEqual([], self._bootstraps())
+        self.assertEqual([], updates)
+        self.answers['i2'] = _answer('10.0.0.2', waiting=False,
+                                     in_group=True)
+        self._check_at(30)
+        self.assertEqual([ClusterTasks.NONE], updates)
+
+    def test_the_cluster_is_freed_after_the_recovery_timeout(self):
+        updates = self._lock_updates()
+        self._check_at(0)
+        self._check_at(100)
+        self._check_at(100 + 3599)
+        self.assertEqual([ClusterTasks.RECOVERING_CLUSTER], updates)
+        self._check_at(100 + 3600)
+        self.assertEqual([ClusterTasks.RECOVERING_CLUSTER,
+                          ClusterTasks.NONE], updates)
+        # Decided anew: the grace period runs again first.
+        self._check_at(100 + 3600 + 30)
+        self.assertEqual(['i1'], self._bootstraps())
+        self._check_at(100 + 3600 + 100)
+        self.assertEqual(['i1', 'i1'], self._bootstraps())
+
+    def test_a_member_that_cannot_be_told_frees_the_cluster(self):
+        updates = self._lock_updates()
         self._check_at(0)
         self.guests['i1'].bootstrap_cluster.side_effect = Exception('no')
         self._check_at(100)
         self.assertEqual([ClusterTasks.RECOVERING_CLUSTER,
                           ClusterTasks.NONE], updates)
+        self.assertNotIn('c1', self.recovery.forming_since)
 
     def test_run_goes_on_after_a_failure(self):
         other = mock.Mock(id='c2', task_status=ClusterTasks.NONE)
