@@ -125,6 +125,18 @@ class GaleraRecoveryTest(trove_testtools.TestCase):
         self._check_at(100)
         self.assertEqual(['i3'], self._bootstraps())
 
+    def test_every_waiting_member_is_decided_and_logged(self):
+        # The member behind comes after the one that forms the cluster:
+        # its decision is logged all the same.
+        self.answers['i1'] = _answer('10.0.0.1', seqno=12)
+        with mock.patch.object(recovery.LOG, 'info') as info:
+            self._check_at(0)
+            self._check_at(100)
+        decided = [c[0][2] for c in info.call_args_list
+                   if c[0][0].startswith('Cluster %s, member')]
+        self.assertEqual(['i1', 'i2', 'i3'], decided)
+        self.assertEqual(['i1'], self._bootstraps())
+
     def test_the_lowest_address_among_equals(self):
         self.answers['i1'] = _answer('10.0.0.1', seqno=12)
         self.answers['i2'] = _answer('10.0.0.2', seqno=12)

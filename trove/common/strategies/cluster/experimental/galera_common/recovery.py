@@ -162,7 +162,8 @@ class GaleraClusterRecovery(object):
     def _decide(self, context, db_cluster, members, views):
         cluster_id = db_cluster.id
         # Every waiting member decides for itself from the same views, as
-        # the probe would; the one the decision falls on goes.
+        # the probe would, and every decision is logged; the first member
+        # the decision falls on goes.
         chosen = None
         for member, answer in views:
             if not answer or not answer.get('waiting'):
@@ -181,9 +182,8 @@ class GaleraClusterRecovery(object):
                      cluster_id, member.id, answer.get('ip'),
                      '%s:%s' % position if position else 'unknown',
                      action, reason)
-            if action == cluster_probe.BOOTSTRAP:
+            if action == cluster_probe.BOOTSTRAP and chosen is None:
                 chosen = member
-                break
         if chosen is None:
             return
         if not self.conf.cluster_auto_bootstrap:
