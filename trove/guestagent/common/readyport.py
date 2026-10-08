@@ -36,11 +36,16 @@ class ReadyPort(object):
     writes and absent otherwise.
 
     The rule is on PREROUTING only: the traffic comes in through the tenant
-    NIC in the container. Connections already established through the port
-    go on after the rule is removed (conntrack keeps their translation); a
-    member that stopped taking writes refuses their writes itself, and new
-    connections are refused: nothing listens on the port, which is what the
-    load balancer's check sees.
+    NIC in the container. New connections to a closed port are refused:
+    nothing listens on it, which is what the load balancer's check sees.
+    Connections established through the port before it closed would go on
+    (conntrack keeps their translation), writing to a member that no
+    longer takes writes: a Galera member stepping down takes them all the
+    same. So while the port is closed, a REJECT with a TCP reset meets
+    every packet of such a connection (the original destination port tells
+    them apart from connections made to the database port directly), and
+    the client connects again, through the load balancer, to the member
+    that takes writes now.
     """
 
     def __init__(self, docker_client, port, target_port,
@@ -51,6 +56,10 @@ class ReadyPort(object):
         self.container_name = container_name
         self.rule = ['PREROUTING', '-p', 'tcp', '--dport', str(port),
                      '-j', 'REDIRECT', '--to-ports', str(target_port)]
+        # Resets the connections made through the port, while it is closed.
+        self.reset = ['INPUT', '-p', 'tcp', '--dport', str(target_port),
+                      '-m', 'conntrack', '--ctorigdstport', str(port),
+                      '-j', 'REJECT', '--reject-with', 'tcp-reset']
         # The container the rule was last applied in, and whether the rule
         # is there; None when not known.
         self.pid = None
@@ -67,16 +76,16 @@ class ReadyPort(object):
             LOG.debug("No database container: %s", err)
             return None
 
-    def _iptables(self, pid, action):
+    def _iptables(self, pid, action, table='nat', rule=None):
         # -w waits for the xtables lock instead of failing on it.
         utils.execute_with_timeout(
             'nsenter', '-t', str(pid), '-n', 'iptables', '-w', '5',
-            '-t', 'nat', action, *self.rule,
+            '-t', table, action, *(rule or self.rule),
             run_as_root=True, root_helper='sudo', timeout=15)
 
-    def _present(self, pid):
+    def _present(self, pid, table='nat', rule=None):
         try:
-            self._iptables(pid, '-C')
+            self._iptables(pid, '-C', table, rule)
             return True
         except exception.ProcessExecutionError as err:
             # 1 is "no such rule"; anything else is a failure.
@@ -95,8 +104,18 @@ class ReadyPort(object):
             return None
         try:
             present = self._present(pid)
+            resetting = self._present(pid, 'filter', self.reset)
+            if wanted:
+                if resetting:
+                    self._iptables(pid, '-D', 'filter', self.reset)
+                if not present:
+                    self._iptables(pid, '-A')
+            else:
+                if present:
+                    self._iptables(pid, '-D')
+                if not resetting:
+                    self._iptables(pid, '-A', 'filter', self.reset)
             if present != wanted:
-                self._iptables(pid, '-A' if wanted else '-D')
                 LOG.info("Ready port %s %s.", self.port,
                          'opened' if wanted else 'closed')
             self.applied = wanted
