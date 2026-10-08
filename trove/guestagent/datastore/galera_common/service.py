@@ -424,7 +424,21 @@ class GaleraAppMixin(object):
                        key=ip_key)
         writer, stable = self_ip, True
         if below:
-            user, password = self._recovery_credentials()
+            try:
+                user, password = self._recovery_credentials()
+            except Exception as err:
+                # No cluster account yet: the cluster is being built
+                # (install_cluster writes it), and no member takes writes
+                # before it is complete.
+                if self.is_cluster_complete():
+                    LOG.warning("Cannot ask the members below which takes "
+                                "writes: %s", err)
+                else:
+                    LOG.debug("No cluster account yet to ask the members "
+                              "below: %s", err)
+                self._writer = {'conf_id': conf_id, 'writer': None,
+                                'stable': False, 'when': now}
+                return None
             for ip in below:
                 peer = self._peer_status(ip, user, password,
                                          conf.cluster_peer_timeout)
@@ -457,10 +471,13 @@ class GaleraAppMixin(object):
         if synced:
             if self.writer_mode == MULTI_WRITER:
                 role = 'PRIMARY'
-            elif self._elect_writer(status) == self._self_ip():
-                role = 'PRIMARY'
             else:
-                role = 'SECONDARY'
+                writer = self._elect_writer(status)
+                if writer == self._self_ip():
+                    role = 'PRIMARY'
+                elif writer:
+                    role = 'SECONDARY'
+                # Else not known yet: no role.
         # A member out of the primary component is brought back by the
         # task manager, not by the probe: a member that waits for a
         # primary view does not open its database port, so the members

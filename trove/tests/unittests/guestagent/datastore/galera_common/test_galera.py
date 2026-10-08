@@ -764,6 +764,24 @@ class TestMemberView(trove_testtools.TestCase):
         return [[a for a in c.args[0] if a.startswith('--host=')][0][7:]
                 for c in self.container.exec_run.call_args_list]
 
+    def test_no_cluster_account_yet(self):
+        # While the cluster is built: no account to ask the members below
+        # with, so no writer is known and the member has no role, quietly.
+        self.app._recovery_credentials = mock.Mock(
+            side_effect=KeyError('/var/lib/mysql/conf.d/cluster-healthcheck'))
+        self.app.is_cluster_complete = mock.Mock(return_value=False)
+        self.app.execute_sql = mock.Mock(side_effect=lambda sql: list(
+            _status().items()))
+        with mock.patch.object(galera_service.LOG, 'warning') as warning:
+            view = self.app.member_view()
+        self.assertEqual((None, False), (view.role, view.writable))
+        warning.assert_not_called()
+        # Once complete, a missing account is worth a warning, once a tick.
+        self.app.is_cluster_complete = mock.Mock(return_value=True)
+        with mock.patch.object(galera_service.LOG, 'warning') as warning:
+            self.assertIsNone(self.app.member_view().role)
+        warning.assert_called_once()
+
     def test_addresses_from_the_configuration(self):
         self.assertEqual('10.0.0.2', self.app._self_ip())
         self.assertEqual(['10.0.0.1', '10.0.0.2', 'fd00::3'],
