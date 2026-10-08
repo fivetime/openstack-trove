@@ -33,9 +33,9 @@ from oslo_log import log as logging
 from trove.cluster import models as cluster_models
 from trove.cluster.tasks import ClusterTasks
 from trove.common import cfg
+from trove.common import clients
 from trove.guestagent.common import cluster_probe
 from trove.instance.models import DBInstance
-from trove.instance.models import Instance
 
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
@@ -54,14 +54,15 @@ class GaleraClusterRecovery(object):
         self.last_try = {}
         self.guest_factory = guest_factory or self._guest
 
-    @staticmethod
-    def _guest(context, instance):
-        return cluster_models.Cluster.get_guest(instance)
+    def _guest(self, context, member):
+        return clients.create_guest_client(context, member.id, self.manager)
 
     def _members(self, context, cluster_id):
-        return [Instance.load(context, db_instance.id)
-                for db_instance in DBInstance.find_all(
-                    cluster_id=cluster_id, deleted=False).all()]
+        """The cluster's members as the database holds them: the task
+        manager's context owns no tenant, so the instances are not loaded
+        through it, and the guest client needs only the id.
+        """
+        return DBInstance.find_all(cluster_id=cluster_id, deleted=False).all()
 
     def _views(self, context, members):
         """What every member says, PeerView each; a member that does not

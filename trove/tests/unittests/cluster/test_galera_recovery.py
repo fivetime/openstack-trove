@@ -211,6 +211,26 @@ class GaleraRecoveryTest(trove_testtools.TestCase):
         self.assertIn('c1', self.recovery.waiting_since)
 
 
+class RecoveryMembersTest(trove_testtools.TestCase):
+    """The task manager's context owns no tenant: the members come
+    straight from the database, the guest client from the member's id.
+    """
+
+    @mock.patch.object(recovery.DBInstance, 'find_all')
+    def test_members_are_the_db_rows_of_the_cluster(self, find_all):
+        rows = [mock.Mock(id='i1'), mock.Mock(id='i2')]
+        find_all.return_value.all.return_value = rows
+        r = recovery.GaleraClusterRecovery('pxc')
+        self.assertEqual(rows, r._members(mock.Mock(project_id=None), 'c1'))
+        find_all.assert_called_once_with(cluster_id='c1', deleted=False)
+
+    @mock.patch.object(recovery.clients, 'create_guest_client')
+    def test_guest_client_from_the_member_id_and_the_manager(self, create):
+        r = recovery.GaleraClusterRecovery('mariadb')
+        self.assertIs(create.return_value, r._guest('ctx', mock.Mock(id='i1')))
+        create.assert_called_once_with('ctx', 'i1', 'mariadb')
+
+
 class RecoveryWiringTest(trove_testtools.TestCase):
 
     def test_the_galera_strategies_have_a_recovery_and_gr_has_none(self):
