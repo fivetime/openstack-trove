@@ -1116,6 +1116,7 @@ class TestRecoveryView(trove_testtools.TestCase):
             _status(wsrep_cluster_size='2',
                     wsrep_incoming_addresses='10.0.0.2:3306,10.0.0.3:3306'),
             _status(wsrep_cluster_size='3')])
+
         def own_status(sql):
             status = next(own)
             if status is None:
@@ -1203,8 +1204,8 @@ class TestRecoveryView(trove_testtools.TestCase):
         self.app.bootstrap_group()
         self.container.kill.assert_not_called()
         self.assertEqual([], self.app.calls)
-        self.assertEqual(['10.0.0.1', '10.0.0.3'],
-                         [c[0][0] for c in self.app._peer_status.call_args_list])
+        self.assertEqual(['10.0.0.1', '10.0.0.3'], [
+            c[0][0] for c in self.app._peer_status.call_args_list])
 
 
 def app_hc(app):
