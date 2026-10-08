@@ -18,6 +18,7 @@ each member in turn, the first with ``bootstrap=True``, and
 ``cluster_complete`` on all of them once every member has joined.
 """
 
+import datetime
 import os
 import re
 import threading
@@ -96,6 +97,21 @@ def _parse_status(output):
         if sep:
             status[name.strip()] = value.strip()
     return status
+
+
+def _epoch(timestamp):
+    """Seconds since the epoch of a timestamp as Docker writes them
+    (RFC 3339, nanoseconds), None when there is none or it does not
+    parse.
+    """
+    if not timestamp:
+        return None
+    try:
+        return int(datetime.datetime.strptime(
+            re.sub(r'\.\d+', '', timestamp), '%Y-%m-%dT%H:%M:%SZ').replace(
+                tzinfo=datetime.timezone.utc).timestamp())
+    except ValueError:
+        return None
 
 
 def _address(address):
@@ -477,14 +493,18 @@ class GaleraAppMixin(object):
         return state
 
     def _logged_position(self):
-        """The position the server logged last when it started: a server
-        that crashed has -1 in grastate.dat and recovers its position from
-        the storage engine.
+        """The position the server logged when it started this time: a
+        server that crashed has -1 in grastate.dat and recovers its
+        position from the storage engine. Only the log of the container's
+        current run counts: the log holds every run, and what an earlier
+        run logged is where the member stood then.
         """
         try:
             container = self.docker_client.containers.get(CONTAINER_NAME)
+            since = _epoch(container.attrs.get('State', {}).get('StartedAt'))
             output = encodeutils.safe_decode(
-                container.logs(tail=LOG_TAIL) or b'')
+                (container.logs(tail=LOG_TAIL, since=since) if since
+                 else container.logs(tail=LOG_TAIL)) or b'')
         except Exception as err:
             LOG.debug("No container log: %s", err)
             return None
@@ -512,6 +532,15 @@ class GaleraAppMixin(object):
         key = (state.get('uuid'), state.get('seqno'))
         if self._recovered and self._recovered[0] == key:
             return self._recovered[1]
+        # One run at a time: the task manager asks again while one runs.
+        with self._recovering:
+            if self._recovered and self._recovered[0] == key:
+                return self._recovered[1]
+            return self._run_recovery(key)
+
+    _recovering = threading.Lock()
+
+    def _run_recovery(self, key):
         command = self._container_command().split()
         if not command:
             return None

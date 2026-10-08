@@ -980,6 +980,20 @@ class TestRecoveryView(trove_testtools.TestCase):
                 b'x\n' + line.replace(b'ab-cd', b'0' * 8 + b'-' + b'0' * 27))
             self.assertEqual(7, self.app._position()[1])
 
+    def test_only_the_log_of_the_current_run_counts(self):
+        # Without a start time the whole tail is read; with one, only
+        # what the container logged since: an earlier run's position is
+        # where the member stood then.
+        self.app._position()
+        self.container.logs.assert_called_with(tail=galera_service.LOG_TAIL)
+        self.container.attrs['State'] = {
+            'StartedAt': '2026-10-08T17:12:30.123456789Z'}
+        self.app._position()
+        self.container.logs.assert_called_with(
+            tail=galera_service.LOG_TAIL, since=1791479550)
+        self.assertIsNone(galera_service._epoch(None))
+        self.assertIsNone(galera_service._epoch('junk'))
+
     def test_a_logged_minus_one_is_no_position(self):
         # What a server logs that does not know either, as MariaDB does
         # after a crash: the recovery run is asked.
