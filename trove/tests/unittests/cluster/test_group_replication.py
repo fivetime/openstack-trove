@@ -50,7 +50,7 @@ class GroupReplicationConfigTest(trove_testtools.TestCase):
                 gr_guestagent.GroupReplicationGuestAgentStrategy)
             self.assertEqual(
                 'trove.extensions.mysql.service.'
-                'GroupReplicationRootController', conf.root_controller)
+                'ClusterWriterRootController', conf.root_controller)
 
     def test_load_balancer_options(self):
         for manager in ('mysql', 'percona'):
@@ -83,8 +83,9 @@ class GroupReplicationConfigTest(trove_testtools.TestCase):
                               galera_api.GaleraCommonAPIStrategy)
         self.assertNotIsInstance(strategy.load_api_strategy('pxc'),
                                  gr_api.GroupReplicationAPIStrategy)
+        # Root on a member that takes writes: shared with Galera now.
         self.assertEqual(
-            'trove.extensions.common.service.DefaultRootController',
+            'trove.extensions.mysql.service.ClusterWriterRootController',
             CONF.pxc.root_controller)
 
 

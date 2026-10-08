@@ -20,4 +20,7 @@ features:
     and ``cluster_load_balancer*`` options the Group Replication clusters
     have, and ``cluster_tcp_ports`` opens the ready port in the security
     group of a member. The cluster configuration gets a ``[trove]`` section,
-    which the server leaves alone, with the writer mode.
+    which the server leaves alone, with the writer mode. Root of a Galera
+    cluster can be enabled: it is enabled on a member that takes writes
+    and the cluster replicates it (``root_controller`` of the two groups
+    is now the controller the Group Replication clusters use).

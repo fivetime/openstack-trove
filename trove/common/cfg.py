@@ -846,7 +846,7 @@ def _with_group_replication(opts):
         # instance is served as before.
         cfg.StrOpt('root_controller',
                    default='trove.extensions.mysql.service.'
-                   'GroupReplicationRootController',
+                   'ClusterWriterRootController',
                    help='Root controller implementation.'),
         # clusterrepuser is the account the members recover with.
         cfg.ListOpt('ignore_users',
@@ -873,6 +873,12 @@ def _with_galera_cluster(opts):
                          'members of a cluster, besides tcp_ports: the '
                          'ready port a member that takes writes answers '
                          'on.'),
+        # Root of a cluster is enabled on a member that takes writes and
+        # replicated; the default controller refuses clusters.
+        cfg.StrOpt('root_controller',
+                   default='trove.extensions.mysql.service.'
+                   'ClusterWriterRootController',
+                   help='Root controller implementation.'),
     ]
     names = {opt.name for opt in galera}
     return _with_cluster_probe_and_entry(

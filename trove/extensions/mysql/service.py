@@ -26,10 +26,11 @@ LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
 
 
-class GroupReplicationRootController(DefaultRootController):
-    """Root of a single MySQL instance as before; root of a Group
-    Replication cluster is enabled on a member that takes writes, and the
-    group replicates it to the others.
+class ClusterWriterRootController(DefaultRootController):
+    """Root of a single instance as before; root of a cluster is enabled
+    on a member that takes writes (``is_writable_member``), and the
+    cluster replicates it to the others: a Group Replication group, a
+    Galera cluster.
     """
 
     def __init__(self):
@@ -39,12 +40,12 @@ class GroupReplicationRootController(DefaultRootController):
         if is_cluster:
             return self._cluster.root_index(req, tenant_id, instance_id,
                                             is_cluster)
-        return super(GroupReplicationRootController, self).root_index(
+        return super(ClusterWriterRootController, self).root_index(
             req, tenant_id, instance_id, is_cluster)
 
     def root_create(self, req, body, tenant_id, instance_id, is_cluster):
         if not is_cluster:
-            return super(GroupReplicationRootController, self).root_create(
+            return super(ClusterWriterRootController, self).root_create(
                 req, body, tenant_id, instance_id, is_cluster)
         context = req.environ[wsgi.CONTEXT_KEY]
         member_ids = self._cluster._find_cluster_node_ids(tenant_id,
@@ -60,7 +61,7 @@ class GroupReplicationRootController(DefaultRootController):
         if is_cluster:
             raise exception.ClusterOperationNotSupported(
                 operation='disable_root')
-        return super(GroupReplicationRootController, self).root_delete(
+        return super(ClusterWriterRootController, self).root_delete(
             req, tenant_id, instance_id, is_cluster)
 
     @staticmethod
@@ -77,3 +78,7 @@ class GroupReplicationRootController(DefaultRootController):
                 LOG.exception("Could not ask member %s.", member_id)
         raise exception.UnprocessableEntity(
             _("No member of the cluster takes writes now."))
+
+
+# The name the mysql and percona options have carried.
+GroupReplicationRootController = ClusterWriterRootController

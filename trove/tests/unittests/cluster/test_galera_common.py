@@ -44,12 +44,12 @@ class GaleraCommonConfigTest(trove_testtools.TestCase):
             self.assertEqual(3, conf.cluster_probe_interval)
             self.assertIn('3307', [str(p) for r in conf.cluster_tcp_ports
                                    for p in r])
+            # Root of a cluster is enabled on a member that takes writes.
+            self.assertEqual('trove.extensions.mysql.service.'
+                             'ClusterWriterRootController',
+                             conf.root_controller)
             self.assertIsInstance(strategy.load_api_strategy(manager),
                                   galera_api.GaleraCommonAPIStrategy)
-            # Galera's own, not Group Replication's.
-            self.assertEqual(
-                'trove.extensions.common.service.DefaultRootController',
-                conf.root_controller)
 
 
 class GaleraCommonAPITest(trove_testtools.TestCase):
@@ -372,3 +372,71 @@ class GaleraCommonTasksTest(trove_testtools.TestCase):
         failed.set_task_status.assert_called_once_with(
             galera_taskmanager.inst_tasks.InstanceTasks.GROWING_ERROR)
         failed.save.assert_called_once()
+
+
+class ClusterWriterRootTest(trove_testtools.TestCase):
+    """Root of a cluster goes to a member that takes writes."""
+
+    def setUp(self):
+        super(ClusterWriterRootTest, self).setUp()
+        from trove.extensions.mysql import service as mysql_ext
+        self.ext = mysql_ext
+        self.controller = mysql_ext.ClusterWriterRootController()
+        self.req = mock.Mock(environ={'trove.context': 'ctx'})
+        self.guests = {}
+
+        def guest_client(context, member_id):
+            return self.guests[member_id]
+        mock.patch.object(mysql_ext.strategy, 'load_guestagent_strategy',
+                          return_value=mock.Mock(
+                              guest_client_class=guest_client)).start()
+        mock.patch.object(mysql_ext.DBInstance, 'find_by',
+                          return_value=mock.Mock(
+                              datastore_version_id='v')).start()
+        mock.patch.object(mysql_ext.datastore_models.DatastoreVersion,
+                          'load_by_uuid',
+                          return_value=mock.Mock(manager='pxc')).start()
+        mock.patch.object(self.controller._cluster, '_find_cluster_node_ids',
+                          return_value=['m1', 'm2', 'm3']).start()
+        self.create = mock.patch.object(self.controller._cluster,
+                                        'instance_root_create').start()
+        self.addCleanup(mock.patch.stopall)
+
+    def _member(self, writable=None, error=None):
+        g = mock.Mock()
+        if error:
+            g.is_writable_member.side_effect = error
+        else:
+            g.is_writable_member.return_value = writable
+        return g
+
+    def test_the_first_member_that_takes_writes_gets_root(self):
+        self.guests = {'m1': self._member(False), 'm2': self._member(True),
+                       'm3': self._member(True)}
+        self.controller.root_create(self.req, {}, 't', 'c1', True)
+        self.create.assert_called_once_with(self.req, {}, 'm2',
+                                            ['m1', 'm2', 'm3'])
+        self.guests['m3'].is_writable_member.assert_not_called()
+
+    def test_a_member_that_does_not_answer_is_skipped(self):
+        self.guests = {'m1': self._member(error=Exception('down')),
+                       'm2': self._member(True), 'm3': self._member(True)}
+        self.controller.root_create(self.req, {}, 't', 'c1', True)
+        self.create.assert_called_once_with(self.req, {}, 'm2',
+                                            ['m1', 'm2', 'm3'])
+
+    def test_no_writer_no_root(self):
+        self.guests = {m: self._member(False) for m in ('m1', 'm2', 'm3')}
+        self.assertRaises(exception.UnprocessableEntity,
+                          self.controller.root_create,
+                          self.req, {}, 't', 'c1', True)
+        self.create.assert_not_called()
+
+    def test_root_of_a_cluster_is_not_disabled(self):
+        self.assertRaises(exception.ClusterOperationNotSupported,
+                          self.controller.root_delete, self.req, 't', 'c1',
+                          True)
+
+    def test_the_old_name_is_kept(self):
+        self.assertIs(self.ext.ClusterWriterRootController,
+                      self.ext.GroupReplicationRootController)
