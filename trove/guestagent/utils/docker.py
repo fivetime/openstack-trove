@@ -120,7 +120,9 @@ def _create_container_with_low_level_api(image: str, param: dict) -> None:
                                         command=param.get("command"),
                                         host_config=host_config,
                                         healthcheck=healthcheck,
-                                        networking_config=networking_config)
+                                        networking_config=networking_config,
+                                        stop_timeout=param.get(
+                                            "stop_timeout"))
     LOG.debug("Starting container: %s", param.get("name"))
     client.start(container=container)
 
@@ -129,7 +131,8 @@ def start_container(client, image, name="database",
                     restart_policy="unless-stopped",
                     volumes={}, ports={}, user="", network_mode="host",
                     environment={}, command="", healthcheck=None,
-                    privileged=False, ulimits=None, cap_add=None):
+                    privileged=False, ulimits=None, cap_add=None,
+                    stop_timeout=None):
     """Start a docker container.
 
     :param client: docker client obj.
@@ -149,8 +152,13 @@ def start_container(client, image, name="database",
            docker.types.Ulimit; the daemon's defaults when not given
     :param cap_add: capabilities to add, e.g. ["IPC_OWNER"]: narrower than
            a privileged container
+    :param stop_timeout: seconds a stop (the daemon's at shutdown too)
+           waits for the server to stop by itself before killing it; the
+           time Trove gives a stop, by default
     :return:
     """
+    if stop_timeout is None:
+        stop_timeout = CONF.state_change_wait_time
     try:
         container = client.containers.get(name)
         LOG.info(f'Starting existing container {name}')
@@ -175,7 +183,8 @@ def start_container(client, image, name="database",
                   ipc_mode="host",
                   environment=environment,
                   healthcheck=healthcheck,
-                  command=command)
+                  command=command,
+                  stop_timeout=stop_timeout)
     if ulimits:
         kwargs["ulimits"] = ulimits
     if cap_add:

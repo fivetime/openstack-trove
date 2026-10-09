@@ -85,6 +85,9 @@ LOGGED_POSITION = re.compile(
     r'(?:initial position to|Recovered position:)\s*'
     r'([0-9a-f-]{36}):(-?\d+)')
 LOG_TAIL = 400
+# The server's error log, next to the data directory in the data volume
+# (log_error in the configuration templates).
+ERROR_LOG_NAME = 'mysqld.log'
 
 
 def _parse_status(output):
@@ -512,26 +515,51 @@ class GaleraAppMixin(object):
     def _logged_position(self):
         """The position the server logged when it started this time: a
         server that crashed has -1 in grastate.dat and recovers its
-        position from the storage engine. Only the log of the container's
-        current run counts: the log holds every run, and what an earlier
-        run logged is where the member stood then.
+        position from the storage engine. Only what the container's
+        current run logged counts: the log holds every run, and what an
+        earlier run logged is where the member stood then. The server
+        writes its error log into the data volume (log_error); when
+        there is none, the container's own log is read.
         """
         try:
             container = self.docker_client.containers.get(CONTAINER_NAME)
             since = _epoch(container.attrs.get('State', {}).get('StartedAt'))
-            output = encodeutils.safe_decode(
-                (container.logs(tail=LOG_TAIL, since=since) if since
-                 else container.logs(tail=LOG_TAIL)) or b'')
+            lines = self._error_log_lines(since)
+            if lines is None:
+                output = encodeutils.safe_decode(
+                    (container.logs(tail=LOG_TAIL, since=since) if since
+                     else container.logs(tail=LOG_TAIL)) or b'')
+                lines = output.splitlines()
         except Exception as err:
             LOG.debug("No container log: %s", err)
             return None
         found = None
-        for line in output.splitlines():
+        for line in lines:
             match = LOGGED_POSITION.search(line)
             # -1: the server does not know either.
             if match and int(match.group(2)) >= 0:
                 found = (match.group(1), int(match.group(2)))
         return found
+
+    def _error_log_lines(self, since):
+        """The last lines of the server's error log file, those logged
+        since the given time (seconds since the epoch) when known; None
+        when there is no such file.
+        """
+        path = os.path.join(os.path.dirname(self.get_data_dir()),
+                            ERROR_LOG_NAME)
+        if not operating_system.exists(path, as_root=True):
+            return None
+        content = operating_system.read_file(path, as_root=True)
+        lines = content.splitlines()[-LOG_TAIL:]
+        if not since:
+            return lines
+        kept = []
+        for line in lines:
+            at = _epoch(line.split(' ', 1)[0]) if line[:4].isdigit() else None
+            if at is None or at >= since:
+                kept.append(line)
+        return kept
 
     # The server binary of the image, for a recovery run.
     SERVER_BINARY = 'mysqld'
@@ -568,9 +596,12 @@ class GaleraAppMixin(object):
             # Killed, as before forming the cluster again: a server that
             # waits for a primary component does not answer a stop.
             self._kill_db()
+            # The configuration sends the error log to a file: the run's
+            # answer is wanted here instead.
             output = encodeutils.safe_decode(
                 self.docker_client.containers.run(
-                    self._image(), command + ['--wsrep-recover'],
+                    self._image(), command + ['--wsrep-recover',
+                                              '--log-error=/dev/stderr'],
                     entrypoint=self.SERVER_BINARY, remove=True,
                     user='%s:%s' % (self.database_service_uid,
                                     self.database_service_gid),
@@ -841,14 +872,17 @@ class GaleraAppMixin(object):
         return True
 
     def _container_command(self):
-        """The command the database container was created with, the
-        bootstrap option taken out.
+        """The server's options the database container was created with:
+        the bootstrap option taken out, and whatever ran the server (a
+        wrapper, MariaDB's) taken off the front.
         """
         try:
             container = self.docker_client.containers.get(CONTAINER_NAME)
             cmd = container.attrs['Config'].get('Cmd') or []
         except Exception:
             cmd = []
+        while cmd and not cmd[0].startswith('-'):
+            cmd = cmd[1:]
         return ' '.join(arg for arg in cmd if arg != BOOTSTRAP_OPTION)
 
     def get_member_role(self):

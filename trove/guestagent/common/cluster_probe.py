@@ -261,6 +261,12 @@ class ClusterProbe(object):
         position = self.app._position()
         action, reason = decide(self_ip, position, peers, n_members,
                                 self.app._not_ahead, self.needs_all)
+        if action == WAIT and self._last_standing(position, peers):
+            # The last member in the cluster holds everything it
+            # committed: it forms the cluster again without the others,
+            # unless one of them holds more, which would mean the mark is
+            # stale.
+            action, reason = BOOTSTRAP, 'the last one standing'
         if action == BOOTSTRAP and not self.auto_bootstrap:
             action, reason = WAIT, 'auto bootstrap is off; an operator ' \
                                    'forms the group again'
@@ -280,6 +286,16 @@ class ClusterProbe(object):
             else:
                 LOG.info("The peers changed meanwhile; not forming the "
                          "group now.")
+
+    def _last_standing(self, position, peers):
+        was = getattr(self.app, 'was_last_standing', None)
+        if not was or not was():
+            return False
+        reachable = [p for p in peers if p.reachable]
+        if any(p.in_group or p.sees_group for p in reachable):
+            return False
+        return all(self.app._not_ahead(p.position, position)
+                   for p in reachable)
 
     def snapshot(self):
         return {'state': self.view.state, 'role': self.view.role,

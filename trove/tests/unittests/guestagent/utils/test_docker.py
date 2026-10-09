@@ -141,6 +141,19 @@ class TestDockerUtils(trove_testtools.TestCase):
         mock_client().start.assert_called_once()
 
     @mock.patch("docker.APIClient")
+    def test__create_container_with_low_level_api_stop_timeout(
+            self, mock_client):
+        mo = mock.mock_open(read_data=json.dumps({"ipv4_address": "10.1.0.8"}))
+        param = dict(name="test", detach=True, volumes={}, ports={},
+                     user="u", environment={}, command="sleep inf",
+                     stop_timeout=180)
+        with mock.patch.object(docker_utils, 'open', mo):
+            docker_utils._create_container_with_low_level_api(
+                "busybox", param)
+        self.assertEqual(
+            180, mock_client().create_container.call_args[1]['stop_timeout'])
+
+    @mock.patch("docker.APIClient")
     def test__create_container_with_low_level_api_ulimits(self, mock_client):
         eth1_data = json.dumps({"mac_address": "fa:16:3e:7c:9c:57",
                                 "ipv4_address": "10.111.0.8",
@@ -172,6 +185,20 @@ class TestDockerUtils(trove_testtools.TestCase):
                                      network_mode='bridge')
         self.assertNotIn('ulimits',
                          self.docker_client.containers.run.call_args[1])
+
+    def test_start_container_gives_the_container_a_stop_timeout(self):
+        # Trove's own: the daemon's stop at shutdown waits as long.
+        self.docker_client.containers.get.side_effect = \
+            docker.errors.NotFound('no such container')
+        docker_utils.start_container(self.docker_client, 'busybox',
+                                     name='db')
+        self.assertEqual(
+            docker_utils.CONF.state_change_wait_time,
+            self.docker_client.containers.run.call_args[1]['stop_timeout'])
+        docker_utils.start_container(self.docker_client, 'busybox',
+                                     name='db', stop_timeout=30)
+        self.assertEqual(
+            30, self.docker_client.containers.run.call_args[1]['stop_timeout'])
 
     def test_start_container_passes_capabilities(self):
         self.docker_client.containers.get.side_effect = \

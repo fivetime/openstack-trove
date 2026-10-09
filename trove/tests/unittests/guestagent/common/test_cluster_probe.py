@@ -35,6 +35,7 @@ class ProbeTestBase(trove_testtools.TestCase):
         self.app.is_cluster_member.return_value = True
         self.app.is_cluster_complete.return_value = False
         self.app.member_view.return_value = _view('ONLINE', 'PRIMARY')
+        self.app.was_last_standing.return_value = False
         self.conf = mock.Mock(cluster_probe_interval=3,
                               cluster_probe_timeout=5,
                               cluster_ready_port_reconcile=20,
@@ -287,6 +288,37 @@ class TestRecovery(ProbeTestBase):
         self._tick_at(100)
         self.app.bootstrap_group.assert_called_once()
         self.app.rejoin_group.assert_not_called()
+
+    def test_the_last_one_standing_forms_the_group_alone(self):
+        # Marked as the last member in the group: it holds everything
+        # the group committed, and does not wait for the others.
+        self.conf.cluster_bootstrap_needs_all_members = True
+        self.probe.needs_all = True
+        self.peers = {'10.0.0.2': _peer('10.0.0.2', reachable=False),
+                      '10.0.0.3': _peer('10.0.0.3', reachable=False)}
+        self.app.was_last_standing.return_value = True
+        self._tick_at(0)
+        self._tick_at(100)
+        self.app.bootstrap_group.assert_called_once()
+        self.app.rejoin_group.assert_not_called()
+
+    def test_the_last_one_standing_is_not_trusted_against_a_peer_ahead(self):
+        self.probe.needs_all = True
+        self.peers['10.0.0.2'] = _peer('10.0.0.2', position='u:1-12')
+        self.peers['10.0.0.3'] = _peer('10.0.0.3', reachable=False)
+        self.app.was_last_standing.return_value = True
+        self._tick_at(0)
+        self._tick_at(100)
+        self.app.bootstrap_group.assert_not_called()
+        self.app.rejoin_group.assert_not_called()
+
+    def test_the_last_one_standing_joins_a_group_that_is_up(self):
+        self.peers['10.0.0.2'] = _peer('10.0.0.2', in_group=True)
+        self.app.was_last_standing.return_value = True
+        self._tick_at(0)
+        self._tick_at(100)
+        self.app.rejoin_group.assert_called_once_with('OFFLINE')
+        self.app.bootstrap_group.assert_not_called()
 
     def test_does_not_form_the_group_when_the_peers_changed(self):
         answers = [self.peers['10.0.0.2'], self.peers['10.0.0.3'],

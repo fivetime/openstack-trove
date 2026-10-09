@@ -14,6 +14,8 @@
 #    under the License.
 #
 
+import stat
+
 from oslo_log import log as logging
 from oslo_utils.excutils import save_and_reraise_exception
 
@@ -21,6 +23,8 @@ from trove.common import cfg
 from trove.common import constants
 from trove.common import exception
 from trove.common import utils
+from trove.guestagent.common import operating_system
+from trove.guestagent.common.operating_system import FileMode
 from trove.guestagent.datastore.galera_common import service as galera_service
 from trove.guestagent.datastore.mysql_common import service as mysql_service
 from trove.guestagent.utils import docker as docker_util
@@ -31,6 +35,35 @@ CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
 
 
+# Starts a cluster member the way MariaDB's own galera_recovery does
+# before mariadbd: after a crash grastate.dat holds -1 and the server
+# would start from no position at all (the cluster's state becomes
+# 00000000-…:0 once every member comes back, and a member behind is not
+# told so), so the position is recovered from the storage engine first
+# and handed to the server. In /etc/mysql, which the container mounts; the
+# image's entrypoint runs what it is given when that is not the server.
+START_WRAPPER = '/etc/mysql/galera-start'
+START_WRAPPER_SCRIPT = """#!/bin/sh
+# Written by the Trove guest agent: start a Galera member from the
+# position the storage engine holds, as galera_recovery does.
+datadir=/var/lib/mysql/data
+for arg in "$@"; do
+    case "$arg" in --datadir=*) datadir="${arg#--datadir=}" ;; esac
+done
+grastate="$datadir/grastate.dat"
+if [ -f "$grastate" ] && grep -q '^seqno: *-1' "$grastate"; then
+    position=$(mariadbd "$@" --wsrep-recover --log-error=/dev/stderr 2>&1 \
+        | sed -n 's/.*Recovered position: *\([0-9a-f-]*:[0-9-]*\).*/\1/p' \
+        | tail -n 1)
+    if [ -n "$position" ]; then
+        echo "galera-start: recovered position $position"
+        set -- "$@" "--wsrep_start_position=$position"
+    fi
+fi
+exec mariadbd "$@"
+"""
+
+
 class MariaDBApp(galera_service.GaleraAppMixin, mysql_service.BaseMySqlApp):
 
     # MariaDB reads the wsrep options from their own section.
@@ -38,6 +71,27 @@ class MariaDBApp(galera_service.GaleraAppMixin, mysql_service.BaseMySqlApp):
     # The image has MariaDB's client and server, under their own names.
     PEER_CLIENT = 'mariadb'
     SERVER_BINARY = 'mariadbd'
+
+    def start_db(self, *args, **kwargs):
+        """A cluster member's container runs the start wrapper, which
+        recovers the member's position after a crash before the server.
+        """
+        command = kwargs.get('command')
+        if command and self.is_cluster_member() and \
+                not command.startswith(START_WRAPPER):
+            self._write_start_wrapper()
+            kwargs['command'] = '%s %s' % (START_WRAPPER, command)
+        return super(MariaDBApp, self).start_db(*args, **kwargs)
+
+    def _write_start_wrapper(self):
+        operating_system.write_file(START_WRAPPER, START_WRAPPER_SCRIPT,
+                                    as_root=True)
+        # 0755: the server runs it as the database user.
+        operating_system.chmod(
+            START_WRAPPER, FileMode(reset=[stat.S_IRWXU | stat.S_IRGRP |
+                                           stat.S_IXGRP | stat.S_IROTH |
+                                           stat.S_IXOTH]),
+            as_root=True)
 
     HEALTHCHECK = {
         "test": ["CMD", "healthcheck.sh", "--defaults-file",

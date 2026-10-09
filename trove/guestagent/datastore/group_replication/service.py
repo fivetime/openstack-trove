@@ -60,6 +60,12 @@ MODES = (SINGLE_PRIMARY, MULTI_PRIMARY)
 RECOVERY_CHANNEL = 'group_replication_recovery'
 # A member in these states is in the group.
 IN_GROUP = ('ONLINE', 'RECOVERING')
+# Marks the member that was the last one in the group, the others having
+# left on purpose: it holds everything the group committed, and forms the
+# group again on its own. Galera marks such a member in grastate.dat
+# (safe_to_bootstrap); Group Replication has no mark of its own.
+CNF_LAST = 'cluster-last-standing'
+LAST_STANDING_OPTION = 'cluster_last_standing'
 # A member in these states is out of it, and one to bring back.
 OUT_OF_GROUP = ('OFFLINE', 'ERROR')
 MEMBERS_QUERY = ("SELECT MEMBER_ID, MEMBER_STATE FROM "
@@ -277,12 +283,43 @@ class GroupReplicationAppMixin(galera_service.GaleraAppMixin):
     def member_view(self):
         """The member's state and role in the group; it takes writes as
         the primary of a single-primary group, or as any member of a
-        multi-primary one.
+        multi-primary one. An ONLINE member keeps the mark of the last
+        one standing up to date: set when it is the only member of the
+        group, taken off once another is in.
         """
         state, role = self._member_state()
+        if state == 'ONLINE':
+            try:
+                self._note_last_standing(self._members_in_group() == 1)
+            except Exception as err:
+                LOG.debug("The last standing mark was not updated: %s", err)
         return cluster_probe.MemberView(
             state, role, state == 'ONLINE' and role == 'PRIMARY',
             state in OUT_OF_GROUP)
+
+    def _members_in_group(self):
+        return sum(1 for _id, state in self.execute_sql(MEMBERS_QUERY)
+                   if state in IN_GROUP)
+
+    def _note_last_standing(self, alone):
+        marked = self.configuration_manager.has_system_override(CNF_LAST)
+        if alone and not marked:
+            LOG.info("The only member of the group: marked as the last "
+                     "one standing.")
+            self.configuration_manager.apply_system_override(
+                {galera_service.TROVE_SECTION: {LAST_STANDING_OPTION: '1'}},
+                CNF_LAST)
+        elif marked and not alone:
+            LOG.info("Another member is in the group: no longer the last "
+                     "one standing.")
+            self.configuration_manager.remove_system_override(CNF_LAST)
+
+    def was_last_standing(self):
+        """Whether the member was the last one in the group when it went
+        down: it holds everything the group committed, so it forms the
+        group again on its own, without waiting for the others.
+        """
+        return self.configuration_manager.has_system_override(CNF_LAST)
 
     def _self_ip(self):
         configuration = self.cluster_configuration

@@ -174,6 +174,37 @@ class TestGroupReplicationApp(trove_testtools.TestCase):
                               '--datadir=x', bootstrap=False)
         self.assertEqual(1, self.sql.count('START GROUP_REPLICATION'))
 
+    def test_the_only_member_of_the_group_is_marked_the_last_standing(self):
+        members = [('a', 'ONLINE')]
+        self.app.execute_sql = mock.Mock(side_effect=lambda stmt: (
+            list(members) if 'replication_group_members' in str(stmt)
+            else []))
+        self.configuration_manager.has_system_override.return_value = False
+        # Alone in the group: marked.
+        self._states(('ONLINE', 'PRIMARY'))
+        self.assertTrue(self.app.member_view().writable)
+        self.configuration_manager.apply_system_override.\
+            assert_called_once_with(
+                {'trove': {'cluster_last_standing': '1'}},
+                gr_service.CNF_LAST)
+        self.configuration_manager.remove_system_override.assert_not_called()
+        # Another member in: the mark goes.
+        self.configuration_manager.has_system_override.return_value = True
+        members.append(('b', 'RECOVERING'))
+        self._states(('ONLINE', 'PRIMARY'))
+        self.app.member_view()
+        self.configuration_manager.remove_system_override.\
+            assert_called_once_with(gr_service.CNF_LAST)
+        # Out of the group: the mark, whatever it is, stays for the
+        # recovery to read.
+        self.configuration_manager.remove_system_override.reset_mock()
+        self.configuration_manager.apply_system_override.reset_mock()
+        self._states(('OFFLINE', None))
+        self.assertTrue(self.app.member_view().down)
+        self.configuration_manager.apply_system_override.assert_not_called()
+        self.configuration_manager.remove_system_override.assert_not_called()
+        self.assertTrue(self.app.was_last_standing())
+
     def test_complete_cluster_starts_on_boot(self):
         # Whatever command the first member was started with: nothing to
         # undo on it.

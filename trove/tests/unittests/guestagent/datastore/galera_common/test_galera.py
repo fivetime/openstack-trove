@@ -572,6 +572,42 @@ class TestMariaDB(trove_testtools.TestCase):
                 getattr(mariadb_manager.Manager, name)).parameters)
             self.assertEqual(sent | {'self', 'context'}, parameters, name)
 
+    def test_a_cluster_member_starts_through_the_wrapper(self):
+        # The wrapper recovers the position after a crash, the way
+        # galera_recovery does, before the server; it is written where the
+        # container mounts the configuration, and the image's entrypoint
+        # runs it.
+        app = mariadb_service.MariaDBApp(mock.Mock(), mock.Mock())
+        app.is_cluster_member = mock.Mock(return_value=True)
+        os_ = mock.patch.object(mariadb_service, 'operating_system').start()
+        with mock.patch.object(mysql_service.BaseMySqlApp, 'start_db') as up:
+            app.start_db(ds_version='11.4', command='--defaults-file=/x')
+            app.start_db(ds_version='11.4',
+                         command='/etc/mysql/galera-start --defaults-file=/x')
+            # Not a cluster member: as it was.
+            app.is_cluster_member.return_value = False
+            app.start_db(ds_version='11.4', command='--defaults-file=/x')
+        self.assertEqual(
+            ['/etc/mysql/galera-start --defaults-file=/x',
+             '/etc/mysql/galera-start --defaults-file=/x',
+             '--defaults-file=/x'],
+            [c[1]['command'] for c in up.call_args_list])
+        os_.write_file.assert_called_once_with(
+            '/etc/mysql/galera-start', mariadb_service.START_WRAPPER_SCRIPT,
+            as_root=True)
+        self.assertIn('--wsrep-recover', mariadb_service.START_WRAPPER_SCRIPT)
+        self.assertIn('exec mariadbd "$@"',
+                      mariadb_service.START_WRAPPER_SCRIPT)
+
+    def test_the_container_command_leaves_the_wrapper_out(self):
+        app = mariadb_service.MariaDBApp(mock.Mock(), mock.Mock())
+        app.docker_client.containers.get.return_value.attrs = {'Config': {
+            'Cmd': ['/etc/mysql/galera-start', '--defaults-file=/x',
+                    '--datadir=/d', '--wsrep-new-cluster']}}
+        self.assertEqual('--defaults-file=/x --datadir=/d',
+                         app._container_command())
+        self.assertTrue(app.started_with_bootstrap())
+
     def test_cluster_healthcheck(self):
         app = mariadb_service.MariaDBApp(mock.Mock(), mock.Mock())
         single = dict(mariadb_service.MariaDBApp.HEALTHCHECK)
@@ -966,6 +1002,7 @@ class TestRecoveryView(trove_testtools.TestCase):
             lambda path, **k: self.files[path])
         self.os.write_file.side_effect = (
             lambda path, data, **k: self.files.__setitem__(path, data))
+        self.os.exists.side_effect = lambda path, **k: path in self.files
         # The database port is closed: the server waits for a primary view.
         self.app.execute_sql = mock.Mock(side_effect=Exception('refused'))
         mock.patch.object(galera_service.time, 'sleep').start()
@@ -1011,6 +1048,32 @@ class TestRecoveryView(trove_testtools.TestCase):
             tail=galera_service.LOG_TAIL, since=1791479550)
         self.assertIsNone(galera_service._epoch(None))
         self.assertIsNone(galera_service._epoch('junk'))
+
+    def test_the_position_comes_from_the_error_log_file_when_there_is_one(
+            self):
+        # The server logs into the data volume; only the lines of the
+        # container's current run count, the earlier ones are where the
+        # member stood then.
+        self.container.attrs['State'] = {
+            'StartedAt': '2026-10-09T13:31:00.000000000Z'}
+        self.files['/var/lib/mysql/mysqld.log'] = (
+            '2026-10-09T13:20:00.1Z 0 [Note] [Galera] Setting GCS initial '
+            'position to eb210882-c280-11f1-9bce-6fce320fdaa0:20\n'
+            '2026-10-09T13:31:05.2Z 0 [Note] [Galera] Setting GCS initial '
+            'position to eb210882-c280-11f1-9bce-6fce320fdaa0:-1\n'
+            '2026-10-09T13:31:06.3Z 0 [Note] [Galera] Recovered position: '
+            'eb210882-c280-11f1-9bce-6fce320fdaa0:33\n')
+        self.assertEqual(('eb210882-c280-11f1-9bce-6fce320fdaa0', 33),
+                         self.app._position())
+        self.container.logs.assert_not_called()
+        # Only an earlier run's: not a position.
+        self.files['/var/lib/mysql/mysqld.log'] = (
+            '2026-10-09T13:20:00.1Z 0 [Note] [Galera] Setting GCS initial '
+            'position to eb210882-c280-11f1-9bce-6fce320fdaa0:20\n')
+        self.app._recover_position = mock.Mock(return_value=None)
+        self.files['/var/lib/mysql/data/grastate.dat'] = GRASTATE.replace(
+            'seqno:   36', 'seqno:   -1')
+        self.assertIsNone(self.app._position())
 
     def test_a_logged_minus_one_is_no_position(self):
         # What a server logs that does not know either, as MariaDB does
@@ -1295,7 +1358,8 @@ class TestRecoveryRun(trove_testtools.TestCase):
         run = self.app.docker_client.containers.run
         args, kwargs = run.call_args
         self.assertEqual(['--defaults-file=/etc/mysql/my.cnf',
-                          '--datadir=/var/lib/mysql/data', '--wsrep-recover'],
+                          '--datadir=/var/lib/mysql/data', '--wsrep-recover',
+                          '--log-error=/dev/stderr'],
                          args[1])
         self.assertEqual('mariadbd', kwargs['entrypoint'])
         self.assertEqual('1001:1001', kwargs['user'])
