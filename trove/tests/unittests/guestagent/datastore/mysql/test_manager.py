@@ -39,7 +39,7 @@ class TestMySqlManager(trove_testtools.TestCase):
             side_effect=lambda log_name, owner, **kwargs:
                 '/var/lib/mysql/data/mysql-%s.log' % log_name)
         self.mysql_manager.validate_log_file = mock.Mock(
-            return_value='/var/log/mysqld.log')
+            return_value='/var/lib/mysql/mysqld.log')
 
         log_defs = self.mysql_manager.get_datastore_log_defs()
 
@@ -49,7 +49,7 @@ class TestMySqlManager(trove_testtools.TestCase):
             self.mysql_manager.GUEST_LOG_DEFS_GENERAL_LABEL, expected_owner,
             group=expected_owner, datastore_dir='/var/lib/mysql/data')
         self.mysql_manager.validate_log_file.assert_called_once_with(
-            '/var/log/mysqld.log', expected_owner, group=expected_owner)
+            '/var/lib/mysql/mysqld.log', expected_owner, group=expected_owner)
         for log_def in log_defs.values():
             self.assertEqual(
                 expected_owner,
@@ -71,7 +71,7 @@ class TestMySqlManager(trove_testtools.TestCase):
             side_effect=lambda log_name, owner, **kwargs:
                 '/var/lib/mysql/data/mysql-%s.log' % log_name)
         self.mysql_manager.validate_log_file = mock.Mock(
-            return_value='/var/log/mysqld.log')
+            return_value='/var/lib/mysql/mysqld.log')
 
         self.mysql_manager.get_datastore_log_defs()
 
@@ -79,4 +79,4 @@ class TestMySqlManager(trove_testtools.TestCase):
             self.mysql_manager.GUEST_LOG_DEFS_GENERAL_LABEL, '1100',
             group='1101', datastore_dir='/var/lib/mysql/data')
         self.mysql_manager.validate_log_file.assert_called_once_with(
-            '/var/log/mysqld.log', '1100', group='1101')
+            '/var/lib/mysql/mysqld.log', '1100', group='1101')

@@ -6,6 +6,8 @@ socket = /var/run/mysqld/mysqld.sock
 nice = 0
 
 [mysqld]
+# In the data volume, so that the error log can be read and published.
+log_error = /var/lib/mysql/mysqld.log
 port = 3306
 basedir = /usr
 datadir = /var/lib/mysql/data

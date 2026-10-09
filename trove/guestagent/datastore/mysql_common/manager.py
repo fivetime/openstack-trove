@@ -34,6 +34,9 @@ from trove.guestagent.utils import mysql as mysql_util
 from trove.instance import service_status
 
 LOG = logging.getLogger(__name__)
+# Where the server writes its error log: in the data volume, which the
+# container mounts from the host as is.
+ERROR_LOG_FILE = '/var/lib/mysql/mysqld.log'
 CONF = cfg.CONF
 
 
@@ -137,7 +140,10 @@ class MySqlManager(manager.Manager):
         general_log_file = self.build_log_file_name(
             self.GUEST_LOG_DEFS_GENERAL_LABEL, owner, group=group,
             datastore_dir=datastore_dir)
-        error_log_file = self.validate_log_file('/var/log/mysqld.log', owner,
+        # The server runs in a container that mounts /var/lib/mysql as is
+        # and logs to its stderr unless log_error points into that volume
+        # (the configuration templates do): the file is there on the host.
+        error_log_file = self.validate_log_file(ERROR_LOG_FILE, owner,
                                                 group=group)
         slow_query_log_file = self.build_log_file_name(
             self.GUEST_LOG_DEFS_SLOW_QUERY_LABEL, owner, group=group,

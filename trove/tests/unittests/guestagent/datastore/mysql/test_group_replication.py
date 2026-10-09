@@ -307,8 +307,10 @@ class TestGroupReplicationApp(trove_testtools.TestCase):
         self.assertEqual(['STOP GROUP_REPLICATION', 'START GROUP_REPLICATION'],
                          [s for s in self.sql if 'GROUP_REPLICATION' in s])
         self.sql.clear()
+        # Stopped first all the same: a member that failed to join by
+        # itself when it started may be left half way.
         self.app.rejoin_group('OFFLINE')
-        self.assertEqual(['START GROUP_REPLICATION'],
+        self.assertEqual(['STOP GROUP_REPLICATION', 'START GROUP_REPLICATION'],
                          [s for s in self.sql if 'GROUP_REPLICATION' in s])
         self.sql.clear()
         self.app.bootstrap_group()

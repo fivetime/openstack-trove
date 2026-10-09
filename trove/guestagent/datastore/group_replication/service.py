@@ -353,12 +353,14 @@ class GroupReplicationAppMixin(galera_service.GaleraAppMixin):
         return bool(rows and rows[0][0])
 
     def rejoin_group(self, state):
-        """Join the group that is up. A member in ERROR has to stop
-        first: the server refuses to start it again before.
+        """Join the group that is up. Stopped first, whatever the state:
+        a member in ERROR has to, the server refuses to start it again
+        before, and a member that failed to join by itself when it
+        started (group_replication_start_on_boot) may be left half way;
+        stopping an OFFLINE member does nothing.
         """
         LOG.info("Rejoining the group from %s.", state)
-        if state == 'ERROR':
-            self.execute_sql("STOP GROUP_REPLICATION")
+        self.execute_sql("STOP GROUP_REPLICATION")
         self._start_group_replication()
 
     def bootstrap_group(self):
