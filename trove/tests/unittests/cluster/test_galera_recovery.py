@@ -144,11 +144,25 @@ class GaleraRecoveryTest(trove_testtools.TestCase):
         self._check_at(100)
         self.assertEqual(['i1'], self._bootstraps())
 
-    def test_a_member_without_a_position_never_forms_the_cluster(self):
+    def test_a_member_whose_position_is_not_known_yet_holds_everyone(self):
+        # It may hold the most: its recovery run comes after the grace
+        # period. Nothing is decided until it answers its position.
         self.answers['i1'] = _answer('10.0.0.1', seqno=None)
-        self._check_at(0)
-        self._check_at(100)
-        self.assertEqual(['i2'], self._bootstraps())
+        with mock.patch.object(recovery.LOG, 'info') as info:
+            self._check_at(0)
+            self._check_at(100)
+        self.assertEqual([], self._bootstraps())
+        reasons = [c[0][-1] for c in info.call_args_list
+                   if c[0][0].startswith('Cluster %s, member')]
+        self.assertEqual(['10.0.0.1'] * 3, reasons)
+        # Neither does the last to leave, while another's is unknown.
+        self.answers['i3'] = _answer('10.0.0.3', safe=True)
+        self._check_at(200)
+        self.assertEqual([], self._bootstraps())
+        # Known: the one holding the most goes.
+        self.answers['i1'] = _answer('10.0.0.1', seqno=12)
+        self._check_at(300)
+        self.assertEqual(['i1'], self._bootstraps())
 
     def test_nobody_knowing_a_position_nobody_forms_the_cluster(self):
         for i in ('i1', 'i2', 'i3'):
@@ -201,13 +215,16 @@ class GaleraRecoveryTest(trove_testtools.TestCase):
         # Everyone is here and i1 holds the most: i1 goes, not i3.
         self.assertEqual(['i1'], self._bootstraps())
 
-    def test_the_last_to_leave_without_a_position_is_not_trusted(self):
+    def test_the_last_to_leave_without_a_position_waits_for_it(self):
         self.recovery.conf.cluster_bootstrap_needs_all_members = True
         del self.answers['i1']
         self.answers['i3'] = _answer('10.0.0.3', safe=True, seqno=None)
         self._check_at(0)
         self._check_at(100)
         self.assertEqual([], self._bootstraps())
+        self.answers['i3'] = _answer('10.0.0.3', safe=True, seqno=10)
+        self._check_at(200)
+        self.assertEqual(['i3'], self._bootstraps())
 
     def test_no_majority_waits(self):
         del self.answers['i2']

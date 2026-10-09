@@ -88,6 +88,10 @@ class GaleraClusterRecovery(object):
         position = answer.get('position') if answer else None
         return tuple(position) if position else None
 
+    def _position_text(self, answer):
+        position = self._position(answer)
+        return '%s:%s' % position if position else 'unknown'
+
     @staticmethod
     def _not_ahead(position, other):
         if position is None:
@@ -161,6 +165,21 @@ class GaleraClusterRecovery(object):
 
     def _decide(self, context, db_cluster, members, views):
         cluster_id = db_cluster.id
+        # A member here whose position is not known yet (its recovery
+        # run comes after the grace period) may hold the most: nothing is
+        # decided until every member here answers its position.
+        unknown = [answer.get('ip') for _m, answer in views
+                   if answer and answer.get('waiting') and
+                   self._position(answer) is None]
+        if unknown:
+            for member, answer in views:
+                if answer and answer.get('waiting'):
+                    LOG.info("Cluster %s, member %s (%s) at %s: wait (the "
+                             "position of %s is not known yet).",
+                             cluster_id, member.id, answer.get('ip'),
+                             self._position_text(answer),
+                             ', '.join(unknown))
+            return
         # The last member to leave the cluster holds everything it
         # committed, and Galera marked it so: it forms the cluster again
         # without the others, unless one of them holds more, which would
@@ -171,8 +190,6 @@ class GaleraClusterRecovery(object):
                     answer.get('safe_to_bootstrap')):
                 continue
             position = self._position(answer)
-            if position is None:
-                continue
             ahead = [a.get('ip') for m, a in views
                      if a and m is not member and
                      not self._not_ahead(self._position(a), position)]
@@ -194,19 +211,14 @@ class GaleraClusterRecovery(object):
             if not answer or not answer.get('waiting'):
                 continue
             position = self._position(answer)
-            if position is None:
-                # Not knowing what it holds, it never forms the cluster.
-                action, reason = cluster_probe.WAIT, 'position unknown'
-            else:
-                action, reason = cluster_probe.decide(
-                    answer.get('ip'), position,
-                    self._peers_of(views, member), len(members),
-                    self._not_ahead,
-                    self.conf.cluster_bootstrap_needs_all_members)
+            action, reason = cluster_probe.decide(
+                answer.get('ip'), position,
+                self._peers_of(views, member), len(members),
+                self._not_ahead,
+                self.conf.cluster_bootstrap_needs_all_members)
             LOG.info("Cluster %s, member %s (%s) at %s: %s (%s).",
                      cluster_id, member.id, answer.get('ip'),
-                     '%s:%s' % position if position else 'unknown',
-                     action, reason)
+                     self._position_text(answer), action, reason)
             if action == cluster_probe.BOOTSTRAP and chosen is None:
                 chosen = member
         if chosen is None:
