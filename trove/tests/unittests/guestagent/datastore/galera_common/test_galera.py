@@ -1034,12 +1034,13 @@ class TestRecoveryView(trove_testtools.TestCase):
         self.assertEqual((uuid, 8), self.app._position())
         self.assertEqual((uuid, 8), self.app._position())
 
-        # Run once, with the database stopped and the container started
+        # Run once, with the server killed and the container started
         # again after; the answer is kept while the member waits.
         self.assertEqual(1, run.call_count)
         self.assertIn('--wsrep-recover', run.call_args[0][1])
         self.assertEqual('mysqld', run.call_args[1]['entrypoint'])
-        self.assertEqual([('stop_db',)], self.app.calls)
+        self.assertEqual([], self.app.calls)
+        self.container.kill.assert_called_once_with()
         self.container.start.assert_called_once_with()
         # In a primary component again: forgotten, so a later wait asks
         # again.
@@ -1286,8 +1287,10 @@ class TestRecoveryRun(trove_testtools.TestCase):
     def test_recovery_run(self):
         self.assertEqual(('cd7ef434-c283-11f1-b9c7-ff3171d9ab0e', 8),
                          self.app._position())
-        # The database was stopped for it and started again after.
-        self.assertEqual([('stop_db',)], self.app.calls)
+        # The server was killed for it (it does not answer a stop while
+        # it waits) and the container started again after.
+        self.assertEqual([], self.app.calls)
+        self.container.kill.assert_called_once_with()
         self.container.start.assert_called_once()
         run = self.app.docker_client.containers.run
         args, kwargs = run.call_args

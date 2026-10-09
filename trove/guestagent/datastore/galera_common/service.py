@@ -565,7 +565,9 @@ class GaleraAppMixin(object):
                  "the member.")
         position = None
         try:
-            self.stop_db()
+            # Killed, as before forming the cluster again: a server that
+            # waits for a primary component does not answer a stop.
+            self._kill_db()
             output = encodeutils.safe_decode(
                 self.docker_client.containers.run(
                     self._image(), command + ['--wsrep-recover'],
