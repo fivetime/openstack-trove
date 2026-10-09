@@ -599,6 +599,16 @@ class TestMariaDB(trove_testtools.TestCase):
         self.assertIn('exec mariadbd "$@"',
                       mariadb_service.START_WRAPPER_SCRIPT)
 
+    def test_the_wrapper_is_written_as_it_reads(self):
+        # The script holds a sed back-reference; in a plain string "\\1" is
+        # the octal escape for a control character, which the position was
+        # replaced with, and the server started from an invalid position.
+        script = mariadb_service.START_WRAPPER_SCRIPT
+        self.assertNotRegex(script, '[\\x00-\\x08\\x0b-\\x1f]')
+        self.assertIn("\\).*/\\1/p'", script)
+        self.assertTrue(script.startswith('#!/bin/sh\n'))
+        self.assertTrue(script.endswith('exec mariadbd "$@"\n'))
+
     def test_the_container_command_leaves_the_wrapper_out(self):
         app = mariadb_service.MariaDBApp(mock.Mock(), mock.Mock())
         app.docker_client.containers.get.return_value.attrs = {'Config': {

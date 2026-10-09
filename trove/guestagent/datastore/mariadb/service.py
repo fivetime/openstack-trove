@@ -43,7 +43,7 @@ LOG = logging.getLogger(__name__)
 # and handed to the server. In /etc/mysql, which the container mounts; the
 # image's entrypoint runs what it is given when that is not the server.
 START_WRAPPER = '/etc/mysql/galera-start'
-START_WRAPPER_SCRIPT = """#!/bin/sh
+START_WRAPPER_SCRIPT = r"""#!/bin/sh
 # Written by the Trove guest agent: start a Galera member from the
 # position the storage engine holds, as galera_recovery does. What the
 # recovery run said is kept in galera-recovery.log beside the data
