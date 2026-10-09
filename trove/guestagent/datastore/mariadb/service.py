@@ -45,19 +45,27 @@ LOG = logging.getLogger(__name__)
 START_WRAPPER = '/etc/mysql/galera-start'
 START_WRAPPER_SCRIPT = """#!/bin/sh
 # Written by the Trove guest agent: start a Galera member from the
-# position the storage engine holds, as galera_recovery does.
+# position the storage engine holds, as galera_recovery does. What the
+# recovery run said is kept in galera-recovery.log beside the data
+# directory.
 datadir=/var/lib/mysql/data
 for arg in "$@"; do
     case "$arg" in --datadir=*) datadir="${arg#--datadir=}" ;; esac
 done
 grastate="$datadir/grastate.dat"
 if [ -f "$grastate" ] && grep -q '^seqno: *-1' "$grastate"; then
-    position=$(mariadbd "$@" --wsrep-recover --log-error=/dev/stderr 2>&1 \
-        | sed -n 's/.*Recovered position: *\([0-9a-f-]*:[0-9-]*\).*/\1/p' \
-        | tail -n 1)
+    log="$(dirname "$datadir")/galera-recovery.log"
+    echo "galera-start: recovering the position, $(date -u)" > "$log"
+    mariadbd "$@" --wsrep-recover --log-error="$log" >> "$log" 2>&1
+    echo "galera-start: the recovery run exited with $?" >> "$log"
+    pattern='s/.*Recovered position: *\([0-9a-f-]*:[0-9-]*\).*/\1/p'
+    position=$(sed -n "$pattern" "$log" | tail -n 1)
     if [ -n "$position" ]; then
         echo "galera-start: recovered position $position"
         set -- "$@" "--wsrep_start_position=$position"
+    else
+        echo "galera-start: no position recovered, the end of $log:"
+        tail -n 8 "$log"
     fi
 fi
 exec mariadbd "$@"
