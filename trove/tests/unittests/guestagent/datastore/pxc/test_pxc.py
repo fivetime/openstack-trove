@@ -147,9 +147,9 @@ class TestPXCDatastoreWiring(trove_testtools.TestCase):
             self.assertEqual([3307], [port for ports in conf.cluster_tcp_ports
                                       for port in ports])
 
-    def test_group_replication_forms_the_group_from_a_majority(self):
-        self.assertFalse(CONF.mysql.cluster_bootstrap_needs_all_members)
-        self.assertFalse(CONF.percona.cluster_bootstrap_needs_all_members)
+    def test_group_replication_needs_every_member_too(self):
+        self.assertTrue(CONF.mysql.cluster_bootstrap_needs_all_members)
+        self.assertTrue(CONF.percona.cluster_bootstrap_needs_all_members)
 
     def test_cluster_options(self):
         self.assertTrue(CONF.pxc.cluster_support)

@@ -797,11 +797,11 @@ def _with_cluster_probe_and_entry(opts, deprecated_prefix=None,
         opt(cfg.BoolOpt, 'cluster_bootstrap_needs_all_members',
             default=needs_all,
             help='Form the cluster again only when every member answers, '
-                 'instead of a majority. A Galera cluster goes on '
-                 'committing after members leave it, so a majority may '
-                 'lack what the last member to leave holds: Galera '
-                 'clusters need every member, unless one of them was the '
-                 'last to leave (safe_to_bootstrap).'),
+                 'instead of a majority. A cluster goes on committing '
+                 'after members leave it on purpose, so a majority may '
+                 'lack what the last member to leave holds: every member '
+                 'is needed, unless one of them was the last to leave '
+                 '(Galera marks it with safe_to_bootstrap).'),
         opt(cfg.IntOpt, 'cluster_bootstrap_jitter', default=5,
             help='Up to this many seconds of waiting before forming the '
                  'cluster again, against two members doing it at once.'),
@@ -826,8 +826,10 @@ def _with_cluster_probe_and_entry(opts, deprecated_prefix=None,
 # after the Percona XtraDB Cluster options are built from the MySQL ones,
 # so that PXC keeps its Galera clusters.
 def _with_group_replication(opts):
+    # Every member too: a group goes on committing after members leave it
+    # on purpose, so a majority may lack what the last member held.
     opts = _with_cluster_probe_and_entry(
-        opts, deprecated_prefix='group_replication_')
+        opts, deprecated_prefix='group_replication_', needs_all=True)
     group_replication = [
         cfg.BoolOpt('cluster_support', default=True,
                     help='Enable clusters to be created and managed.'),
