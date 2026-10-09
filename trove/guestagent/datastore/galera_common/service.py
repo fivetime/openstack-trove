@@ -607,7 +607,7 @@ class GaleraAppMixin(object):
             "/var/lib/mysql": {"bind": "/var/lib/mysql", "mode": "rw"},
         }
 
-    def _position(self):
+    def _position(self, recover=True):
         """Where the member stands: (state uuid, seqno), None when not
         known. As the server last logged it (right after a crash,
         grastate.dat says -1 and Percona XtraDB Cluster logs what it
@@ -626,6 +626,9 @@ class GaleraAppMixin(object):
         if seqno >= 0 and state.get('uuid'):
             return (state['uuid'], seqno)
         if not state:
+            return None
+        if not recover:
+            LOG.debug("The position takes a recovery run; not yet.")
             return None
         return self._recover_position()
 
@@ -675,7 +678,14 @@ class GaleraAppMixin(object):
         else:
             in_group = False
             waiting = self._waiting_for_primary()
-            position = self._position()
+            # A recovery run stops the server: not before the member has
+            # waited the grace period, as a server that is starting (after
+            # a crash, its own recovery takes a while) looks the same and
+            # may be about to join a component by itself.
+            position = self._position(recover=self._waited_long_enough(
+                waiting))
+        if in_group:
+            self._waiting_since = None
         # The last member to leave the cluster holds everything it
         # committed, and Galera marks it so.
         safe = (not in_group and
@@ -684,6 +694,22 @@ class GaleraAppMixin(object):
                 'waiting': waiting, 'position': position,
                 'safe_to_bootstrap': safe,
                 'bootstrapped': self.started_with_bootstrap()}
+
+    _waiting_since = None
+
+    def _waited_long_enough(self, waiting):
+        """Whether the member has waited for a primary component for the
+        grace period, by this agent's clock: the container being started
+        again and again meanwhile does not reset it.
+        """
+        if not waiting:
+            self._waiting_since = None
+            return False
+        now = time.monotonic()
+        if self._waiting_since is None:
+            self._waiting_since = now
+        conf = CONF.get(CONF.datastore_manager or 'mysql')
+        return now - self._waiting_since >= conf.cluster_recovery_grace
 
     def rejoin_group(self, state):
         # A member that waits for a primary component joins one as soon

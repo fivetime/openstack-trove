@@ -1110,6 +1110,31 @@ class TestRecoveryView(trove_testtools.TestCase):
         view = self.app.recovery_view()
         self.assertEqual((False, True), (view['in_group'], view['waiting']))
 
+    def test_the_recovery_run_waits_for_the_grace_period(self):
+        # A server that crashed and is starting looks like one waiting:
+        # it is not stopped for a recovery run before the grace period.
+        self.container.logs.return_value = b'nothing\n'
+        self.files['/var/lib/mysql/data/grastate.dat'] = GRASTATE.replace(
+            'seqno:   36', 'seqno:   -1')
+        run = self.app.docker_client.containers.run
+        run.return_value = (b'[Note] WSREP: Recovered position: '
+                            b'eb210882-c280-11f1-9bce-6fce320fdaa0:8\n')
+        with mock.patch.object(galera_service.time, 'monotonic',
+                               side_effect=[100, 130, 159, 160, 200]):
+            self.assertIsNone(self.app.recovery_view()['position'])
+            self.assertIsNone(self.app.recovery_view()['position'])
+            self.assertIsNone(self.app.recovery_view()['position'])
+            run.assert_not_called()
+            self.assertEqual(('eb210882-c280-11f1-9bce-6fce320fdaa0', 8),
+                             self.app.recovery_view()['position'])
+            run.assert_called_once()
+            # In a primary component: the wait is over; a later wait
+            # starts the grace period anew.
+            self.app.execute_sql = mock.Mock(side_effect=lambda sql: list(
+                _status().items()))
+            self.assertTrue(self.app.recovery_view()['in_group'])
+            self.assertIsNone(self.app._waiting_since)
+
     def test_rejoin_does_nothing(self):
         self.app.rejoin_group('Initialized')
         self.assertEqual([], self.app.calls)
