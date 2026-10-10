@@ -17,6 +17,7 @@ from oslo_log import log as logging
 import semantic_version
 from trove.common import cfg
 from trove.common import exception
+from trove.common import ssl
 from trove.guestagent.common import operating_system
 from trove.guestagent.datastore.group_replication import manager as \
     gr_manager
@@ -116,14 +117,18 @@ class BaseManager(manager.MySqlManager):
 
         return super(BaseManager, self).disable_ssl_certificate()
 
-    def _get_enable_ssl_overrides(self):
+    def _get_enable_ssl_overrides(self, mode=None):
         files = self._get_ssl_files()
         overrides = {
             'ssl_cert': files['certificate'],
             'ssl_key': files['private_key'],
             'ssl_ca': files['ca'],
             'tls_version': self._get_default_tls_versions(),
-            'require_secure_transport': 'ON'
+            # Basic offers TLS and leaves plain connections allowed, as the
+            # users get no REQUIRE clause either; enforced and mtls refuse
+            # plain connections server-wide, for users created later too.
+            'require_secure_transport': (
+                'OFF' if mode == ssl.MODE_BASIC else 'ON')
         }
         return overrides
 

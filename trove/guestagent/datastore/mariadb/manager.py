@@ -164,7 +164,7 @@ class Manager(galera_manager.GaleraManagerMixin, manager.MySqlManager):
             'tls_version': ''
         }
 
-    def _get_enable_ssl_overrides(self):
+    def _get_enable_ssl_overrides(self, mode=None):
         files = self._get_ssl_files()
         return {
             'ssl_cert': files['certificate'],

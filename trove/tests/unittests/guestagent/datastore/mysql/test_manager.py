@@ -80,3 +80,39 @@ class TestMySqlManager(trove_testtools.TestCase):
             group='1101', datastore_dir='/var/lib/mysql/data')
         self.mysql_manager.validate_log_file.assert_called_once_with(
             '/var/lib/mysql/mysqld.log', '1100', group='1101')
+
+    def _enable_overrides(self, mode):
+        self.mysql_manager._get_ssl_files = mock.Mock(return_value={
+            'certificate': '/c', 'private_key': '/k', 'ca': '/a'})
+        self.mysql_manager._get_default_tls_versions = mock.Mock(
+            return_value='TLSv1.2,TLSv1.3')
+        return self.mysql_manager._get_enable_ssl_overrides(mode)
+
+    def test_basic_ssl_leaves_plain_connections_allowed(self):
+        # Basic offers TLS without requiring it.
+        overrides = self._enable_overrides('basic')
+        self.assertEqual('OFF', overrides['require_secure_transport'])
+        self.assertEqual('/c', overrides['ssl_cert'])
+
+    def test_enforced_and_mtls_ssl_require_secure_transport(self):
+        for mode in ('enforced', 'mtls'):
+            self.assertEqual(
+                'ON', self._enable_overrides(mode)['require_secure_transport'],
+                mode)
+
+    def test_enabling_ssl_writes_the_overrides_of_its_mode(self):
+        self.patch_conf_property('datastore_version', '8.4')
+        self.mysql_manager._get_ssl_files = mock.Mock(return_value={
+            'certificate': '/c', 'private_key': '/k', 'ca': '/a'})
+        self.mysql_manager._get_default_tls_versions = mock.Mock(
+            return_value='TLSv1.2,TLSv1.3')
+        self.mysql_manager.app.update_overrides = mock.Mock()
+        self.mysql_manager.app.update_client_overrides = mock.Mock()
+        self.mysql_manager.adm = mock.Mock()
+        self.mysql_manager.status = mock.Mock()
+        self.assertTrue(self.mysql_manager._enable_ssl_certificate_impl(
+            'basic'))
+        written = self.mysql_manager.app.update_overrides.call_args[0][0]
+        self.assertEqual('OFF', written['require_secure_transport'])
+        self.mysql_manager.adm.set_users_access_mode.assert_called_once_with(
+            'basic')

@@ -378,7 +378,7 @@ class MySqlManager(manager.Manager):
             "ca": f"{datadir}/ca.pem"
         }
 
-    def _get_enable_ssl_overrides(self):
+    def _get_enable_ssl_overrides(self, mode=None):
         files = self._get_ssl_files()
         return {
             'ssl_cert': files['certificate'],
@@ -391,7 +391,7 @@ class MySqlManager(manager.Manager):
         return {'ssl': 'on'}
 
     def _enable_ssl_certificate_impl(self, mode, apply_overrides=True):
-        overrides = self._get_enable_ssl_overrides()
+        overrides = self._get_enable_ssl_overrides(mode)
         self.app.update_overrides(overrides)
 
         client_overrides = self._get_enable_client_ssl_overrides()
