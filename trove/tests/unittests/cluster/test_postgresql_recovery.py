@@ -198,6 +198,7 @@ class RecoveryTestBase(trove_testtools.TestCase):
                         for i in self.IDS]
         self.answers = {}
         self.calls = []
+        self.shared = []
         self.guests = {}
 
         def guest(context, member):
@@ -218,6 +219,9 @@ class RecoveryTestBase(trove_testtools.TestCase):
                         lambda *a, _n=name, _i=member.id, **k:
                         self.calls.append((_n, _i) + a + (
                             (k,) if k else ())))
+                # Kept apart: told on every change of the set.
+                g.remember_sync_set.side_effect = (
+                    lambda *a, _i=member.id: self.shared.append((_i,) + a))
                 g.promote_member.side_effect = (
                     lambda members, mode, _i=member.id:
                     self.calls.append(('promote', _i, mode)) or
@@ -286,6 +290,24 @@ class HealthyRecoveryTest(RecoveryTestBase):
              'timeline': 1, 'sync_set': ['i2', 'i3'], 'lease_at': 0},
             self.recovery.memory['c1'])
         self.assertEqual({}, self.recovery.waiting_since)
+
+    def test_the_synchronous_set_is_kept_by_the_members(self):
+        # Told once, to every other member; not again while they keep it.
+        self._healthy()
+        self._check_at(0)
+        self.assertEqual([('i2', 'i1', ['i2', 'i3']),
+                          ('i3', 'i1', ['i2', 'i3'])], self.shared)
+        record = {'primary_id': 'i1', 'members': ['i2', 'i3']}
+        self.answers['i2']['sync_set'] = record
+        self.answers['i3']['sync_set'] = record
+        self.shared = []
+        self._check_at(30)
+        self.assertEqual([], self.shared)
+        # i3 stops streaming: the set changes, and both are told.
+        self.answers['i1']['standbys'].pop('i3')
+        self._check_at(60)
+        self.assertEqual([('i2', 'i1', ['i2']), ('i3', 'i1', ['i2'])],
+                         self.shared)
 
     def test_a_new_primary_is_not_judged_by_standbys_still_on_the_old(self):
         # Just promoted: the other standby still follows the old primary
@@ -554,6 +576,48 @@ class FailoverTest(RecoveryTestBase):
         self._check_at(130)
         self.assertEqual(['i2'], self._promotions())
 
+    def _four_members_primary_gone(self, kept):
+        # i4 answers without a position (it was not streaming when the
+        # primary died, and cannot take over); the task manager
+        # restarted, so the set is only what the members keep.
+        self.members.append(mock.Mock(id='i4', task_status=InstanceTasks.NONE))
+        self.answers = {
+            'i1': None,
+            'i2': standby('10.0.0.2', status=None, disconnected_for=100,
+                          lsn=1500, self_id='i2'),
+            'i3': standby('10.0.0.3', status=None, disconnected_for=100,
+                          lsn=1200, self_id='i3'),
+            'i4': standby('10.0.0.4', status=None, disconnected_for=100,
+                          lsn=None, self_id='i4')}
+        for member_id, record in kept.items():
+            self.answers[member_id]['sync_set'] = record
+
+    def test_the_synchronous_set_kept_by_the_members(self):
+        # Without the kept set, i4 would have to answer; with it (i2
+        # and i3 were the ones streaming), i2 takes over.
+        record = {'primary_id': 'i1', 'members': ['i2', 'i3']}
+        self._four_members_primary_gone({'i2': record, 'i3': record})
+        self._check_at(0)
+        self._check_at(100)
+        self.assertEqual(['i2'], self._promotions())
+
+    def test_a_kept_set_of_another_primary_says_nothing(self):
+        record = {'primary_id': 'i9', 'members': ['i2', 'i3']}
+        self._four_members_primary_gone({'i2': record, 'i3': record})
+        self._check_at(0)
+        self._check_at(100)
+        self.assertEqual([], self._promotions())
+
+    def test_the_kept_sets_together(self):
+        # i3 missed the update that took i4 out of the set: the sets
+        # together still name i4, and the failover waits for it.
+        self._four_members_primary_gone({
+            'i2': {'primary_id': 'i1', 'members': ['i2', 'i3']},
+            'i3': {'primary_id': 'i1', 'members': ['i2', 'i3', 'i4']}})
+        self._check_at(0)
+        self._check_at(100)
+        self.assertEqual([], self._promotions())
+
     def test_async_with_the_best_standby_too_far_behind(self):
         self._healthy()
         self.answers['i1']['lsn'] = 1500 + MiB
@@ -579,7 +643,8 @@ class FailoverTest(RecoveryTestBase):
         # i3 alone is on the latest timeline; the synchronous set is not
         # known, so i2 would have to be a candidate too: nothing.
         self.assertEqual([], self._promotions())
-        self.recovery.memory['c1'] = {'sync_set': ['i3']}
+        self.recovery.memory['c1'] = {'primary_id': 'i1',
+                                      'sync_set': ['i3']}
         self._check_at(130)
         self.assertEqual(['i3'], self._promotions())
 

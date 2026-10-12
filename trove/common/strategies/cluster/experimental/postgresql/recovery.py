@@ -222,13 +222,15 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
         answer = top.answer(leader)
         mem = self.memory.setdefault(cluster_id, {})
         mem.pop('failing_since', None)
+        sync_set = sorted(i for i, s in
+                          (answer.get('standbys') or {}).items()
+                          if s.get('state') == topology.STREAMING and
+                          i in top.ids)
         mem.update(primary_id=leader, primary_ip=answer.get('ip'),
                    lsn=answer.get('lsn'), timeline=answer.get('timeline'),
-                   sync_set=[i for i, s in
-                             (answer.get('standbys') or {}).items()
-                             if s.get('state') == topology.STREAMING and
-                             i in top.ids])
+                   sync_set=sync_set)
         self._renew_lease(context, cluster_id, leader)
+        self._share_sync_set(context, top, leader, sync_set)
         host = answer.get('ip')
         primary = {'id': leader, 'host': host}
         for member_id in top.reachable:
@@ -276,6 +278,37 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
                     self._slot_then(context, leader, member_id,
                                     'rejoin_cluster', primary)
 
+    def _share_sync_set(self, context, top, leader, sync_set):
+        """Every other member keeps the standbys the primary streams to,
+        told only when what it keeps differs: the set outlives both the
+        primary and the task manager's memory.
+        """
+        record = {'primary_id': leader, 'members': sync_set}
+        for member_id in top.reachable:
+            if member_id == leader:
+                continue
+            if top.answer(member_id).get('sync_set') != record:
+                self._tell(context, member_id, 'remember_sync_set', leader,
+                           sync_set)
+
+    @staticmethod
+    def _known_sync_set(mem, top, primary_id):
+        """The standbys the gone primary last reported streaming: as
+        the task manager remembers it, or else as the members keep it
+        (all of the sets they keep for that primary together, the safe
+        side when one missed an update); None when nobody knows.
+        """
+        if mem.get('primary_id') == primary_id and \
+                mem.get('sync_set') is not None:
+            return mem['sync_set']
+        kept = [top.answer(i).get('sync_set') for i in top.reachable]
+        kept = [k for k in kept
+                if k and k.get('primary_id') == primary_id and
+                k.get('members') is not None]
+        if not kept:
+            return None
+        return sorted(set().union(*(k['members'] for k in kept)))
+
     def _failover(self, context, db_cluster, top, primary_id=None,
                   host=None, why=''):
         """The primary is gone: the standby that holds the most takes
@@ -303,7 +336,8 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
             return
         failing_for = now - mem.get('failing_since', now)
         ok, quorum_why = topology.quorum(
-            top, candidate_ids, mode, mem.get('sync_set'), primary_id,
+            top, candidate_ids, mode,
+            self._known_sync_set(mem, top, primary_id), primary_id,
             failing_for, self.conf.cluster_failover_force_after)
         if not ok:
             LOG.warning("Cluster %s: the primary %s is gone (%s); waiting: "

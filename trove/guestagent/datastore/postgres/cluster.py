@@ -213,6 +213,15 @@ class PostgresqlClusterAppMixin(object):
     def primary_id(self):
         return self._read_cluster().get('primary_id')
 
+    def remember_sync_set(self, primary_id, members):
+        """The standbys the primary last reported streaming, kept here
+        for the task manager: when the primary is gone, they say which
+        standbys may hold its last acknowledged commits, even to a task
+        manager that has restarted meanwhile.
+        """
+        self._update_cluster(sync_set={'primary_id': primary_id,
+                                       'members': sorted(members)})
+
     def get_cluster_context(self):
         cluster = self._read_cluster()
         return {'replication_user': cluster.get('replication_user'),
@@ -633,6 +642,7 @@ class PostgresqlClusterAppMixin(object):
                   'role': view.role, 'mode': self.cluster_mode,
                   'self_id': self.self_id,
                   'primary_id': cluster.get('primary_id'),
+                  'sync_set': cluster.get('sync_set'),
                   'writable': bool(view.writable),
                   'fenced': self.fenced, 'lease_fresh': self.lease_fresh()}
         try:
@@ -857,6 +867,11 @@ class PostgresqlMemberMixin(cluster_member.ClusterMemberMixin):
 
     def renew_lease(self, context, ttl):
         self.app.renew_lease(ttl)
+
+    def remember_sync_set(self, context, primary_id, members):
+        LOG.info("The primary %s streams to %s.", primary_id,
+                 ', '.join(sorted(members)) or 'no standby')
+        self.app.remember_sync_set(primary_id, members)
 
     def fence_member(self, context):
         self.app.fence_member()
