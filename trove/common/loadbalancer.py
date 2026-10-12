@@ -211,13 +211,52 @@ def _pool_for_port(client, lb, port):
     return None
 
 
+def _ensure_listener(client, lb, name, port):
+    """The pool behind the listener on the port, made when the load
+    balancer has no such listener yet (a second listener of a cluster
+    that got one later).
+    """
+    pool_id = _pool_for_port(client, lb, port)
+    if pool_id is not None:
+        return pool_id
+    listener_name = '%s-%s' % (name, port)
+    LOG.info("Load balancer %s: adding the listener on port %s.", name,
+             port)
+    listener = client.create_listener(lb['id'], listener_name, port)
+    client.wait_active(lb['id'])
+    pool = client.create_pool(listener['id'], listener_name)
+    client.wait_active(lb['id'])
+    client.create_health_monitor(pool['id'], listener_name)
+    client.wait_active(lb['id'])
+    return pool['id']
+
+
+def _ensure_members(client, lb, name, pool_id, members):
+    current = client.list_members(pool_id)
+    wanted = {_member_key(m) for m in members}
+    if wanted != {_member_key(m) for m in current}:
+        LOG.info("Load balancer %s: members %s.", name,
+                 sorted('%s:%s' % (m['address'], m['protocol_port'])
+                        for m in members))
+        client.replace_members(pool_id, [
+            {'name': m.get('name', m['address']), 'address': m['address'],
+             'protocol_port': m['protocol_port'],
+             'subnet_id': m['subnet_id'], 'admin_state_up': True}
+            for m in members])
+        client.wait_active(lb['id'])
+
+
 def ensure_load_balancer(client, name, vip_subnet_id, members, port,
-                         provider=None, description=None):
+                         provider=None, description=None, listeners=None):
     """A load balancer of the name on the subnet, listening on the port,
     with these members and no others. Made whole whatever it was: not
     there, half made, failed, or with other members.
 
     :param members: [{'name', 'address', 'protocol_port', 'subnet_id'}]
+    :param listeners: more listeners, [(port, members)], each with its
+                      own pool and members (a read endpoint behind the
+                      standbys' read port, say); a listener the balancer
+                      lacks is added to it
     """
     provider = provider or CONF.load_balancer_provider
     lb = client.find_load_balancer(name)
@@ -251,20 +290,12 @@ def ensure_load_balancer(client, name, vip_subnet_id, members, port,
         client.create_health_monitor(pool['id'], name)
         client.wait_active(lb['id'])
         pool_id = pool['id']
-        current = []
-    else:
-        current = client.list_members(pool_id)
 
-    wanted = {_member_key(m) for m in members}
-    if wanted != {_member_key(m) for m in current}:
-        LOG.info("Load balancer %s: members %s.", name,
-                 sorted(m['address'] for m in members))
-        client.replace_members(pool_id, [
-            {'name': m.get('name', m['address']), 'address': m['address'],
-             'protocol_port': m['protocol_port'],
-             'subnet_id': m['subnet_id'], 'admin_state_up': True}
-            for m in members])
-        client.wait_active(lb['id'])
+    _ensure_members(client, lb, name, pool_id, members)
+    for other_port, other_members in listeners or []:
+        lb = client.get_load_balancer(lb['id'])
+        other_pool = _ensure_listener(client, lb, name, other_port)
+        _ensure_members(client, lb, name, other_pool, other_members)
     return client.get_load_balancer(lb['id'])
 
 

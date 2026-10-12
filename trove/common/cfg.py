@@ -1500,6 +1500,56 @@ postgresql_opts = [
                help='Character length of generated passwords.')
 ]
 
+
+# PostgreSQL clusters: a primary and its streaming standbys, with the probe,
+# the ready ports and the load balancer of the shared layer. The endpoint
+# sends writes to the primary (ready port 5433) and the read endpoint to
+# the standbys that keep up (read port 5434). The tenant chooses the
+# replication mode with the extended property replication_mode: async,
+# sync (the default: a commit waits for one standby, none when no standby
+# is there) or strict (a commit waits for one standby, always).
+def _with_postgresql_cluster(opts):
+    opts = _with_cluster_probe_and_entry(
+        opts, ready_port=5433, read_port=5434, load_balancer_port=5432,
+        read_load_balancer_port=5433, recovery_grace=30)
+    # Root of a cluster is enabled on the primary, and replicated.
+    opts = _with_cluster_strategy(
+        opts, 'postgresql', 'Postgresql', min_members=3,
+        # The ready port of the primary and the read port of a standby.
+        tcp_ports=["5433", "5434"],
+        root_controller='trove.extensions.common.service.'
+                        'ClusterWriterRootController')
+    postgresql_cluster = [
+        cfg.IntOpt('cluster_sync_fallback_grace', default=15,
+                   help='Seconds a primary in sync mode goes on without '
+                        'any standby streaming from it before it lets '
+                        'commits through without a standby; at least the '
+                        'WAL timeout.'),
+        cfg.IntOpt('cluster_failover_max_lag_bytes', default=1024 * 1024,
+                   help='Bytes of WAL a standby may lack, behind what the '
+                        'primary last reported, and still be made the '
+                        'primary of an async cluster when the primary '
+                        'fails. 0: any.'),
+        cfg.IntOpt('cluster_wal_timeout', default=10,
+                   help='Seconds without a message after which a primary '
+                        'and a standby give each other up '
+                        '(wal_sender_timeout, wal_receiver_timeout).'),
+        cfg.IntOpt('cluster_read_max_lag_bytes', default=16 * 1024 * 1024,
+                   help='Bytes of received WAL a standby may have yet to '
+                        'replay and still serve reads through the read '
+                        'endpoint.'),
+        cfg.StrOpt('cluster_max_slot_wal_keep_size', default='1GB',
+                   help='WAL a primary keeps for a standby that is not '
+                        'streaming (max_slot_wal_keep_size): a standby '
+                        'that is away longer is made again from a base '
+                        'backup.'),
+    ]
+    names = {opt.name for opt in postgresql_cluster}
+    return [opt for opt in opts if opt.name not in names] + postgresql_cluster
+
+
+postgresql_opts = _with_postgresql_cluster(postgresql_opts)
+
 # Apache CouchDB
 couchdb_group = cfg.OptGroup(
     'couchdb', title='CouchDB options',

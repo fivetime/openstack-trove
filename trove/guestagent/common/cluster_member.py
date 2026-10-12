@@ -51,10 +51,16 @@ class ClusterMemberMixin(object):
             context, packages, databases, memory_mb, users, device_path,
             mount_point, backup_info, config_contents, root_password,
             overrides, cluster_config, snapshot, ds_version=ds_version)
+        self.keep_cluster_mode_of(cluster_config)
+
+    def keep_cluster_mode_of(self, cluster_config):
+        """The mode the member was created with, kept for the task
+        manager to set the cluster up with; the members of a grown
+        cluster get the cluster's. For a manager whose ``do_prepare``
+        does not call this mixin's.
+        """
         key = self.CLUSTER_MODE_KEY
         if key and cluster_config and cluster_config.get(key):
-            # For the task manager to set the cluster up with; the
-            # members of a grown cluster get the cluster's.
             self.app.keep_cluster_mode(cluster_config[key])
 
     def get_cluster_context(self, context):

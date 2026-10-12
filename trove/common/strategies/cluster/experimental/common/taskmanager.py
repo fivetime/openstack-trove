@@ -26,6 +26,7 @@ from trove.common.exception import TroveError
 from trove.common.i18n import _
 from trove.common import loadbalancer
 from trove.common.strategies.cluster import base as cluster_base
+from trove.extensions.common import models as ext_models
 from trove.instance.models import DBInstance
 from trove.instance import tasks as inst_tasks
 
@@ -73,27 +74,38 @@ class ClusterEntryTasksMixin(object):
         raise TroveError(_("Member %(id)s has no port on the user's "
                            "network.") % {'id': instance.id})
 
-    def _load_balancer_members(self, context, instances):
+    def _load_balancer_members(self, context, instances, port=None):
+        """The members, on their ready port by default."""
         conf = CONF.get(self.datastore_version.manager)
         members = []
         for instance in instances:
             address = self.get_ip(instance)
             members.append({
                 'name': instance.id, 'address': address,
-                'protocol_port': conf.cluster_ready_port,
+                'protocol_port': port or conf.cluster_ready_port,
                 'subnet_id': self._member_subnet_id(context, instance,
                                                     address)})
         return members
 
     def _sync_load_balancer(self, context, cluster_id, instances):
-        """The load balancer of the cluster, with these members."""
+        """The load balancer of the cluster, with these members: the
+        endpoint in front of their ready port and, for a datastore whose
+        conf has a read port, the read endpoint in front of it.
+        """
         conf = CONF.get(self.datastore_version.manager)
         members = self._load_balancer_members(context, instances)
+        listeners = []
+        read_port = getattr(conf, 'cluster_read_port', 0)
+        read_lb_port = getattr(conf, 'cluster_read_load_balancer_port', 0)
+        if read_port and read_lb_port:
+            listeners.append((read_lb_port, [
+                dict(member, protocol_port=read_port) for member in members]))
         loadbalancer.ensure_load_balancer(
             loadbalancer.OctaviaClient(),
             loadbalancer.cluster_load_balancer_name(cluster_id),
             members[0]['subnet_id'], members, conf.cluster_load_balancer_port,
-            description='Endpoint of Trove cluster %s' % cluster_id)
+            description='Endpoint of Trove cluster %s' % cluster_id,
+            listeners=listeners)
 
     def _delete_load_balancer(self, cluster_id):
         loadbalancer.delete_load_balancer(
@@ -121,6 +133,17 @@ class ClusterEntryTasksMixin(object):
                               "be deleted.", cluster_id)
         super(ClusterEntryTasksMixin, self).delete_cluster(
             context, cluster_id)
+
+    def _check_cluster_for_root(self, context, existing_instances,
+                                new_instances):
+        """Root enabled on the cluster: the members that join have it
+        too, as the data comes with root, and are recorded as such.
+        """
+        for instance in existing_instances:
+            if ext_models.Root.load(context, instance.id):
+                for new_instance in new_instances:
+                    ext_models.RootHistory.create(context, new_instance.id)
+                return
 
     def _fail_new_members(self, new_instance_ids):
         """A grow that failed: the members that were to join are failed,

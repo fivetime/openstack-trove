@@ -369,7 +369,8 @@ class ClusterTasks(Cluster):
         cluster.save()
         LOG.debug("end delete_cluster for id: %s", cluster_id)
 
-    def rolling_restart_cluster(self, context, cluster_id, delay_sec=0):
+    def rolling_restart_cluster(self, context, cluster_id, delay_sec=0,
+                                ordering_function=None):
         LOG.debug("Begin rolling cluster restart for id: %s", cluster_id)
 
         def _restart_cluster_instance(instance):
@@ -388,6 +389,10 @@ class ClusterTasks(Cluster):
         try:
             node_db_inst = DBInstance.find_all(cluster_id=cluster_id,
                                                deleted=False).all()
+            if ordering_function is not None:
+                # The datastore's order: a primary after its standbys,
+                # say.
+                node_db_inst.sort(key=ordering_function)
             for index, db_inst in enumerate(node_db_inst):
                 if watch.expired():
                     LOG.error("Timeout for restarting cluster %s.",

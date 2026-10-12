@@ -265,25 +265,38 @@ class MemberRolesMixin(object):
 
     ROLES = {}
 
-    def _endpoint(self):
+    def _endpoints(self):
+        """The cluster's endpoint and, for a datastore whose standbys
+        serve reads, its read endpoint: {'endpoint', 'read_endpoint'},
+        only those there are.
+        """
         conf = CONF.get(self.cluster.datastore_version.manager)
         if not getattr(conf, 'cluster_load_balancer', False):
-            return None
+            return {}
+        ports = [('endpoint', conf.cluster_load_balancer_port)]
+        read_port = getattr(conf, 'cluster_read_load_balancer_port', 0)
+        if read_port:
+            ports.append(('read_endpoint', read_port))
+        endpoints = {}
         try:
-            return loadbalancer.find_endpoint(
-                loadbalancer.OctaviaClient(),
-                loadbalancer.cluster_load_balancer_name(self.cluster.id),
-                conf.cluster_load_balancer_port)
+            client = loadbalancer.OctaviaClient()
+            name = loadbalancer.cluster_load_balancer_name(self.cluster.id)
+            # One load balancer, a listener per endpoint.
+            found = loadbalancer.find_endpoint(client, name,
+                                               conf.cluster_load_balancer_port)
+            for key, port in ports if found else []:
+                endpoints[key] = dict(found, port=port)
         except Exception as err:
             LOG.info("No endpoint for cluster %s: %s", self.cluster.id, err)
-            return None
+        return endpoints
+
+    def _endpoint(self):
+        return self._endpoints().get('endpoint')
 
     def data(self):
         result = super(MemberRolesMixin, self).data()
         if self.load_servers:
-            endpoint = self._endpoint()
-            if endpoint:
-                result['cluster']['endpoint'] = endpoint
+            result['cluster'].update(self._endpoints())
         return result
 
     def _role_name(self, answer):

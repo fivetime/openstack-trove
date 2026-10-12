@@ -15,6 +15,7 @@ import os
 from unittest import mock
 
 from trove.common import cfg
+from trove.guestagent.common import cluster_probe
 from trove.guestagent.common import operating_system
 from trove.guestagent.datastore.postgres import manager
 from trove.guestagent.datastore.postgres import service
@@ -26,6 +27,9 @@ class TestPostgresManager(trove_testtools.TestCase):
         super(TestPostgresManager, self).setUp()
         manager.PostgresManager._docker_client = mock.MagicMock()
         self.patch_datastore_manager('postgresql')
+        # The manager starts the cluster probe; not its loop here.
+        mock.patch.object(cluster_probe.ClusterProbe, 'start').start()
+        self.addCleanup(mock.patch.stopall)
         self.pg_manager = manager.PostgresManager()
         m = mock.Mock()
         m.side_effect = lambda *a, **kw: m.call_count == 1

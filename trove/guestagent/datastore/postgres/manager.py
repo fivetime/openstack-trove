@@ -27,6 +27,7 @@ from trove.common import utils
 from trove.guestagent.common import guestagent_utils
 from trove.guestagent.common import operating_system
 from trove.guestagent.datastore import manager
+from trove.guestagent.datastore.postgres import cluster
 from trove.guestagent.datastore.postgres import service
 from trove.guestagent.datastore import service as base_service
 from trove.guestagent import guest_log
@@ -37,13 +38,14 @@ PG_FILE_AUTOCONF = 'postgresql.auto.conf'
 WAL_SAFETY_FACTOR = 5
 
 
-class PostgresManager(manager.Manager):
+class PostgresManager(cluster.PostgresqlMemberMixin, manager.Manager):
     def __init__(self):
         super(PostgresManager, self).__init__('postgres')
 
         self.status = base_service.BaseDbStatus(self.docker_client)
-        self.app = service.PgSqlApp(self.status, self.docker_client)
+        self.app = cluster.PgSqlClusterApp(self.status, self.docker_client)
         self.adm = service.PgSqlAdmin(service.SUPER_USER_NAME)
+        self.init_cluster_probe()
 
     @property
     def configuration_manager(self):
@@ -194,6 +196,9 @@ class PostgresManager(manager.Manager):
         # config_file can only be set on the postgres command line
         command = f"postgres -c config_file={service.CONFIG_FILE}"
         self.app.start_db(ds_version=ds_version, command=command)
+        # A cluster member: the mode it was created with, for the task
+        # manager.
+        self.keep_cluster_mode_of(cluster_config)
 
     def apply_overrides(self, context, overrides):
         """Reload config."""

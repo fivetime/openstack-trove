@@ -96,7 +96,7 @@ class PgSqlApp(service.BaseDbApp):
         docker_util.run_command(self.docker_client, cmd)
 
     def apply_access_rules(self, ssl=False, mtls=False,
-                           replication_user=None):
+                           replication_user=None, scram=False):
         """PostgreSQL Client authentication settings
 
         The order of entries is important. The first failure to authenticate
@@ -106,10 +106,13 @@ class PgSqlApp(service.BaseDbApp):
         LOG.debug("Applying client authentication access rules.")
 
         host_d = 'hostssl' if ssl else 'host'
+        # Passwords are stored as SCRAM since 14; a cluster member asks
+        # for SCRAM over the network, as 18 warns about md5 every time.
+        password_method = 'scram-sha-256' if scram else 'md5'
         if mtls:
             auth_method = ['cert', 'clientcert=verify-full']
         else:
-            auth_method = ['md5']
+            auth_method = [password_method]
 
         # We intentionally don't use hostnames here because it will
         # invoke reverse DNS lookup, which in some cases may slow down
@@ -124,8 +127,9 @@ class PgSqlApp(service.BaseDbApp):
         ]
         if replication_user:
             host_rules.extend([
-                ['replication', replication_user, '0.0.0.0/0', 'md5'],
-                ['replication', replication_user, '::/0', 'md5'],
+                ['replication', replication_user, '0.0.0.0/0',
+                 password_method],
+                ['replication', replication_user, '::/0', password_method],
             ])
 
         access_rules = OrderedDict(
@@ -157,13 +161,14 @@ class PgSqlApp(service.BaseDbApp):
         cmd = "pg_ctl reload"
         docker_util.run_command(self.docker_client, cmd)
 
-    def start_db(self, update_db=False, ds_version=None, command=None,
-                 extra_volumes=None):
-        """Start and wait for database service."""
+    def container_spec(self, ds_version=None, extra_volumes=None):
+        """What the database container is made of: the image, volumes,
+        ports, network mode, user and environment; the same for a
+        container that runs a tool against the data directory.
+        """
         docker_image = CONF.get(CONF.datastore_manager).docker_image
         image = (f'{docker_image}:latest' if not ds_version else
                  f'{docker_image}:{ds_version}')
-        command = command if command else ''
 
         try:
             postgres_pass = self.get_auth_password(file="postgres.cnf")
@@ -206,25 +211,34 @@ class PgSqlApp(service.BaseDbApp):
         else:
             network_mode = constants.DOCKER_BRIDGE_MODE
 
+        return {'image': image, 'volumes': volumes, 'ports': ports,
+                'network_mode': network_mode, 'user': user,
+                'environment': {"POSTGRES_PASSWORD": postgres_pass,
+                                "PGDATA": self.datadir}}
+
+    def start_db(self, update_db=False, ds_version=None, command=None,
+                 extra_volumes=None):
+        """Start and wait for database service."""
+        command = command if command else ''
+        spec = self.container_spec(ds_version, extra_volumes)
+
         try:
             docker_util.start_container(
                 self.docker_client,
-                image,
-                volumes=volumes,
-                network_mode=network_mode,
-                ports=ports,
-                user=user,
-                environment={
-                    "POSTGRES_PASSWORD": postgres_pass,
-                    "PGDATA": self.datadir,
-                },
+                spec['image'],
+                volumes=spec['volumes'],
+                network_mode=spec['network_mode'],
+                ports=spec['ports'],
+                user=spec['user'],
+                environment=spec['environment'],
                 healthcheck=self.HEALTHCHECK,
                 command=command
             )
 
             # Save root password
             LOG.debug("Saving root credentials to local host.")
-            self.save_password('postgres', postgres_pass)
+            self.save_password('postgres',
+                               spec['environment']['POSTGRES_PASSWORD'])
         except Exception:
             LOG.exception("Failed to start database service")
             raise exception.TroveError("Failed to start database service")

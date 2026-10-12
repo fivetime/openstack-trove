@@ -28,7 +28,6 @@ from trove.common.strategies.cluster.experimental.galera_common import (
     recovery)
 from trove.common.template import ClusterConfigTemplate
 from trove.common import utils
-from trove.extensions.common import models as ext_models
 from trove.instance.models import DBInstance
 from trove.instance.models import Instance
 from trove.instance import tasks as inst_tasks
@@ -184,15 +183,6 @@ class GaleraCommonClusterTasks(common_taskmanager.ClusterEntryTasksMixin,
             timeout.cancel()
 
         LOG.debug("End create_cluster for id: %s.", cluster_id)
-
-    def _check_cluster_for_root(self, context, existing_instances,
-                                new_instances):
-        """Check for existing instances root enabled"""
-        for instance in existing_instances:
-            if ext_models.Root.load(context, instance.id):
-                for new_instance in new_instances:
-                    ext_models.RootHistory.create(context, new_instance.id)
-                return
 
     def grow_cluster(self, context, cluster_id, new_instance_ids):
         LOG.debug("Begin Galera grow_cluster for id: %s.", cluster_id)

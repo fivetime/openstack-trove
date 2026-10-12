@@ -1,0 +1,569 @@
+#    Licensed under the Apache License, Version 2.0 (the "License");
+#    you may not use this file except in compliance with the License.
+#    You may obtain a copy of the License at
+#
+#        http://www.apache.org/licenses/LICENSE-2.0
+#
+#    Unless required by applicable law or agreed to in writing, software
+#    distributed under the License is distributed on an "AS IS" BASIS,
+#    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#    See the License for the specific language governing permissions and
+#    limitations under the License.
+
+"""A PostgreSQL cluster member: the primary, or a standby streaming from
+it through a replication slot of its own.
+
+What the member knows of its cluster is in ``trove-cluster.json`` beside
+the configuration (the members by id and address, the mode, which member
+it is, the replication user); the server settings of a member are system
+overrides in ``conf.d``, never ``ALTER SYSTEM``, which a base backup or
+pg_rewind would carry from one member to another. The mode is the
+tenant's: a commit on the primary waits for one standby (``sync``, back
+to none when no standby streams for a grace period; ``strict``, always)
+or for none (``async``); the primary keeps ``synchronous_standby_names``
+right every probe tick. The primary answers on its ready port; a standby
+that streams and keeps up answers on its read port.
+"""
+
+import json
+import os
+import re
+import time
+
+from oslo_log import log as logging
+from oslo_utils import encodeutils
+from oslo_utils import netutils
+
+from trove.common import cfg
+from trove.common import constants
+from trove.common.db.postgresql import models
+from trove.common import exception
+from trove.common.i18n import _
+from trove.common import ssl
+from trove.common import stream_codecs
+from trove.guestagent.common import cluster_member
+from trove.guestagent.common import cluster_probe
+from trove.guestagent.common import operating_system
+from trove.guestagent.common import readyport
+from trove.guestagent.datastore.postgres import service as pg_service
+from trove.guestagent.utils import docker as docker_util
+from trove.instance import service_status
+
+LOG = logging.getLogger(__name__)
+CONF = cfg.CONF
+
+MODE_KEY = 'replication_mode'
+ASYNC, SYNC, STRICT = 'async', 'sync', 'strict'
+MODES = (ASYNC, SYNC, STRICT)
+
+CLUSTER_FILE = '/etc/postgresql/trove-cluster.json'
+# The system overrides in conf.d: the server settings of every member,
+# what a standby streams from, what the primary's commits wait for.
+CNF_SETTINGS = 'cluster-settings'
+CNF_REPLICATION = 'cluster-replication'
+CNF_SYNC = 'cluster-sync'
+# A commit waits for any one standby, whichever answers first.
+ANY_ONE = 'ANY 1 (*)'
+
+PRIMARY, STANDBY, REBUILDING, STOPPED = ('primary', 'standby',
+                                         'rebuilding', 'stopped')
+# What the primary reports a standby's sync_state as when a commit waits
+# for it.
+SYNCHRONOUS_STATES = ('sync', 'quorum')
+STREAMING = 'streaming'
+
+SLOT_PATTERN = re.compile(r'^[a-z0-9_]{1,63}$')
+
+STANDBYS_QUERY = (
+    "SELECT application_name, state, sync_state, "
+    "pg_wal_lsn_diff(sent_lsn, replay_lsn)::bigint "
+    "FROM pg_stat_replication")
+RECEIVER_QUERY = (
+    "SELECT status, sender_host, "
+    "extract(epoch FROM now() - last_msg_receipt_time)::float, "
+    "pg_wal_lsn_diff(pg_last_wal_receive_lsn(), "
+    "pg_last_wal_replay_lsn())::bigint "
+    "FROM pg_stat_wal_receiver")
+
+
+def slot_name(member_id):
+    """The replication slot a member streams through: its id, as a slot
+    name can be spelled.
+    """
+    name = 'trove_' + str(member_id).lower().replace('-', '_')
+    if not SLOT_PATTERN.match(name):
+        raise exception.BadRequest(_("Not a slot name: %s") % name)
+    return name
+
+
+class PostgresqlClusterAppMixin(object):
+    """Clustering for an app built on ``PgSqlApp``: list it before the app
+    class it extends.
+    """
+
+    DATABASE_PORT = 5432
+
+    _sync_names = None
+    _no_standby_since = None
+    _standbys = None
+    rebuilding = False
+
+    # What the member knows of its cluster
+
+    def _read_cluster(self):
+        try:
+            return operating_system.read_file(
+                CLUSTER_FILE, codec=stream_codecs.JsonCodec(),
+                as_root=True) or {}
+        except Exception:
+            return {}
+
+    def _write_cluster(self, cluster):
+        operating_system.write_file(
+            CLUSTER_FILE, cluster, codec=stream_codecs.JsonCodec(),
+            as_root=True)
+        operating_system.chmod(CLUSTER_FILE,
+                               operating_system.FileMode.SET_USR_RW,
+                               as_root=True)
+
+    def _update_cluster(self, **changes):
+        cluster = self._read_cluster()
+        cluster.update(changes)
+        self._write_cluster(cluster)
+        return cluster
+
+    def is_cluster_member(self):
+        return bool(self._read_cluster().get('members'))
+
+    def is_cluster_complete(self):
+        return bool(self._read_cluster().get('complete'))
+
+    def complete_cluster(self):
+        """Every member has joined."""
+        self._update_cluster(complete=True)
+
+    def keep_cluster_mode(self, mode):
+        """The mode the tenant chose, for the task manager to set the
+        cluster up with.
+        """
+        if mode not in MODES:
+            raise exception.BadRequest(
+                _("The replication mode must be one of %s.") %
+                ', '.join(MODES))
+        self._update_cluster(mode=mode)
+
+    @property
+    def cluster_mode(self):
+        mode = self._read_cluster().get('mode')
+        return mode if mode in MODES else SYNC
+
+    @property
+    def cluster_members(self):
+        return self._read_cluster().get('members') or {}
+
+    @property
+    def self_id(self):
+        return self._read_cluster().get('self_id') or CONF.guest_id
+
+    def update_cluster_members(self, members, mode):
+        """The members and the mode, as the task manager has them after
+        a grow or a shrink; the primary applies the mode at its next
+        tick.
+        """
+        self._update_cluster(members=members, mode=mode)
+
+    def get_cluster_context(self):
+        cluster = self._read_cluster()
+        return {'replication_user': cluster.get('replication_user'),
+                'mode': self.cluster_mode,
+                'members': cluster.get('members') or {},
+                'primary_id': cluster.get('primary_id'),
+                'self_id': cluster.get('self_id')}
+
+    # Installing
+
+    def _cluster_conf(self):
+        return CONF.get(CONF.datastore_manager)
+
+    def _cluster_settings(self):
+        """The server settings of every member; they need a restart, once,
+        when the member is installed.
+        """
+        conf = self._cluster_conf()
+        timeout = '%ss' % conf.cluster_wal_timeout
+        return {'wal_level': 'replica', 'hot_standby': 'on',
+                'wal_log_hints': 'on',
+                'max_wal_senders': 20, 'max_replication_slots': 20,
+                'wal_sender_timeout': timeout,
+                'wal_receiver_timeout': timeout,
+                'max_slot_wal_keep_size': conf.cluster_max_slot_wal_keep_size,
+                'synchronous_commit': 'on',
+                'password_encryption': 'scram-sha-256'}
+
+    def _apply_cluster_settings(self):
+        self.configuration_manager.apply_system_override(
+            self._cluster_settings(), CNF_SETTINGS)
+
+    def _apply_cluster_access_rules(self, replication_user):
+        # The SSL mode is registered on the guest alone.
+        mode = getattr(CONF, 'ssl_mode', None)
+        self.apply_access_rules(
+            ssl=mode in (ssl.MODE_ENFORCED, ssl.MODE_MTLS),
+            mtls=mode == ssl.MODE_MTLS,
+            replication_user=replication_user, scram=True)
+
+    def _ensure_replication_user(self, replication_user):
+        """The account the standbys stream with, with the password of the
+        cluster; a superuser, as pg_rewind needs one.
+        """
+        name, password = replication_user['name'], replication_user['password']
+        options = ('REPLICATION', 'SUPERUSER', 'LOGIN')
+        user = models.PostgreSQLUser(name=name, password=password)
+        if self.adm.user_exists(name):
+            self.adm.alter_user(user, None, *options)
+        else:
+            self.adm.create_user(user, None, *options)
+
+    def _write_sync_names(self, names):
+        self.configuration_manager.apply_system_override(
+            {'synchronous_standby_names': names}, CNF_SYNC)
+        self._sync_names = names
+
+    def _write_replication(self, primary_host, replication_user):
+        """What a standby streams from: through its own slot, as itself
+        by name, so that the primary tells the standbys apart.
+        """
+        conninfo = ('host=%s port=%s user=%s password=%s '
+                    'application_name=%s dbname=postgres' % (
+                        primary_host, self.DATABASE_PORT,
+                        replication_user['name'],
+                        replication_user['password'], self.self_id))
+        self.configuration_manager.apply_system_override(
+            {'primary_conninfo': conninfo,
+             'primary_slot_name': slot_name(self.self_id)}, CNF_REPLICATION)
+
+    def _write_standby_signal(self):
+        signal_file = os.path.join(self.datadir, 'standby.signal')
+        operating_system.execute_shell_cmd(
+            'touch %s' % signal_file, [], shell=True, as_root=True)
+        operating_system.chown(signal_file, self.database_service_uid,
+                               self.database_service_gid, force=True,
+                               as_root=True)
+
+    def _clear_data(self):
+        """An empty data directory and WAL archive, for a base backup."""
+        for path in (self.datadir, pg_service.WAL_ARCHIVE_DIR):
+            operating_system.ensure_directory(
+                path, user=self.database_service_uid,
+                group=self.database_service_gid, as_root=True)
+            operating_system.remove_dir_contents(path)
+
+    def _run_in_parked_container(self, command, environment=None):
+        """Run a tool against the data directory while the server is
+        down, with the tenant NIC: the database container's own network,
+        which only one container has at a time. The database container
+        is replaced by one that does nothing, the tool runs in it, and
+        the container is removed; the server is started anew after.
+        Returns what the tool printed, raises when it failed.
+        """
+        docker_util.remove_container(self.docker_client)
+        spec = self.container_spec(ds_version=CONF.datastore_version)
+        docker_util.start_container(
+            self.docker_client, spec['image'], name=readyport.CONTAINER_NAME,
+            restart_policy='no', volumes=spec['volumes'],
+            ports=spec['ports'], user=spec['user'],
+            network_mode=spec['network_mode'],
+            environment=spec['environment'], command='sleep infinity')
+        container = self.docker_client.containers.get(readyport.CONTAINER_NAME)
+        try:
+            LOG.info("Running %s in the parked container.", command[0])
+            code, output = container.exec_run(
+                command, environment=environment or {}, user=spec['user'])
+        finally:
+            container.remove(force=True)
+        output = encodeutils.safe_decode(output or b'')
+        if code != 0:
+            raise exception.TroveError(
+                _("%(tool)s failed: %(output)s") % {
+                    'tool': command[0], 'output': output.strip()[-2000:]})
+        return output
+
+    def _server_command(self):
+        return 'postgres -c config_file=%s' % pg_service.CONFIG_FILE
+
+    def _wait_streaming(self, timeout=180):
+        deadline = time.time() + timeout
+        status = None
+        while time.time() < deadline:
+            try:
+                rows = self.adm.query(
+                    "SELECT status FROM pg_stat_wal_receiver")
+                status = rows[0][0] if rows else None
+            except Exception as err:
+                LOG.debug("No receiver status yet: %s", err)
+            if status == STREAMING:
+                LOG.info("The standby is streaming.")
+                return
+            time.sleep(3)
+        raise exception.TroveError(
+            _("The standby is not streaming from the primary: %s") % status)
+
+    def install_cluster(self, cluster_config):
+        """Install the member: as the primary when the configuration names
+        none, as a standby of it otherwise.
+        """
+        members = cluster_config['members']
+        mode = cluster_config.get('mode') or SYNC
+        replication_user = cluster_config['replication_user']
+        primary = cluster_config.get('primary')
+        self_id = cluster_config.get('self_id') or CONF.guest_id
+        self._update_cluster(
+            members=members, mode=mode, self_id=self_id,
+            replication_user=replication_user,
+            primary_id=self_id if primary is None else primary['id'],
+            complete=False)
+        self._apply_cluster_settings()
+        if primary is None:
+            self._install_primary(mode, replication_user)
+        else:
+            self._install_standby(primary, replication_user)
+
+    def _install_primary(self, mode, replication_user):
+        LOG.info("Installing the member as the primary, mode %s.", mode)
+        self._ensure_replication_user(replication_user)
+        self._apply_cluster_access_rules(replication_user['name'])
+        # Until a standby streams, a commit waits for none, unless the
+        # mode is strict.
+        self._write_sync_names(ANY_ONE if mode == STRICT else '')
+        self._no_standby_since = None
+        self.restart()
+
+    def _install_standby(self, primary, replication_user):
+        LOG.info("Installing the member as a standby of %s.",
+                 primary['host'])
+        self._apply_cluster_access_rules(replication_user['name'])
+        self._write_replication(primary['host'], replication_user)
+        self.rebuilding = True
+        try:
+            self.stop_db()
+            self._clear_data()
+            self._run_in_parked_container(
+                ['pg_basebackup', '-h', primary['host'],
+                 '-p', str(self.DATABASE_PORT),
+                 '-U', replication_user['name'], '-D', self.datadir,
+                 '-X', 'stream', '-S', slot_name(self.self_id),
+                 '--checkpoint=fast', '--no-password'],
+                {'PGPASSWORD': replication_user['password']})
+            self._write_standby_signal()
+            self.start_db(ds_version=CONF.datastore_version,
+                          command=self._server_command())
+            self._wait_streaming()
+        finally:
+            self.rebuilding = False
+
+    # Slots
+
+    def _slot_exists(self, name):
+        rows = self.adm.query(
+            "SELECT active_pid FROM pg_replication_slots "
+            "WHERE slot_name = '%s'" % name)
+        return rows[0] if rows else None
+
+    def create_member_slot(self, member_id):
+        name = slot_name(member_id)
+        if self._slot_exists(name) is None:
+            LOG.info("Creating replication slot %s.", name)
+            self.adm.query(
+                "SELECT pg_create_physical_replication_slot('%s')" % name)
+
+    def drop_member_slot(self, member_id):
+        name = slot_name(member_id)
+        row = self._slot_exists(name)
+        if row is None:
+            return
+        if row[0] is not None:
+            # The member still streams: its WAL sender goes first.
+            self.adm.query("SELECT pg_terminate_backend(%s)" % row[0])
+            time.sleep(1)
+        LOG.info("Dropping replication slot %s.", name)
+        self.adm.query("SELECT pg_drop_replication_slot('%s')" % name)
+
+    # Where the member stands
+
+    def _self_ip(self):
+        if (CONF.network_isolation and
+                os.path.exists(constants.ETH1_CONFIG_PATH)):
+            with open(constants.ETH1_CONFIG_PATH) as fd:
+                eth1 = json.load(fd)
+            ip = eth1.get('ipv4_address') or eth1.get('ipv6_address')
+            if ip:
+                return ip
+        return netutils.get_my_ipv4()
+
+    def _standbys_of_primary(self):
+        """The standbys as the primary sees them, by name."""
+        return {row[0]: {'state': row[1], 'sync_state': row[2],
+                         'lag_bytes': int(row[3] or 0)}
+                for row in self.adm.query(STANDBYS_QUERY)}
+
+    def _receiver(self):
+        rows = self.adm.query(RECEIVER_QUERY)
+        if not rows:
+            return None
+        status, sender, age, lag = rows[0]
+        return {'status': status, 'sender_host': sender,
+                'last_msg_age': float(age) if age is not None else None,
+                'replay_lag_bytes': int(lag or 0)}
+
+    def member_view(self):
+        """The member now: the primary takes writes (in strict mode, only
+        with a synchronous standby there); a standby serves reads while
+        it streams and keeps up.
+        """
+        if self.rebuilding:
+            return cluster_probe.MemberView(REBUILDING, None, False, False)
+        try:
+            in_recovery = self.adm.query("SELECT pg_is_in_recovery()")[0][0]
+        except Exception as err:
+            LOG.debug("The server does not answer: %s", err)
+            return cluster_probe.MemberView(STOPPED, None, False, False)
+        if not in_recovery:
+            standbys = self._standbys_of_primary()
+            self._standbys = standbys
+            synchronous = any(
+                s['state'] == STREAMING and
+                s['sync_state'] in SYNCHRONOUS_STATES
+                for s in standbys.values())
+            writable = (synchronous if self.cluster_mode == STRICT
+                        else True)
+            return cluster_probe.MemberView(PRIMARY, 'PRIMARY', writable,
+                                            False)
+        receiver = self._receiver()
+        conf = self._cluster_conf()
+        streaming = bool(receiver and receiver['status'] == STREAMING)
+        readable = (streaming and
+                    receiver['last_msg_age'] is not None and
+                    receiver['last_msg_age'] < 2 * conf.cluster_wal_timeout
+                    and (receiver['replay_lag_bytes'] <
+                         conf.cluster_read_max_lag_bytes))
+        return cluster_probe.MemberView(
+            STANDBY, 'STREAMING' if streaming else 'DETACHED', False,
+            False, readable)
+
+    def _sync_names_wanted(self, mode, streaming):
+        """What the primary's commits wait for, by the mode and whether a
+        standby streams; None to leave it as it is for now.
+        """
+        if mode == ASYNC:
+            return ''
+        if mode == STRICT:
+            return ANY_ONE
+        if streaming:
+            self._no_standby_since = None
+            return ANY_ONE
+        now = time.monotonic()
+        if self._no_standby_since is None:
+            self._no_standby_since = now
+        if (now - self._no_standby_since >=
+                self._cluster_conf().cluster_sync_fallback_grace):
+            return ''
+        return None
+
+    def reconcile(self, view):
+        """Every probe tick, on the primary: keep synchronous_standby_names
+        as the mode and the standbys that stream warrant.
+        """
+        if view.state != PRIMARY:
+            self._no_standby_since = None
+            return
+        if self._sync_names is None:
+            self._sync_names = self.get_config_param(
+                'synchronous_standby_names')
+        streaming = any(s['state'] == STREAMING
+                        for s in (self._standbys or {}).values())
+        wanted = self._sync_names_wanted(self.cluster_mode, streaming)
+        if wanted is None or wanted == self._sync_names:
+            return
+        LOG.info("Commits wait for %s now (%s mode, %s standby streaming).",
+                 wanted or 'no standby', self.cluster_mode,
+                 'a' if streaming else 'no')
+        self._write_sync_names(wanted)
+        self.reload()
+
+    def get_member_role(self):
+        view = self.member_view()
+        answer = {'state': view.state, 'role': view.role,
+                  'writable': bool(view.writable),
+                  'readable': bool(view.readable),
+                  'mode': self.cluster_mode}
+        if view.state == PRIMARY:
+            answer['standbys'] = self._standbys or {}
+        return answer
+
+    def is_writable_member(self):
+        return bool(self.member_view().writable)
+
+    def recovery_view(self):
+        """Where the member stands, for the task manager."""
+        view = self.member_view()
+        answer = {'ip': self._self_ip(), 'state': view.state,
+                  'role': view.role, 'mode': self.cluster_mode,
+                  'self_id': self.self_id}
+        try:
+            if view.state == PRIMARY:
+                answer['standbys'] = self._standbys or {}
+                answer['lsn'] = self.adm.query(
+                    "SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), '0/0')"
+                    "::bigint")[0][0]
+            elif view.state == STANDBY:
+                answer['receiver'] = self._receiver()
+                answer['lsn'] = self.adm.query(
+                    "SELECT pg_wal_lsn_diff(pg_last_wal_receive_lsn(), "
+                    "'0/0')::bigint")[0][0]
+        except Exception as err:
+            LOG.debug("No position: %s", err)
+        return answer
+
+    def leave_group(self):
+        """The member is being removed: its ports are closed by the
+        probe; the primary drops its slot.
+        """
+        LOG.info("Leaving the cluster.")
+
+
+class PgSqlClusterApp(PostgresqlClusterAppMixin, pg_service.PgSqlApp):
+    """The PostgreSQL app, a cluster member when told."""
+
+
+class PostgresqlMemberMixin(cluster_member.ClusterMemberMixin):
+    """The cluster calls of the PostgreSQL manager: list it before the
+    manager class it extends.
+    """
+
+    CLUSTER_MODE_KEY = MODE_KEY
+
+    def cluster_complete(self, context):
+        self.app.complete_cluster()
+        super(PostgresqlMemberMixin, self).cluster_complete(context)
+
+    def install_cluster(self, context, cluster_config):
+        try:
+            self.app.install_cluster(cluster_config)
+            LOG.info("The cluster configuration is installed.")
+        except Exception:
+            LOG.exception("Failed to install the cluster configuration.")
+            self.status.set_status(service_status.ServiceStatuses.FAILED)
+            raise
+        if self.cluster_probe:
+            self.cluster_probe.enable_member()
+
+    def create_member_slot(self, context, member_id):
+        self.app.create_member_slot(member_id)
+
+    def drop_member_slot(self, context, member_id):
+        self.app.drop_member_slot(member_id)
+
+    def update_cluster_members(self, context, members, mode):
+        LOG.info("The cluster has members %s, mode %s.",
+                 sorted(members.values()), mode)
+        self.app.update_cluster_members(members, mode)

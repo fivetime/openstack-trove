@@ -419,7 +419,7 @@ class GroupReplicationTasksTest(trove_testtools.TestCase):
         ensure.assert_called_once_with(
             client.return_value, 'trove-cluster-c1', 'sub-4',
             self.tasks._load_balancer_members.return_value, 3306,
-            description='Endpoint of Trove cluster c1')
+            description='Endpoint of Trove cluster c1', listeners=[])
 
 
 class GroupReplicationViewTest(trove_testtools.TestCase):

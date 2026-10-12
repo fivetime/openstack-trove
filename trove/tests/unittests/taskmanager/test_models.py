@@ -269,8 +269,12 @@ class FreshInstanceTasksTest(BaseFreshInstanceTasksTest):
         self.assertEqual({5433, 5434, 4803, 5554, 8443},
                          {p for r in tcp for p in r})
         self.assertEqual({4803, 4804, 5433}, {p for r in udp for p in r})
-        # A datastore without cluster ports opens its own.
+        # A PostgreSQL member: its own port, the ready port of the
+        # primary and the read port of a standby; a single instance its
+        # own alone.
         tcp, udp = taskmanager_models.secgroup_ports('postgresql', 'c1')
+        self.assertEqual({5432, 5433, 5434}, {p for r in tcp for p in r})
+        tcp, udp = taskmanager_models.secgroup_ports('postgresql')
         self.assertEqual([[5432]], [list(r) for r in tcp])
         # A Group Replication member also its group communication port
         # and the ready port the load balancer checks.

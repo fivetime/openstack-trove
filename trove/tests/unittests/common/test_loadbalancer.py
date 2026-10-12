@@ -174,6 +174,48 @@ class TestLoadBalancer(trove_testtools.TestCase):
         self.assertEqual(3307, self.octavia.members['pool-3'][0][
             'protocol_port'])
 
+    def test_a_second_listener_for_the_read_endpoint(self):
+        # A datastore with a read endpoint: a second listener, with its
+        # own pool and members on their read port.
+        reads = [_member('10.0.0.2', port=5434),
+                 _member('10.0.0.3', port=5434)]
+        loadbalancer.ensure_load_balancer(
+            self.client, 'trove-cluster-c1', 'sub-1', self.members, 5432,
+            listeners=[(5433, reads)])
+        listeners = sorted(li['protocol_port']
+                           for li in self.octavia.listeners.values())
+        self.assertEqual([5432, 5433], listeners)
+        self.assertEqual(2, len(self.octavia.pools))
+        read_pool = [li['default_pool_id'] for li in
+                     self.octavia.listeners.values()
+                     if li['protocol_port'] == 5433][0]
+        self.assertEqual({('10.0.0.2', 5434), ('10.0.0.3', 5434)},
+                         {(m['address'], m['protocol_port'])
+                          for m in self.octavia.members[read_pool]})
+        self.assertEqual(2, len([c for c in self.octavia.calls
+                                 if c == ('POST', '/healthmonitors')]))
+        # Whole already: nothing more is done.
+        self.octavia.calls = []
+        loadbalancer.ensure_load_balancer(
+            self.client, 'trove-cluster-c1', 'sub-1', self.members, 5432,
+            listeners=[(5433, reads)])
+        self.assertEqual([], [c for c in self.octavia.calls
+                              if c[0] in ('POST', 'PUT', 'DELETE')])
+
+    def test_the_read_listener_is_added_to_a_balancer_that_lacks_it(self):
+        self.octavia.active_lb('trove-cluster-c1', port=5432,
+                               members=self.members)
+        reads = [_member('10.0.0.2', port=5434)]
+        loadbalancer.ensure_load_balancer(
+            self.client, 'trove-cluster-c1', 'sub-1', self.members, 5432,
+            listeners=[(5433, reads)])
+        self.assertEqual(
+            ['POST /listeners', 'POST /pools', 'POST /healthmonitors',
+             'PUT /pools/pool-5/members'],
+            [' '.join(c) for c in self.octavia.calls
+             if c[0] in ('POST', 'PUT', 'DELETE')])
+        self.assertEqual(1, len(self.octavia.lbs))
+
     def test_leaves_a_whole_one_alone(self):
         self.octavia.active_lb('trove-cluster-c1', members=self.members)
         loadbalancer.ensure_load_balancer(
