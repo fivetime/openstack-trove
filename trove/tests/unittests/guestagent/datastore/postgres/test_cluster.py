@@ -59,8 +59,9 @@ class ClusterAppTestBase(trove_testtools.TestCase):
         mock.patch.object(cluster.operating_system, 'write_file',
                           side_effect=self._write).start()
         for name in ('chmod', 'chown', 'ensure_directory',
-                     'remove_dir_contents', 'execute_shell_cmd'):
+                     'execute_shell_cmd'):
             mock.patch.object(cluster.operating_system, name).start()
+        mock.patch.object(cluster.utils, 'execute_with_timeout').start()
         mock.patch.object(cluster.time, 'sleep').start()
         self.addCleanup(mock.patch.stopall)
         self.app = FakeApp()
@@ -173,10 +174,12 @@ class InstallTest(ClusterAppTestBase):
         # Stopped, emptied, a base backup through its slot in the parked
         # container, standby.signal, started, streaming.
         self.assertEqual('stop_db', self.app.calls[1][0])
-        cluster.operating_system.remove_dir_contents.assert_any_call(
-            self.app.datadir)
-        cluster.operating_system.remove_dir_contents.assert_any_call(
-            cluster.pg_service.WAL_ARCHIVE_DIR)
+        # Emptied by find as root: a glob before sudo would see nothing
+        # in the database user's directory.
+        for path in (self.app.datadir, cluster.pg_service.WAL_ARCHIVE_DIR):
+            cluster.utils.execute_with_timeout.assert_any_call(
+                'find', path, '-mindepth', '1', '-delete',
+                run_as_root=True, root_helper='sudo', timeout=600)
         remove.assert_called_once_with(self.app.docker_client)
         self.assertEqual('sleep infinity', start.call_args.kwargs['command'])
         self.assertEqual('no', start.call_args.kwargs['restart_policy'])

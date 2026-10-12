@@ -41,6 +41,7 @@ from trove.common import exception
 from trove.common.i18n import _
 from trove.common import ssl
 from trove.common import stream_codecs
+from trove.common import utils
 from trove.guestagent.common import cluster_member
 from trove.guestagent.common import cluster_probe
 from trove.guestagent.common import operating_system
@@ -251,12 +252,20 @@ class PostgresqlClusterAppMixin(object):
                                as_root=True)
 
     def _clear_data(self):
-        """An empty data directory and WAL archive, for a base backup."""
+        """An empty data directory and WAL archive, for a base backup.
+
+        Not ``rm -rf dir/*``: the glob is expanded by the agent's shell
+        before sudo, and the agent cannot list the database user's data
+        directory (mode 700), so nothing would be removed. find runs as
+        root and sees everything, dot files included.
+        """
         for path in (self.datadir, pg_service.WAL_ARCHIVE_DIR):
             operating_system.ensure_directory(
                 path, user=self.database_service_uid,
                 group=self.database_service_gid, as_root=True)
-            operating_system.remove_dir_contents(path)
+            utils.execute_with_timeout(
+                'find', path, '-mindepth', '1', '-delete',
+                run_as_root=True, root_helper='sudo', timeout=600)
 
     def _run_in_parked_container(self, command, environment=None):
         """Run a tool against the data directory while the server is
