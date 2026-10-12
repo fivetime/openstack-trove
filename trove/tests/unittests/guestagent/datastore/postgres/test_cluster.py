@@ -376,6 +376,16 @@ class ReconcileTest(ClusterAppTestBase):
         self._tick('async', {'i2': {'state': 'streaming'}})
         self.assertEqual('', self._written())
 
+    def test_the_time_without_a_standby_counts_in_every_mode(self):
+        # An async primary cut off from its standbys has to report it as
+        # well: the task manager gives it up on that.
+        self._tick('async', {}, at=10)
+        self.assertEqual(10, self.app._no_standby_since)
+        self._tick('async', {'i2': {'state': 'streaming'}}, at=20)
+        self.assertIsNone(self.app._no_standby_since)
+        self._tick('strict', {'i2': {'state': 'catchup'}}, at=30)
+        self.assertEqual(30, self.app._no_standby_since)
+
     def test_a_standby_does_nothing(self):
         self.app.keep_cluster_mode('strict')
         self.app.reconcile(cluster_probe.MemberView('standby', 'STREAMING',

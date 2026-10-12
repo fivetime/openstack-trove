@@ -573,12 +573,8 @@ class PostgresqlClusterAppMixin(object):
         if mode == STRICT:
             return ANY_ONE
         if streaming:
-            self._no_standby_since = None
             return ANY_ONE
-        now = time.monotonic()
-        if self._no_standby_since is None:
-            self._no_standby_since = now
-        if (now - self._no_standby_since >=
+        if (time.monotonic() - self._no_standby_since >=
                 self._cluster_conf().cluster_sync_fallback_grace):
             return ''
         return None
@@ -595,6 +591,12 @@ class PostgresqlClusterAppMixin(object):
                 'synchronous_standby_names')
         streaming = any(s['state'] == STREAMING
                         for s in (self._standbys or {}).values())
+        # Since when no standby streams, in every mode: the task manager
+        # reads it to tell a primary cut off from its standbys.
+        if streaming:
+            self._no_standby_since = None
+        elif self._no_standby_since is None:
+            self._no_standby_since = time.monotonic()
         wanted = self._sync_names_wanted(self.cluster_mode, streaming)
         if wanted is None or wanted == self._sync_names:
             return
