@@ -752,19 +752,21 @@ class PostgresqlClusterAppMixin(object):
              '--config-file=%s' % pg_service.CONFIG_FILE, '--progress'],
             {'PGPASSWORD': replication_user['password']})
 
-    def _wait_reachable(self, host, timeout=120):
+    def _wait_reachable(self, host, replication_user, timeout=120):
         """Until the primary accepts connections on the tenant network,
         from the parked container (the tenant NIC is the database
         container's, not the guest agent's): a member told to rejoin
         while its own link is still coming back would fail its rewind
-        and its base backup alike.
+        and its base backup alike. The user is named: the container's
+        numeric user has no name for libpq to default to.
         """
         self._run_in_parked_container(
             ['sh', '-c',
-             'for i in $(seq 1 %d); do pg_isready -h %s -p %s -q && exit 0; '
-             'sleep 5; done; echo "the primary %s is not reachable"; '
-             'exit 1' % (max(timeout // 5, 1), host, self.DATABASE_PORT,
-                         host)])
+             'for i in $(seq 1 %d); do pg_isready -h %s -p %s -U %s '
+             '-d postgres && exit 0; sleep 5; done; '
+             'echo "the primary %s is not reachable"; exit 1' % (
+                 max(timeout // 5, 1), host, self.DATABASE_PORT,
+                 replication_user['name'], host)])
 
     def rejoin_cluster(self, primary):
         """A member that was the primary, or a standby that fell too far
@@ -789,7 +791,7 @@ class PostgresqlClusterAppMixin(object):
             self.configuration_manager.remove_system_override(CNF_SYNC)
             self._sync_names = None
             self.stop_db()
-            self._wait_reachable(primary['host'])
+            self._wait_reachable(primary['host'], replication_user)
             try:
                 self._rewind(primary, replication_user)
                 LOG.info("pg_rewind done.")

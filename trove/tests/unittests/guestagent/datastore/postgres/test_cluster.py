@@ -584,7 +584,8 @@ class FailoverTest(ClusterAppTestBase):
         # new primary, with the server's own configuration file.
         commands = [c.args[0] for c in container.exec_run.call_args_list]
         self.assertEqual(['sh', 'pg_rewind'], [c[0] for c in commands])
-        self.assertIn('pg_isready -h 10.0.0.3 -p 5432 -q', commands[0][2])
+        self.assertIn('pg_isready -h 10.0.0.3 -p 5432 -U replicator '
+                      '-d postgres', commands[0][2])
         cluster.operating_system.remove.assert_called_once_with(
             self.app.datadir + '/postmaster.pid', force=True, as_root=True)
         self.assertEqual(
