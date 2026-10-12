@@ -18,6 +18,8 @@ from unittest import mock
 
 from trove.cluster.tasks import ClusterTasks
 from trove.common import cfg
+from trove.common.strategies.cluster.experimental.common import (
+    recovery as common_recovery)
 from trove.common.strategies.cluster.experimental.galera_common import (
     recovery)
 from trove.common.strategies.cluster.experimental.galera_common import (
@@ -25,6 +27,7 @@ from trove.common.strategies.cluster.experimental.galera_common import (
 from trove.common.strategies.cluster.experimental.group_replication import (
     taskmanager as gr_taskmanager)
 from trove.common.strategies.cluster import strategy
+from trove.instance.tasks import InstanceTasks
 from trove.taskmanager import models as task_models
 from trove.tests.unittests import trove_testtools
 
@@ -42,7 +45,8 @@ class GaleraRecoveryTest(trove_testtools.TestCase):
 
     def setUp(self):
         super(GaleraRecoveryTest, self).setUp()
-        self.members = [mock.Mock(id=i) for i in ('i1', 'i2', 'i3')]
+        self.members = [mock.Mock(id=i, task_status=InstanceTasks.NONE)
+                        for i in ('i1', 'i2', 'i3')]
         self.answers = {'i1': _answer('10.0.0.1'), 'i2': _answer('10.0.0.2'),
                         'i3': _answer('10.0.0.3')}
         self.calls = []
@@ -72,13 +76,27 @@ class GaleraRecoveryTest(trove_testtools.TestCase):
             cluster_bootstrap_needs_all_members=False,
             cluster_bootstrap_jitter=0, cluster_recovery_timeout=3600)
         self.db_cluster = mock.Mock(id='c1', task_status=ClusterTasks.NONE)
-        mock.patch.object(recovery.cluster_models.DBCluster, 'find_by',
+        mock.patch.object(common_recovery.cluster_models.DBCluster, 'find_by',
                           return_value=self.db_cluster).start()
-        mock.patch.object(recovery.time, 'sleep').start()
+        mock.patch.object(common_recovery.time, 'sleep').start()
+
+        # The lock is a compare-and-set on the clusters table; here it
+        # takes the mock cluster's task the way the real one does.
+        def take(cluster_id):
+            if self.db_cluster.task_status != ClusterTasks.NONE:
+                return False
+            self.db_cluster.update(
+                task_status=ClusterTasks.RECOVERING_CLUSTER)
+            self.db_cluster.task_status = ClusterTasks.RECOVERING_CLUSTER
+            self.recovery.forming_since[cluster_id] = \
+                common_recovery.time.monotonic()
+            return True
+        mock.patch.object(common_recovery.ClusterRecovery, '_take',
+                          side_effect=take).start()
         self.addCleanup(mock.patch.stopall)
 
     def _check_at(self, seconds):
-        with mock.patch.object(recovery.time, 'monotonic',
+        with mock.patch.object(common_recovery.time, 'monotonic',
                                return_value=seconds):
             self.recovery.check('ctx', self.db_cluster)
 
@@ -106,13 +124,27 @@ class GaleraRecoveryTest(trove_testtools.TestCase):
         self._check_at(100)
         self.assertEqual([], self.calls)
 
+    def test_nothing_while_a_member_has_a_task(self):
+        # A member being resized, restarted or upgraded is left alone,
+        # and so is its cluster; once it is done the recovery goes on.
+        self.members[1].task_status = InstanceTasks.RESIZING
+        self._check_at(0)
+        self._check_at(100)
+        self.assertEqual([], self.calls)
+        self.members[1].task_status = InstanceTasks.NONE
+        self._check_at(200)
+        self._check_at(300)
+        self.assertEqual(['i1'], self._bootstraps())
+
     def test_the_grace_period_and_the_interval(self):
         self._check_at(0)
         self._check_at(59)
         self.assertEqual([], self._bootstraps())
         self._check_at(61)
         self.assertEqual(['i1'], self._bootstraps())
-        # Were the cluster still waiting: not before the interval.
+        # Were the cluster freed and still waiting: not before the
+        # interval.
+        self.db_cluster.task_status = ClusterTasks.NONE
         self.recovery.waiting_since['c1'] = 0
         self._check_at(80)
         self.assertEqual(['i1'], self._bootstraps())
@@ -331,7 +363,8 @@ class GaleraRecoveryTest(trove_testtools.TestCase):
     def test_run_goes_on_after_a_failure(self):
         other = mock.Mock(id='c2', task_status=ClusterTasks.NONE)
         self.recovery._members.side_effect = [Exception('db'), self.members]
-        with mock.patch.object(recovery.time, 'monotonic', return_value=0):
+        with mock.patch.object(common_recovery.time, 'monotonic',
+                               return_value=0):
             self.recovery.run('ctx', [other, self.db_cluster])
         self.assertIn('c1', self.recovery.waiting_since)
 
@@ -341,7 +374,7 @@ class RecoveryMembersTest(trove_testtools.TestCase):
     straight from the database, the guest client from the member's id.
     """
 
-    @mock.patch.object(recovery.DBInstance, 'find_all')
+    @mock.patch.object(common_recovery.DBInstance, 'find_all')
     def test_members_are_the_db_rows_of_the_cluster(self, find_all):
         rows = [mock.Mock(id='i1'), mock.Mock(id='i2')]
         find_all.return_value.all.return_value = rows
@@ -349,7 +382,7 @@ class RecoveryMembersTest(trove_testtools.TestCase):
         self.assertEqual(rows, r._members(mock.Mock(project_id=None), 'c1'))
         find_all.assert_called_once_with(cluster_id='c1', deleted=False)
 
-    @mock.patch.object(recovery.clients, 'create_guest_client')
+    @mock.patch.object(common_recovery.clients, 'create_guest_client')
     def test_guest_client_from_the_member_id_and_the_manager(self, create):
         r = recovery.GaleraClusterRecovery('mariadb')
         self.assertIs(create.return_value, r._guest('ctx', mock.Mock(id='i1')))

@@ -23,6 +23,8 @@ from trove.cluster.models import ClusterTasks
 from trove.cluster.models import DBCluster
 from trove.common import clients
 from trove.common import exception
+from trove.common.strategies.cluster.experimental.common import (
+    api as common_api)
 from trove.common.strategies.cluster.experimental.galera_common import (
     api as galera_api)
 from trove.common.strategies.cluster.experimental.galera_common import (
@@ -134,7 +136,7 @@ class ClusterTest(trove_testtools.TestCase):
                           instances, {}, None, None)
 
     @patch.object(clients, 'create_nova_client')
-    @patch.object(galera_api, 'CONF')
+    @patch.object(common_api, 'CONF')
     def test_create_storage_specified_with_no_volume_support(self,
                                                              mock_conf,
                                                              mock_client):
@@ -153,7 +155,7 @@ class ClusterTest(trove_testtools.TestCase):
                           instances, {}, None, None)
 
     @patch.object(clients, 'create_nova_client')
-    @patch.object(galera_api, 'CONF')
+    @patch.object(common_api, 'CONF')
     def test_create_storage_not_specified_and_no_ephemeral_flavor(self,
                                                                   mock_conf,
                                                                   mock_client):
@@ -244,7 +246,7 @@ class ClusterTest(trove_testtools.TestCase):
         self.assertEqual(4, mock_ins_create.call_count)
 
     @patch.object(inst_models.DBInstance, 'find_all')
-    @patch.object(galera_api, 'CONF')
+    @patch.object(common_api, 'CONF')
     @patch.object(inst_models.Instance, 'create')
     @patch.object(DBCluster, 'create')
     @patch.object(task_api, 'load')
@@ -310,7 +312,7 @@ class ClusterTest(trove_testtools.TestCase):
         mock_update_db.assert_called_with(task_status=ClusterTasks.DELETING)
 
     @patch.object(DBCluster, 'update')
-    @patch.object(galera_api, 'CONF')
+    @patch.object(common_api, 'CONF')
     @patch.object(inst_models.Instance, 'create')
     @patch.object(task_api, 'load')
     @patch.object(QUOTAS, 'check_quotas')
@@ -330,7 +332,7 @@ class ClusterTest(trove_testtools.TestCase):
         self.assertEqual(3, mock_inst_create.call_count)
 
     @patch.object(DBCluster, 'update')
-    @patch.object(galera_api, 'CONF')
+    @patch.object(common_api, 'CONF')
     @patch.object(inst_models.Instance, 'create')
     @patch.object(task_api, 'load')
     @patch.object(QUOTAS, 'check_quotas')
@@ -347,7 +349,7 @@ class ClusterTest(trove_testtools.TestCase):
             self.assertEqual({'group': 'sg-1'}, call.kwargs['locality'])
 
     @patch.object(DBCluster, 'update')
-    @patch.object(galera_api, 'CONF')
+    @patch.object(common_api, 'CONF')
     @patch.object(inst_models.Instance, 'create')
     @patch.object(QUOTAS, 'check_quotas')
     @patch.object(clients, 'create_nova_client')

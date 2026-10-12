@@ -14,29 +14,21 @@
 
 from oslo_log import log as logging
 
-import time
-
-from trove.cluster import models as cluster_models
-from trove.cluster.tasks import ClusterTasks
 from trove.cluster.views import ClusterView
 from trove.common import cfg
-from trove.common import exception
-from trove.common.i18n import _
-from trove.common import loadbalancer
-from trove.common import server_group as srv_grp
 from trove.common.strategies.cluster import base as cluster_base
+from trove.common.strategies.cluster.experimental.common import (
+    api as common_api)
 from trove.extensions.mgmt.clusters.views import MgmtClusterView
-from trove.instance.models import DBInstance
-from trove.instance.models import Instance
-from trove.quota.quota import check_quotas
-from trove.taskmanager import api as task_api
 
 
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
 
-# Members in these are asked for their role; the others cannot answer.
-ANSWERING_STATUSES = ('ACTIVE', 'HEALTHY')
+# The names the modules built on this one have used.
+ANSWERING_STATUSES = common_api.ANSWERING_STATUSES
+MemberRolesMixin = common_api.MemberRolesMixin
+
 # The tenant chooses with the extended property ``writer_mode``: single
 # (the default), where one synced member takes writes and another takes
 # over when it fails, or multi, where every synced member does.
@@ -68,256 +60,14 @@ class GaleraCommonAPIStrategy(cluster_base.BaseAPIStrategy):
         return GaleraCommonMgmtClusterView
 
 
-class GaleraCommonCluster(cluster_models.Cluster):
+class GaleraCommonCluster(common_api.HomogeneousCluster):
+    """A Galera cluster: members all alike, and a writer mode the tenant
+    chooses.
+    """
 
-    # A cluster whose tenant chooses a mode with an extended property:
-    # the property's key, the modes it takes and the one it gets when the
-    # request names none. None: no mode.
     MODE_KEY = WRITER_MODE_KEY
     MODES = WRITER_MODES
     DEFAULT_MODE = SINGLE_WRITER
-
-    @staticmethod
-    def _validate_cluster_instances(context, instances, datastore,
-                                    datastore_version):
-        """Validate the flavor and volume"""
-        ds_conf = CONF.get(datastore_version.manager)
-        num_instances = len(instances)
-
-        # Checking volumes and get delta for quota check
-        cluster_models.validate_instance_flavors(
-            context, instances, ds_conf.volume_support, ds_conf.device_path)
-
-        req_volume_size = cluster_models.get_required_volume_size(
-            instances, ds_conf.volume_support)
-
-        cluster_models.assert_homogeneous_cluster(instances)
-
-        deltas = {'instances': num_instances, 'volumes': req_volume_size}
-
-        # quota check
-        check_quotas(context.project_id, deltas)
-
-        # Checking networks are same for the cluster
-        cluster_models.validate_instance_nics(context, instances)
-
-    @classmethod
-    def _member_config(cls, db_info, extended_properties):
-        """What a member is given with its creation: the members of a
-        grown cluster get the cluster's mode from the task manager instead.
-        """
-        config = {"id": db_info.id,
-                  "instance_type": "member"}
-        mode = (extended_properties or {}).get(cls.MODE_KEY)
-        if cls.MODE_KEY and mode:
-            config[cls.MODE_KEY] = mode
-        return config
-
-    @classmethod
-    def _validate_mode(cls, extended_properties):
-        """The extended properties with the mode, or none for a cluster
-        without one.
-        """
-        if not cls.MODE_KEY:
-            return extended_properties
-        properties = dict(extended_properties or {})
-        mode = properties.setdefault(cls.MODE_KEY, cls.DEFAULT_MODE)
-        if mode not in cls.MODES:
-            raise exception.BadRequest(
-                _("The extended property %(key)s must be one of "
-                  "%(modes)s.") % {'key': cls.MODE_KEY,
-                                   'modes': ', '.join(cls.MODES)})
-        return properties
-
-    @classmethod
-    def _create_instances(cls, context, db_info, datastore, datastore_version,
-                          instances, extended_properties, locality,
-                          configuration_id, image_id):
-        member_config = cls._member_config(db_info, extended_properties)
-        name_index = int(time.time())
-        for instance in instances:
-            if not instance.get("name"):
-                instance['name'] = "%s-member-%s" % (db_info.name,
-                                                     str(name_index))
-                name_index += 1
-
-        return [Instance.create(context,
-                                instance['name'],
-                                instance['flavor_id'],
-                                datastore_version.image_id
-                                if datastore_version.image_id else image_id,
-                                [], [],
-                                datastore, datastore_version,
-                                instance.get('volume_size', None),
-                                None,
-                                availability_zone=instance.get(
-                                    'availability_zone', None),
-                                nics=instance.get('nics', None),
-                                configuration_id=configuration_id,
-                                cluster_config=member_config,
-                                volume_type=instance.get(
-                                    'volume_type', None),
-                                modules=instance.get('modules'),
-                                locality=locality,
-                                region_name=instance.get('region_name')
-                                )
-                for instance in instances]
-
-    @classmethod
-    def create(cls, context, name, datastore, datastore_version,
-               instances, extended_properties, locality, configuration,
-               image_id=None):
-        LOG.debug("Initiating Galera cluster creation.")
-        ds_conf = CONF.get(datastore_version.manager)
-        # Check number of instances is at least min_cluster_member_count
-        if len(instances) < ds_conf.min_cluster_member_count:
-            raise exception.ClusterNumInstancesNotLargeEnough(
-                num_instances=ds_conf.min_cluster_member_count)
-        extended_properties = cls._validate_mode(extended_properties)
-        cls._validate_cluster_instances(context, instances, datastore,
-                                        datastore_version)
-        # Updating Cluster Task
-        db_info = cluster_models.DBCluster.create(
-            name=name, tenant_id=context.project_id,
-            datastore_version_id=datastore_version.id,
-            task_status=ClusterTasks.BUILDING_INITIAL,
-            configuration_id=configuration)
-
-        cls._create_instances(context, db_info, datastore, datastore_version,
-                              instances, extended_properties, locality,
-                              configuration, image_id)
-
-        # Calling taskmanager to further proceed for cluster-configuration
-        task_api.load(context, datastore_version.manager).create_cluster(
-            db_info.id)
-
-        return cls(context, db_info, datastore, datastore_version)
-
-    def grow(self, instances, image_id=None):
-        LOG.debug("Growing cluster %s.", self.id)
-
-        self.validate_cluster_available()
-
-        context = self.context
-        db_info = self.db_info
-        datastore = self.ds
-        datastore_version = self.ds_version
-
-        self._validate_cluster_instances(context, instances, datastore,
-                                         datastore_version)
-
-        db_info.update(task_status=ClusterTasks.GROWING_CLUSTER)
-        try:
-            locality = srv_grp.ServerGroup.convert_to_hint(self.server_group)
-            configuration_id = self.db_info.configuration_id
-            new_instances = self._create_instances(
-                context, db_info, datastore, datastore_version, instances,
-                None, locality, configuration_id, image_id)
-
-            task_api.load(context, datastore_version.manager).grow_cluster(
-                db_info.id, [instance.id for instance in new_instances])
-        except Exception:
-            db_info.update(task_status=ClusterTasks.NONE)
-            raise
-
-        return self.__class__(context, db_info,
-                              datastore, datastore_version)
-
-    def shrink(self, instances):
-        """Removes instances from a cluster."""
-        LOG.debug("Shrinking cluster %s.", self.id)
-
-        self.validate_cluster_available()
-        removal_instances = [Instance.load(self.context, inst_id)
-                             for inst_id in instances]
-        db_instances = DBInstance.find_all(
-            cluster_id=self.db_info.id, deleted=False).all()
-        if len(db_instances) - len(removal_instances) < 1:
-            raise exception.ClusterShrinkMustNotLeaveClusterEmpty()
-
-        self.db_info.update(task_status=ClusterTasks.SHRINKING_CLUSTER)
-        try:
-            task_api.load(self.context, self.ds_version.manager
-                          ).shrink_cluster(self.db_info.id,
-                                           [instance.id
-                                            for instance in removal_instances])
-        except Exception:
-            self.db_info.update(task_status=ClusterTasks.NONE)
-            raise
-
-        return self.__class__(self.context, self.db_info,
-                              self.ds, self.ds_version)
-
-    def restart(self):
-        self.rolling_restart()
-
-    def upgrade(self, datastore_version):
-        self.rolling_upgrade(datastore_version)
-
-    def configuration_attach(self, configuration_id):
-        self.rolling_configuration_update(configuration_id)
-
-    def configuration_detach(self):
-        self.rolling_configuration_remove()
-
-
-class MemberRolesMixin(object):
-    """Each member's role in the cluster, asked of the member when the view
-    shows the members in full, and the cluster's endpoint; a list shows
-    neither. List it before the view class it extends.
-
-    ``ROLES`` maps the (state, role) a member answers with to the role the
-    view shows; a state not in it shows as itself, in lower case.
-    """
-
-    ROLES = {}
-
-    def _endpoint(self):
-        conf = CONF.get(self.cluster.datastore_version.manager)
-        if not getattr(conf, 'cluster_load_balancer', False):
-            return None
-        try:
-            return loadbalancer.find_endpoint(
-                loadbalancer.OctaviaClient(),
-                loadbalancer.cluster_load_balancer_name(self.cluster.id),
-                conf.cluster_load_balancer_port)
-        except Exception as err:
-            LOG.info("No endpoint for cluster %s: %s", self.cluster.id, err)
-            return None
-
-    def data(self):
-        result = super(MemberRolesMixin, self).data()
-        if self.load_servers:
-            endpoint = self._endpoint()
-            if endpoint:
-                result['cluster']['endpoint'] = endpoint
-        return result
-
-    def _member_role(self, instance):
-        if instance.status not in ANSWERING_STATUSES:
-            return 'unknown'
-        try:
-            answer = self.cluster.get_guest(instance).get_member_role()
-        except Exception as err:
-            LOG.info("Member %s did not tell its role: %s", instance.id, err)
-            return 'unknown'
-        state, role = answer.get('state'), answer.get('role')
-        if (state, role) in self.ROLES:
-            return self.ROLES[(state, role)]
-        return state.lower() if state else 'unknown'
-
-    def _build_instances(self, ip_to_be_published_for=[],
-                         instance_dict_to_be_published_for=[]):
-        instances, ip_list = super(MemberRolesMixin, self)._build_instances(
-            ip_to_be_published_for, instance_dict_to_be_published_for)
-        if self.load_servers:
-            by_id = {instance.id: instance
-                     for instance in self.cluster.instances}
-            for instance_dict in instances:
-                instance = by_id.get(instance_dict['id'])
-                if instance is not None:
-                    instance_dict['role'] = self._member_role(instance)
-        return instances, ip_list
 
 
 class GaleraCommonClusterView(MemberRolesMixin, ClusterView):

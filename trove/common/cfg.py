@@ -755,7 +755,14 @@ pxc_opts = _build_mysql_family_datastore_opts(
 # the MySQL guest agent; a datastore names the options its earlier releases
 # used with a prefix, so that a configuration with those still works.
 def _with_cluster_probe_and_entry(opts, deprecated_prefix=None,
-                                  needs_all=False):
+                                  needs_all=False, ready_port=3307,
+                                  read_port=0, load_balancer_port=3306,
+                                  read_load_balancer_port=0,
+                                  recovery_grace=60):
+    """The options of a cluster whose members run the cluster probe and
+    whose endpoint is a load balancer: a datastore gives its ports and
+    the grace its recovery waits.
+    """
     def deprecated(name):
         if not deprecated_prefix:
             return None
@@ -773,14 +780,19 @@ def _with_cluster_probe_and_entry(opts, deprecated_prefix=None,
         opt(cfg.IntOpt, 'cluster_probe_timeout', default=5,
             help='Seconds a check may take before the member\'s state '
                  'counts as unknown.'),
-        opt(cfg.PortOpt, 'cluster_ready_port', default=3307,
+        opt(cfg.PortOpt, 'cluster_ready_port', default=ready_port,
             help='Port a member that takes writes answers on, redirected '
                  'to the database port in the database container; a load '
                  'balancer checks it.'),
+        cfg.IntOpt('cluster_read_port', default=read_port, min=0, max=65535,
+                   help='Port a member that serves reads (a standby that '
+                        'keeps up) answers on, redirected to the database '
+                        'port; the read endpoint\'s load balancer checks '
+                        'it. 0: no read port.'),
         opt(cfg.IntOpt, 'cluster_ready_port_reconcile', default=20,
             help='Checks of the member between two unconditional checks '
                  'that the ready port is as it should be.'),
-        opt(cfg.IntOpt, 'cluster_recovery_grace', default=60,
+        opt(cfg.IntOpt, 'cluster_recovery_grace', default=recovery_grace,
             help='Seconds a member of a complete cluster stays out of the '
                  'cluster before the guest agent tries to bring it back.'),
         opt(cfg.IntOpt, 'cluster_recovery_interval', default=30,
@@ -813,11 +825,68 @@ def _with_cluster_probe_and_entry(opts, deprecated_prefix=None,
                     help='Put a load balancer in front of the members of a '
                          'cluster, on their subnet: the cluster\'s endpoint, '
                          'sending to the members that take writes.'),
-        cfg.PortOpt('cluster_load_balancer_port', default=3306,
+        cfg.PortOpt('cluster_load_balancer_port', default=load_balancer_port,
                     help='Port the load balancer of a cluster listens on.'),
+        cfg.IntOpt('cluster_read_load_balancer_port',
+                   default=read_load_balancer_port, min=0, max=65535,
+                   help='Port the load balancer of a cluster listens on for '
+                        'reads, sending to the members that serve them. '
+                        '0: no read endpoint.'),
+        cfg.IntOpt('cluster_fence_grace', default=15,
+                   help='Seconds a member that takes writes goes on without '
+                        'any member following it before it closes its '
+                        'ready port, for a datastore whose members fence '
+                        'themselves.'),
+        cfg.IntOpt('cluster_failover_force_after', default=0,
+                   help='Seconds after which the task manager fails a '
+                        'cluster over to the best member here although not '
+                        'every member needed has answered. 0: never.'),
     ]
     names = {opt.name for opt in cluster}
     return [opt for opt in opts if opt.name not in names] + cluster
+
+
+def _with_cluster_strategy(opts, package, class_prefix, min_members=3,
+                           tcp_ports=(), root_controller=None):
+    """The options that make a datastore's clusters available: the
+    strategy classes of ``trove.common.strategies.cluster.experimental.
+    <package>`` named ``<class_prefix>{API,TaskManager,GuestAgent}Strategy``,
+    the member count a cluster needs, the ports its members talk to each
+    other on, and the root controller.
+    """
+    base = 'trove.common.strategies.cluster.experimental.%s.' % package
+    strategy = [
+        cfg.BoolOpt('cluster_support', default=True,
+                    help='Enable clusters to be created and managed.'),
+        cfg.IntOpt('min_cluster_member_count', default=min_members,
+                   help='Minimum number of members in a cluster.'),
+        cfg.ListOpt('cluster_tcp_ports', default=list(tcp_ports),
+                    item_type=ListOfPortsType,
+                    help='TCP ports the members of a cluster talk to each '
+                         'other on, opened in their security group as '
+                         'well, besides tcp_ports: the ready ports a member '
+                         'answers on.'),
+        cfg.StrOpt('api_strategy',
+                   default=base + 'api.%sAPIStrategy' % class_prefix,
+                   help='Class that implements datastore-specific API '
+                        'logic.'),
+        cfg.StrOpt('taskmanager_strategy',
+                   default=base + 'taskmanager.%sTaskManagerStrategy'
+                   % class_prefix,
+                   help='Class that implements datastore-specific task '
+                        'manager logic.'),
+        cfg.StrOpt('guestagent_strategy',
+                   default=base + 'guestagent.%sGuestAgentStrategy'
+                   % class_prefix,
+                   help='Class that implements datastore-specific Guest '
+                        'Agent API logic.'),
+    ]
+    if root_controller:
+        strategy.append(
+            cfg.StrOpt('root_controller', default=root_controller,
+                       help='Root controller implementation.'))
+    names = {opt.name for opt in strategy}
+    return [opt for opt in opts if opt.name not in names] + strategy
 
 
 # MySQL Group Replication, for MySQL and Percona Server: a group of three or
@@ -830,41 +899,16 @@ def _with_group_replication(opts):
     # on purpose, so a majority may lack what the last member held.
     opts = _with_cluster_probe_and_entry(
         opts, deprecated_prefix='group_replication_', needs_all=True)
+    # Root of a cluster is enabled on a writable member; a single
+    # instance is served as before.
+    opts = _with_cluster_strategy(
+        opts, 'group_replication', 'GroupReplication', min_members=3,
+        # The group communication port, and the ready port a member that
+        # takes writes answers on.
+        tcp_ports=["33061", "3307"],
+        root_controller='trove.extensions.mysql.service.'
+                        'ClusterWriterRootController')
     group_replication = [
-        cfg.BoolOpt('cluster_support', default=True,
-                    help='Enable clusters to be created and managed.'),
-        cfg.IntOpt('min_cluster_member_count', default=3,
-                   help='Minimum number of members in a Group Replication '
-                        'cluster.'),
-        cfg.ListOpt('cluster_tcp_ports', default=["33061", "3307"],
-                    item_type=ListOfPortsType,
-                    help='TCP ports the members of a cluster talk to each '
-                         'other on, opened in their security group as well: '
-                         'the group communication port, and the ready port '
-                         'a member that takes writes answers on.'),
-        cfg.StrOpt('api_strategy',
-                   default='trove.common.strategies.cluster.experimental.'
-                   'group_replication.api.GroupReplicationAPIStrategy',
-                   help='Class that implements datastore-specific API '
-                        'logic.'),
-        cfg.StrOpt('taskmanager_strategy',
-                   default='trove.common.strategies.cluster.experimental.'
-                   'group_replication.taskmanager.'
-                   'GroupReplicationTaskManagerStrategy',
-                   help='Class that implements datastore-specific task '
-                        'manager logic.'),
-        cfg.StrOpt('guestagent_strategy',
-                   default='trove.common.strategies.cluster.experimental.'
-                   'group_replication.guestagent.'
-                   'GroupReplicationGuestAgentStrategy',
-                   help='Class that implements datastore-specific Guest '
-                        'Agent API logic.'),
-        # Root of a cluster is enabled on a writable member; a single
-        # instance is served as before.
-        cfg.StrOpt('root_controller',
-                   default='trove.extensions.mysql.service.'
-                   'ClusterWriterRootController',
-                   help='Root controller implementation.'),
         # clusterrepuser is the account the members recover with.
         cfg.ListOpt('ignore_users',
                     default=['os_admin', 'root', 'clusterrepuser'],

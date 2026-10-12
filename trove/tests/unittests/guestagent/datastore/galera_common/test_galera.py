@@ -24,6 +24,7 @@ from trove.common.strategies.cluster.experimental.galera_common import (
 from trove.common import stream_codecs
 from trove.common import utils
 from trove.guestagent import api as guest_api
+from trove.guestagent.common import cluster_member
 from trove.guestagent.datastore.galera_common import manager as galera_manager
 from trove.guestagent.datastore.galera_common import service as galera_service
 from trove.guestagent.datastore.mariadb import manager as mariadb_manager
@@ -497,15 +498,15 @@ class TestManager(trove_testtools.TestCase):
         manager = FakeManager()
         manager.docker_client = mock.Mock()
         manager.app.DATABASE_PORT = 3306
-        with mock.patch.object(galera_manager.cluster_probe.ClusterProbe,
+        with mock.patch.object(cluster_member.cluster_probe.ClusterProbe,
                                'start') as start:
             manager.init_cluster_probe()
         self.assertIsInstance(manager.cluster_probe,
-                              galera_manager.cluster_probe.ClusterProbe)
+                              cluster_member.cluster_probe.ClusterProbe)
         self.assertIs(manager.app, manager.cluster_probe.app)
         start.assert_called_once()
         # A manager whose probe cannot be set up is still a manager.
-        with mock.patch.object(galera_manager.cluster_probe, 'ClusterProbe',
+        with mock.patch.object(cluster_member.cluster_probe, 'ClusterProbe',
                                side_effect=RuntimeError('no')):
             manager.init_cluster_probe()
 
@@ -845,19 +846,19 @@ class TestMemberView(trove_testtools.TestCase):
                               wsrep_local_state_comment='Initialized',
                               wsrep_ready='OFF', wsrep_cluster_size='1')
         self.assertEqual(('Initialized', None, False, False),
-                         tuple(self.app.member_view()))
+                         tuple(self.app.member_view())[:4])
         self.assertEqual([], self._asked())
 
     def test_a_joiner_has_no_role(self):
         self.status = _status(wsrep_local_state_comment='Joiner',
                               wsrep_ready='OFF')
         self.assertEqual(('Joiner', None, False, False),
-                         tuple(self.app.member_view()))
+                         tuple(self.app.member_view())[:4])
 
     def test_multi_writer(self):
         self.sections['trove'] = {'cluster_writer_mode': 'multi'}
         self.assertEqual(('Synced', 'PRIMARY', True, False),
-                         tuple(self.app.member_view()))
+                         tuple(self.app.member_view())[:4])
         # Without asking anybody.
         self.assertEqual([], self._asked())
 
@@ -865,7 +866,7 @@ class TestMemberView(trove_testtools.TestCase):
         # 10.0.0.1 is synced: it is the writer; 10.0.0.3 is above and is
         # not asked.
         self.assertEqual(('Synced', 'SECONDARY', False, False),
-                         tuple(self.app.member_view()))
+                         tuple(self.app.member_view())[:4])
         self.assertEqual(['10.0.0.1'], self._asked())
         command = self.container.exec_run.call_args.args[0]
         self.assertEqual('mysql', command[0])
@@ -878,7 +879,7 @@ class TestMemberView(trove_testtools.TestCase):
     def test_the_lowest_member_asks_nobody(self):
         self.sections['mysqld']['wsrep_node_address'] = '10.0.0.1'
         self.assertEqual(('Synced', 'PRIMARY', True, False),
-                         tuple(self.app.member_view()))
+                         tuple(self.app.member_view())[:4])
         self.assertEqual([], self._asked())
 
     def test_the_writer_is_asked_once_per_view(self):
@@ -899,7 +900,7 @@ class TestMemberView(trove_testtools.TestCase):
         # again at the next check, as 10.0.0.1 may be synced by then.
         self.peers['10.0.0.1'] = _status(wsrep_local_state_comment='Joined')
         self.assertEqual(('Synced', 'PRIMARY', True, False),
-                         tuple(self.app.member_view()))
+                         tuple(self.app.member_view())[:4])
         self.app.member_view()
         self.assertEqual(['10.0.0.1', '10.0.0.1'], self._asked())
         self.peers['10.0.0.1'] = _status()
@@ -947,14 +948,14 @@ class TestClientCommands(trove_testtools.TestCase):
         self.assertEqual('mariadb', mariadb_service.MariaDBApp.PEER_CLIENT)
         self.assertEqual('mysql', pxc_service.PXCApp.PEER_CLIENT)
 
-    @mock.patch.object(galera_manager.cluster_probe.ClusterProbe, 'start')
+    @mock.patch.object(cluster_member.cluster_probe.ClusterProbe, 'start')
     @mock.patch.object(mariadb_manager.Manager, 'docker_client',
                        new_callable=mock.PropertyMock)
     def test_the_mariadb_manager_runs_the_probe(self, _docker, start):
         self.patch_datastore_manager('mariadb')
         manager = mariadb_manager.Manager()
         self.assertIsInstance(manager.cluster_probe,
-                              galera_manager.cluster_probe.ClusterProbe)
+                              cluster_member.cluster_probe.ClusterProbe)
         self.assertEqual(3307, manager.cluster_probe.port.port)
         start.assert_called_once()
 
@@ -963,10 +964,13 @@ class TestClientCommands(trove_testtools.TestCase):
         manager.do_prepare('ctx', [], [], 512, [], None, None, None, None,
                            None, None, {'id': 'i1', 'writer_mode': 'multi'},
                            None)
-        manager.app.keep_writer_mode.assert_called_once_with('multi')
+        manager.app.keep_cluster_mode.assert_called_once_with('multi')
         manager.do_prepare('ctx', [], [], 512, [], None, None, None, None,
                            None, None, {'id': 'i1'}, None)
-        manager.app.keep_writer_mode.assert_called_once()
+        manager.app.keep_cluster_mode.assert_called_once()
+        # The cluster's mode is Galera's writer mode.
+        self.assertIs(galera_service.GaleraAppMixin.keep_writer_mode,
+                      galera_service.GaleraAppMixin.keep_cluster_mode)
 
 
 GRASTATE = """# GALERA saved state

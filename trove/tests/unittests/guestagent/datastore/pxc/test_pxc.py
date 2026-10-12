@@ -25,6 +25,7 @@ from trove.common import template
 from trove.common import utils
 from trove.extensions.common import models as extension_models
 from trove.guestagent import api as guest_api
+from trove.guestagent.common import cluster_member
 from trove.guestagent.datastore.galera_common import manager as galera_manager
 from trove.guestagent.datastore.galera_common import service as galera_service
 from trove.guestagent.datastore.group_replication import manager as gr_manager
@@ -64,7 +65,7 @@ class TestPXCDatastoreWiring(trove_testtools.TestCase):
         self.assertTrue(
             issubclass(manager_cls, galera_manager.GaleraManagerMixin))
 
-    @mock.patch.object(galera_manager.cluster_probe.ClusterProbe, 'start')
+    @mock.patch.object(cluster_member.cluster_probe.ClusterProbe, 'start')
     @mock.patch.object(mysql_manager.BaseManager, 'docker_client',
                        new_callable=mock.PropertyMock)
     def test_manager_runs_the_pxc_app(self, mock_docker_client, start):
@@ -76,7 +77,7 @@ class TestPXCDatastoreWiring(trove_testtools.TestCase):
         # With the cluster probe running, on the ready port of the pxc
         # options.
         self.assertIsInstance(manager.cluster_probe,
-                              galera_manager.cluster_probe.ClusterProbe)
+                              cluster_member.cluster_probe.ClusterProbe)
         self.assertEqual(3307, manager.cluster_probe.port.port)
         start.assert_called_once()
 

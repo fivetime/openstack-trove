@@ -37,6 +37,7 @@ class ProbeTestBase(trove_testtools.TestCase):
         self.app.member_view.return_value = _view('ONLINE', 'PRIMARY')
         self.app.was_last_standing.return_value = False
         self.conf = mock.Mock(cluster_probe_interval=3,
+                              cluster_read_port=0,
                               cluster_probe_timeout=5,
                               cluster_ready_port_reconcile=20,
                               cluster_ready_port=3307,
@@ -139,6 +140,62 @@ class TestClusterProbe(ProbeTestBase):
         self.assertEqual({'state': 'ONLINE', 'role': 'PRIMARY',
                           'writable': True, 'ready_port': True},
                          self.probe.snapshot())
+
+    def test_a_view_is_not_readable_unless_it_says_so(self):
+        # Galera and Group Replication views have no readable member: the
+        # field defaults to False and the probe asks for it with a default.
+        view = probe.MemberView('ONLINE', 'SECONDARY', False, False)
+        self.assertFalse(view.readable)
+        self.assertIsNone(self.probe.read_port)
+        self.probe.view = view
+        self.assertFalse(self.probe.readable())
+
+    def test_the_read_port_follows_the_readable_member(self):
+        # A datastore with a read port (a standby serving reads): the
+        # probe keeps it as it keeps the ready port, from the view's
+        # readable, and tells it in its snapshot.
+        self.conf.cluster_read_port = 5434
+        self.app.DATABASE_PORT = 5432
+        p = probe.ClusterProbe(self.app, mock.MagicMock(), conf=self.conf)
+        self.assertEqual((5434, 5432),
+                         (p.read_port.port, p.read_port.target_port))
+        p.port = mock.MagicMock(spec=readyport.ReadyPort)
+        p.port.pid = 4242
+        p.port.applied = None
+        p.port.container_pid.return_value = 4242
+        p.read_port = mock.MagicMock(spec=readyport.ReadyPort)
+        p.read_port.pid = 4242
+        p.read_port.applied = None
+        p.member = True
+        p._flags_loaded = True
+        self.app.member_view.return_value = probe.MemberView(
+            'streaming', 'standby', False, False, True)
+        p._tick()
+        p.port.ensure.assert_called_once_with(False, pid=4242)
+        p.read_port.ensure.assert_called_once_with(True, pid=4242)
+        p.port.applied = False
+        p.read_port.applied = True
+        self.assertEqual({'state': 'streaming', 'role': 'standby',
+                          'writable': False, 'ready_port': False,
+                          'readable': True, 'read_port': True},
+                         p.snapshot())
+        # Leaving closes both.
+        p.disable()
+        p.port.ensure.reset_mock()
+        p.read_port.ensure.reset_mock()
+        p._tick()
+        p.read_port.ensure.assert_called_once_with(False, pid=4242)
+
+    def test_the_reconcile_hook_runs_every_tick(self):
+        # An app with a reconcile is given every view; its failure does
+        # not keep the ports from being set.
+        self.app.reconcile.side_effect = Exception('later')
+        self.probe._tick()
+        self.app.reconcile.assert_called_once_with(self.probe.view)
+        self.probe.port.ensure.assert_called_once_with(True, pid=4242)
+        # An app without one.
+        del self.app.reconcile
+        self.probe._tick()
 
     @mock.patch.object(probe.loopingcall, 'FixedIntervalLoopingCall')
     def test_start(self, looping_call):

@@ -363,7 +363,8 @@ class TestGroupReplicationApp(trove_testtools.TestCase):
                                       ((None, None), False, False)):
             self._states(state)
             view = self.app.member_view()
-            self.assertEqual(state + (writable, down), tuple(view))
+            self.assertEqual(state + (writable, down), tuple(view)[:4])
+            self.assertFalse(view.readable)
             self._states(state)
             self.assertEqual(writable, self.app.is_writable_member())
 

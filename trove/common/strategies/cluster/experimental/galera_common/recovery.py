@@ -27,61 +27,19 @@ Galera brings the cluster back by itself when every member of the last
 primary component returns (pc.recovery); then nothing is waiting here.
 """
 
-import random
-import time
-
 from oslo_log import log as logging
 
-from trove.cluster import models as cluster_models
-from trove.cluster.tasks import ClusterTasks
-from trove.common import cfg
-from trove.common import clients
+from trove.common.strategies.cluster.experimental.common import (
+    recovery as common_recovery)
 from trove.guestagent.common import cluster_probe
-from trove.instance.models import DBInstance
 
 LOG = logging.getLogger(__name__)
-CONF = cfg.CONF
 
 
-class GaleraClusterRecovery(object):
+class GaleraClusterRecovery(common_recovery.ClusterRecovery):
     """The recovery of the Galera clusters of one datastore manager, run
     by the task manager every cluster_recovery_check_interval seconds.
     """
-
-    def __init__(self, manager, guest_factory=None):
-        self.manager = manager
-        self.conf = CONF.get(manager)
-        # The clusters seen waiting: when first, and when last tried; and
-        # the clusters being formed again: since when.
-        self.waiting_since = {}
-        self.last_try = {}
-        self.forming_since = {}
-        self.guest_factory = guest_factory or self._guest
-
-    def _guest(self, context, member):
-        return clients.create_guest_client(context, member.id, self.manager)
-
-    def _members(self, context, cluster_id):
-        """The cluster's members as the database holds them: the task
-        manager's context owns no tenant, so the instances are not loaded
-        through it, and the guest client needs only the id.
-        """
-        return DBInstance.find_all(cluster_id=cluster_id, deleted=False).all()
-
-    def _views(self, context, members):
-        """What every member says, PeerView each; a member that does not
-        answer is unreachable.
-        """
-        views = []
-        for member in members:
-            try:
-                answer = self.guest_factory(context, member).get_recovery_view(
-                    timeout=self.conf.cluster_peer_timeout)
-            except Exception as err:
-                LOG.debug("Member %s did not answer: %s", member.id, err)
-                answer = None
-            views.append((member, answer))
-        return views
 
     @staticmethod
     def _position(answer):
@@ -108,60 +66,19 @@ class GaleraClusterRecovery(object):
             self._position(answer))
             for other, answer in views if other is not member]
 
-    def check(self, context, db_cluster):
-        """One look at a cluster: nothing, or a member told to form the
-        cluster again.
+    def _needs_look(self, answers):
+        """A primary component up: whoever waits joins it. Nobody waiting:
+        down, starting, or being built. Neither is for the recovery.
         """
-        cluster_id = db_cluster.id
-        if db_cluster.task_status == ClusterTasks.RECOVERING_CLUSTER:
-            self._follow(context, db_cluster)
-            return
-        if db_cluster.task_status != ClusterTasks.NONE:
-            return
-        members = self._members(context, cluster_id)
-        if len(members) < 2:
-            return
-        views = self._views(context, members)
-        answers = [answer for _m, answer in views if answer]
         if any(answer.get('in_group') for answer in answers):
-            # A primary component is up; whoever waits joins it.
-            self.waiting_since.pop(cluster_id, None)
-            return
-        if not any(answer.get('waiting') for answer in answers):
-            # Down, starting, or being built: not for the recovery.
-            self.waiting_since.pop(cluster_id, None)
-            return
-        now = time.monotonic()
-        since = self.waiting_since.setdefault(cluster_id, now)
-        if now - since < self.conf.cluster_recovery_grace:
-            return
-        if now - self.last_try.get(cluster_id, 0) < \
-                self.conf.cluster_recovery_interval:
-            return
-        self.last_try[cluster_id] = now
-        self._decide(context, db_cluster, members, views)
+            return False
+        return any(answer.get('waiting') for answer in answers)
 
-    def _follow(self, context, db_cluster):
-        """A cluster being formed again: free it once a member is in a
-        primary component (the others join by themselves), or once the
-        member told to form it has had its time; the next look decides
-        anew then.
+    def _settled(self, views):
+        """Formed again: a member is in a primary component, the others
+        join by themselves.
         """
-        cluster_id = db_cluster.id
-        now = time.monotonic()
-        since = self.forming_since.setdefault(cluster_id, now)
-        views = self._views(context, self._members(context, cluster_id))
-        if any(answer and answer.get('in_group') for _m, answer in views):
-            LOG.info("Cluster %s is formed again.", cluster_id)
-        elif now - since < self.conf.cluster_recovery_timeout:
-            return
-        else:
-            LOG.error("Cluster %s was not formed again within %s seconds; "
-                      "looking at it anew.", cluster_id,
-                      self.conf.cluster_recovery_timeout)
-        self.forming_since.pop(cluster_id, None)
-        self.waiting_since.pop(cluster_id, None)
-        db_cluster.update(task_status=ClusterTasks.NONE)
+        return any(answer and answer.get('in_group') for _m, answer in views)
 
     def _decide(self, context, db_cluster, members, views):
         cluster_id = db_cluster.id
@@ -229,22 +146,15 @@ class GaleraClusterRecovery(object):
                      chosen.id)
             return
         # Another look after a moment: only when nothing changed.
-        time.sleep(random.uniform(0, self.conf.cluster_bootstrap_jitter))
-        again = self._views(context, members)
-        if ([(m.id, a and a.get('in_group'), a and a.get('waiting'),
-              self._position(a)) for m, a in again] !=
-                [(m.id, a and a.get('in_group'), a and a.get('waiting'),
-                  self._position(a)) for m, a in views]):
+        if not self._unchanged_after_jitter(
+                context, members, views,
+                lambda a: (a and a.get('in_group'), a and a.get('waiting'),
+                           self._position(a))):
             LOG.info("Cluster %s changed meanwhile; not forming it now.",
                      cluster_id)
             return
-        # The cluster's task keeps another task manager, and a grow or a
-        # shrink, off it meanwhile.
-        db_cluster = cluster_models.DBCluster.find_by(id=cluster_id)
-        if db_cluster.task_status != ClusterTasks.NONE:
+        if not self._take(cluster_id):
             return
-        db_cluster.update(task_status=ClusterTasks.RECOVERING_CLUSTER)
-        self.forming_since[cluster_id] = time.monotonic()
         try:
             LOG.info("Forming cluster %s again on member %s.", cluster_id,
                      chosen.id)
@@ -252,13 +162,4 @@ class GaleraClusterRecovery(object):
         except Exception:
             LOG.exception("Member %s of cluster %s could not be told to "
                           "form it again.", chosen.id, cluster_id)
-            self.forming_since.pop(cluster_id, None)
-            db_cluster.update(task_status=ClusterTasks.NONE)
-
-    def run(self, context, db_clusters):
-        for db_cluster in db_clusters:
-            try:
-                self.check(context, db_cluster)
-            except Exception:
-                LOG.exception("The recovery check of cluster %s failed.",
-                              db_cluster.id)
+            self._release(cluster_id)

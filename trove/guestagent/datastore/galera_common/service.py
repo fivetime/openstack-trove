@@ -163,6 +163,9 @@ class GaleraAppMixin(object):
         self.configuration_manager.apply_system_override(
             {TROVE_SECTION: {WRITER_MODE_OPTION: mode}}, CNF_MODE)
 
+    # The name the cluster member mixin calls it by.
+    keep_cluster_mode = keep_writer_mode
+
     @property
     def writer_mode(self):
         """Single: one member takes writes, the lowest address of those

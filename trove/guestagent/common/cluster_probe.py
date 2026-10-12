@@ -62,7 +62,8 @@ PeerView = collections.namedtuple(
     'PeerView', 'ip reachable in_group sees_group position')
 # What the member is now: its state and role as the datastore names them,
 # whether it takes writes, and whether it is out of the cluster.
-MemberView = collections.namedtuple('MemberView', 'state role writable down')
+MemberView = collections.namedtuple(
+    'MemberView', 'state role writable down readable', defaults=(False,))
 UNKNOWN_MEMBER = MemberView(None, None, False, False)
 
 
@@ -135,6 +136,11 @@ class ClusterProbe(object):
         self.last_recovery = 0
         self.port = readyport.ReadyPort(
             docker_client, conf.cluster_ready_port, app.DATABASE_PORT)
+        # A second port, open on a member that serves reads (a standby of
+        # a primary), for a datastore whose conf has one.
+        read_port = getattr(conf, 'cluster_read_port', 0)
+        self.read_port = readyport.ReadyPort(
+            docker_client, read_port, app.DATABASE_PORT) if read_port else None
         self.view = UNKNOWN_MEMBER
         self.since = time.monotonic()
         # Whether the member is in a cluster, whether the cluster is
@@ -208,6 +214,10 @@ class ClusterProbe(object):
     def writable(self):
         return not self.leaving and bool(self.view.writable)
 
+    def readable(self):
+        return not self.leaving and bool(getattr(self.view, 'readable',
+                                                 False))
+
     def _tick(self):
         try:
             self._run()
@@ -225,17 +235,30 @@ class ClusterProbe(object):
                      self.view.role, view.state, view.role)
             self.since = time.monotonic()
         self.view = view
-
-        wanted = self.writable()
-        pid = self.port.container_pid()
-        # The check costs a sudo and the xtables lock: only when something
-        # changed, or now and then in case the rule went away.
-        if (wanted != self.port.applied or pid != self.port.pid or
-                self.ticks % self.reconcile_every == 0):
+        # What the member does for the cluster every tick, if anything
+        # (a primary keeping its standbys' settings right).
+        reconcile = getattr(self.app, 'reconcile', None)
+        if reconcile is not None:
             try:
-                self.port.ensure(wanted, pid=pid)
+                reconcile(view)
             except Exception:
-                LOG.exception("Could not set the ready port.")
+                LOG.exception("The member's reconcile failed.")
+
+        pid = self.port.container_pid()
+        ports = [(self.port, self.writable())]
+        if self.read_port is not None:
+            ports.append((self.read_port, self.readable()))
+        for port, wanted in ports:
+            # The check costs a sudo and the xtables lock: only when
+            # something changed, or now and then in case the rule went
+            # away.
+            if (wanted != port.applied or pid != port.pid or
+                    self.ticks % self.reconcile_every == 0):
+                try:
+                    port.ensure(wanted, pid=pid)
+                except Exception:
+                    LOG.exception("Could not set the ready port %s.",
+                                  port.port)
         self.ticks += 1
 
         now = time.monotonic()
@@ -298,5 +321,10 @@ class ClusterProbe(object):
                    for p in reachable)
 
     def snapshot(self):
-        return {'state': self.view.state, 'role': self.view.role,
-                'writable': self.writable(), 'ready_port': self.port.applied}
+        snapshot = {'state': self.view.state, 'role': self.view.role,
+                    'writable': self.writable(),
+                    'ready_port': self.port.applied}
+        if self.read_port is not None:
+            snapshot['readable'] = self.readable()
+            snapshot['read_port'] = self.read_port.applied
+        return snapshot

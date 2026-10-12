@@ -16,6 +16,8 @@ from oslo_log import log as logging
 
 from trove.common import cfg
 from trove.common.strategies.cluster import base as cluster_base
+from trove.common.strategies.cluster.experimental.common import (
+    guestagent as common_guestagent)
 from trove.guestagent import api as guest_api
 
 
@@ -30,7 +32,7 @@ class GaleraCommonGuestAgentStrategy(cluster_base.BaseGuestAgentStrategy):
         return GaleraCommonGuestAgentAPI
 
 
-class GaleraCommonGuestAgentAPI(guest_api.API):
+class GaleraCommonGuestAgentAPI(common_guestagent.ClusterGuestAgentAPI):
     """Cluster Specific Datastore Guest API
 
     **** VERSION CONTROLLED API ****
@@ -62,22 +64,6 @@ class GaleraCommonGuestAgentAPI(guest_api.API):
                    version=version,
                    admin_password=admin_password)
 
-    def cluster_complete(self):
-        """Set the status that the cluster is build is complete."""
-        LOG.debug("Notifying cluster install completion.")
-        version = guest_api.API.API_BASE_VERSION
-
-        return self._call("cluster_complete", self.agent_high_timeout,
-                          version=version)
-
-    def get_cluster_context(self):
-        """Get the context of the cluster."""
-        LOG.debug("Getting the cluster context.")
-        version = guest_api.API.API_BASE_VERSION
-
-        return self._call("get_cluster_context", self.agent_high_timeout,
-                          version=version)
-
     def write_cluster_configuration_overrides(self, cluster_configuration):
         """Write an updated the cluster configuration."""
         LOG.debug("Writing an updated the cluster configuration.")
@@ -87,32 +73,6 @@ class GaleraCommonGuestAgentAPI(guest_api.API):
                    self.agent_high_timeout,
                    version=version,
                    cluster_configuration=cluster_configuration)
-
-    def leave_cluster(self):
-        """Leave the cluster, before the member is deleted."""
-        LOG.debug("Leaving the cluster.")
-        self._call("leave_cluster", self.agent_high_timeout,
-                   version=guest_api.API.API_BASE_VERSION)
-
-    def is_writable_member(self):
-        """Whether the member takes writes."""
-        return self._call("is_writable_member", self.agent_high_timeout,
-                          version=guest_api.API.API_BASE_VERSION)
-
-    def get_member_role(self):
-        """The member's state and role in the cluster. For a view: a
-        member that does not answer soon counts as unknown.
-        """
-        return self._call("get_member_role", self.agent_low_timeout,
-                          version=guest_api.API.API_BASE_VERSION)
-
-    def get_recovery_view(self, timeout=None):
-        """Where the member stands, for the recovery of the cluster: a
-        member that does not answer in time is unreachable.
-        """
-        return self._call("get_recovery_view",
-                          timeout or self.agent_low_timeout,
-                          version=guest_api.API.API_BASE_VERSION)
 
     def bootstrap_cluster(self):
         """Form the cluster again on this member: told, not waited for.

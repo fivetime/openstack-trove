@@ -20,6 +20,10 @@ from unittest import mock
 from trove.cluster import views as cluster_views
 from trove.common import cfg
 from trove.common import exception
+from trove.common.strategies.cluster.experimental.common import (
+    api as common_api)
+from trove.common.strategies.cluster.experimental.common import (
+    taskmanager as common_taskmanager)
 from trove.common.strategies.cluster.experimental.galera_common import (
     api as galera_api)
 from trove.common.strategies.cluster.experimental.galera_common import (
@@ -127,8 +131,8 @@ class GaleraCommonAPITest(trove_testtools.TestCase):
 
     @mock.patch.object(cluster_views.ClusterView, 'data',
                        side_effect=lambda: {'cluster': {'id': 'c1'}})
-    @mock.patch.object(galera_api.loadbalancer, 'OctaviaClient')
-    @mock.patch.object(galera_api.loadbalancer, 'find_endpoint')
+    @mock.patch.object(common_api.loadbalancer, 'OctaviaClient')
+    @mock.patch.object(common_api.loadbalancer, 'find_endpoint')
     def test_endpoint(self, find_endpoint, client, data):
         cluster = mock.Mock(id='c1')
         cluster.datastore_version.manager = 'mariadb'
@@ -148,9 +152,9 @@ class GaleraCommonAPITest(trove_testtools.TestCase):
     def test_no_endpoint_without_the_load_balancer_option(self, data):
         cluster = mock.Mock(id='c1')
         cluster.datastore_version.manager = 'other'
-        with mock.patch.object(galera_api.CONF, 'get',
+        with mock.patch.object(common_api.CONF, 'get',
                                return_value=mock.Mock(spec=[])), \
-                mock.patch.object(galera_api.loadbalancer,
+                mock.patch.object(common_api.loadbalancer,
                                   'find_endpoint') as find_endpoint:
             result = galera_api.GaleraCommonClusterView(
                 cluster, load_servers=True).data()
@@ -361,7 +365,7 @@ class GaleraCommonTasksTest(trove_testtools.TestCase):
                                return_value=mock.Mock(spec=[])):
             self.assertFalse(tasks._load_balancer_enabled())
 
-    @mock.patch.object(galera_taskmanager, 'DBInstance')
+    @mock.patch.object(common_taskmanager, 'DBInstance')
     def test_fail_new_members(self, db_instance):
         tasks = galera_taskmanager.GaleraCommonClusterTasks.__new__(
             galera_taskmanager.GaleraCommonClusterTasks)
@@ -379,6 +383,7 @@ class ClusterWriterRootTest(trove_testtools.TestCase):
 
     def setUp(self):
         super(ClusterWriterRootTest, self).setUp()
+        from trove.extensions.common import service as common_ext
         from trove.extensions.mysql import service as mysql_ext
         self.ext = mysql_ext
         self.controller = mysql_ext.ClusterWriterRootController()
@@ -387,13 +392,13 @@ class ClusterWriterRootTest(trove_testtools.TestCase):
 
         def guest_client(context, member_id):
             return self.guests[member_id]
-        mock.patch.object(mysql_ext.strategy, 'load_guestagent_strategy',
+        mock.patch.object(common_ext.strategy, 'load_guestagent_strategy',
                           return_value=mock.Mock(
                               guest_client_class=guest_client)).start()
-        mock.patch.object(mysql_ext.DBInstance, 'find_by',
+        mock.patch.object(common_ext.DBInstance, 'find_by',
                           return_value=mock.Mock(
                               datastore_version_id='v')).start()
-        mock.patch.object(mysql_ext.datastore_models.DatastoreVersion,
+        mock.patch.object(common_ext.datastore_models.DatastoreVersion,
                           'load_by_uuid',
                           return_value=mock.Mock(manager='pxc')).start()
         mock.patch.object(self.controller._cluster, '_find_cluster_node_ids',

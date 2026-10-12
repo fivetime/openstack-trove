@@ -1,0 +1,319 @@
+# Copyright [2015] Hewlett-Packard Development Company, L.P.
+# Copyright 2016 Tesora Inc.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""The API side of a homogeneous cluster: creation, grow and shrink of
+members that are all alike, a mode the tenant chooses with an extended
+property, and the view with every member's role and the cluster's
+endpoint.
+"""
+
+import time
+
+from oslo_log import log as logging
+
+from trove.cluster import models as cluster_models
+from trove.cluster.tasks import ClusterTasks
+from trove.common import cfg
+from trove.common import exception
+from trove.common.i18n import _
+from trove.common import loadbalancer
+from trove.common import server_group as srv_grp
+from trove.instance.models import DBInstance
+from trove.instance.models import Instance
+from trove.quota.quota import check_quotas
+from trove.taskmanager import api as task_api
+
+
+LOG = logging.getLogger(__name__)
+CONF = cfg.CONF
+
+# Members in these are asked for their role; the others cannot answer.
+ANSWERING_STATUSES = ('ACTIVE', 'HEALTHY')
+
+
+def validate_cluster_instances(context, instances, datastore,
+                               datastore_version):
+    """Validate the flavor and volume of the members, that they are alike,
+    their quota and their networks.
+    """
+    ds_conf = CONF.get(datastore_version.manager)
+    num_instances = len(instances)
+
+    # Checking volumes and get delta for quota check
+    cluster_models.validate_instance_flavors(
+        context, instances, ds_conf.volume_support, ds_conf.device_path)
+
+    req_volume_size = cluster_models.get_required_volume_size(
+        instances, ds_conf.volume_support)
+
+    cluster_models.assert_homogeneous_cluster(instances)
+
+    deltas = {'instances': num_instances, 'volumes': req_volume_size}
+
+    # quota check
+    check_quotas(context.project_id, deltas)
+
+    # Checking networks are same for the cluster
+    cluster_models.validate_instance_nics(context, instances)
+
+
+class ClusterModeMixin(object):
+    """A cluster whose tenant chooses a mode with an extended property:
+    the property's key, the modes it takes and the one it gets when the
+    request names none. A ``MODE_KEY`` of None: no mode.
+    """
+
+    MODE_KEY = None
+    MODES = ()
+    DEFAULT_MODE = None
+
+    @classmethod
+    def _member_config(cls, db_info, extended_properties):
+        """What a member is given with its creation: the members of a
+        grown cluster get the cluster's mode from the task manager instead.
+        """
+        config = {"id": db_info.id,
+                  "instance_type": "member"}
+        mode = (extended_properties or {}).get(cls.MODE_KEY)
+        if cls.MODE_KEY and mode:
+            config[cls.MODE_KEY] = mode
+        return config
+
+    @classmethod
+    def _validate_mode(cls, extended_properties):
+        """The extended properties with the mode, or none for a cluster
+        without one.
+        """
+        if not cls.MODE_KEY:
+            return extended_properties
+        properties = dict(extended_properties or {})
+        mode = properties.setdefault(cls.MODE_KEY, cls.DEFAULT_MODE)
+        if mode not in cls.MODES:
+            raise exception.BadRequest(
+                _("The extended property %(key)s must be one of "
+                  "%(modes)s.") % {'key': cls.MODE_KEY,
+                                   'modes': ', '.join(cls.MODES)})
+        return properties
+
+
+class HomogeneousCluster(ClusterModeMixin, cluster_models.Cluster):
+    """A cluster of members that are all alike, created with at least
+    ``min_cluster_member_count`` of them, grown and shrunk by members, and
+    restarted, upgraded and reconfigured one member after another.
+    """
+
+    @staticmethod
+    def _validate_cluster_instances(context, instances, datastore,
+                                    datastore_version):
+        validate_cluster_instances(context, instances, datastore,
+                                   datastore_version)
+
+    @classmethod
+    def _create_instances(cls, context, db_info, datastore, datastore_version,
+                          instances, extended_properties, locality,
+                          configuration_id, image_id):
+        member_config = cls._member_config(db_info, extended_properties)
+        name_index = int(time.time())
+        for instance in instances:
+            if not instance.get("name"):
+                instance['name'] = "%s-member-%s" % (db_info.name,
+                                                     str(name_index))
+                name_index += 1
+
+        return [Instance.create(context,
+                                instance['name'],
+                                instance['flavor_id'],
+                                datastore_version.image_id
+                                if datastore_version.image_id else image_id,
+                                [], [],
+                                datastore, datastore_version,
+                                instance.get('volume_size', None),
+                                None,
+                                availability_zone=instance.get(
+                                    'availability_zone', None),
+                                nics=instance.get('nics', None),
+                                configuration_id=configuration_id,
+                                cluster_config=member_config,
+                                volume_type=instance.get(
+                                    'volume_type', None),
+                                modules=instance.get('modules'),
+                                locality=locality,
+                                region_name=instance.get('region_name')
+                                )
+                for instance in instances]
+
+    @classmethod
+    def create(cls, context, name, datastore, datastore_version,
+               instances, extended_properties, locality, configuration,
+               image_id=None):
+        LOG.debug("Initiating %s cluster creation.",
+                  datastore_version.manager)
+        ds_conf = CONF.get(datastore_version.manager)
+        # Check number of instances is at least min_cluster_member_count
+        if len(instances) < ds_conf.min_cluster_member_count:
+            raise exception.ClusterNumInstancesNotLargeEnough(
+                num_instances=ds_conf.min_cluster_member_count)
+        extended_properties = cls._validate_mode(extended_properties)
+        cls._validate_cluster_instances(context, instances, datastore,
+                                        datastore_version)
+        # Updating Cluster Task
+        db_info = cluster_models.DBCluster.create(
+            name=name, tenant_id=context.project_id,
+            datastore_version_id=datastore_version.id,
+            task_status=ClusterTasks.BUILDING_INITIAL,
+            configuration_id=configuration)
+
+        cls._create_instances(context, db_info, datastore, datastore_version,
+                              instances, extended_properties, locality,
+                              configuration, image_id)
+
+        # Calling taskmanager to further proceed for cluster-configuration
+        task_api.load(context, datastore_version.manager).create_cluster(
+            db_info.id)
+
+        return cls(context, db_info, datastore, datastore_version)
+
+    def grow(self, instances, image_id=None):
+        LOG.debug("Growing cluster %s.", self.id)
+
+        self.validate_cluster_available()
+
+        context = self.context
+        db_info = self.db_info
+        datastore = self.ds
+        datastore_version = self.ds_version
+
+        self._validate_cluster_instances(context, instances, datastore,
+                                         datastore_version)
+
+        db_info.update(task_status=ClusterTasks.GROWING_CLUSTER)
+        try:
+            locality = srv_grp.ServerGroup.convert_to_hint(self.server_group)
+            configuration_id = self.db_info.configuration_id
+            new_instances = self._create_instances(
+                context, db_info, datastore, datastore_version, instances,
+                None, locality, configuration_id, image_id)
+
+            task_api.load(context, datastore_version.manager).grow_cluster(
+                db_info.id, [instance.id for instance in new_instances])
+        except Exception:
+            db_info.update(task_status=ClusterTasks.NONE)
+            raise
+
+        return self.__class__(context, db_info,
+                              datastore, datastore_version)
+
+    def shrink(self, instances):
+        """Removes instances from a cluster."""
+        LOG.debug("Shrinking cluster %s.", self.id)
+
+        self.validate_cluster_available()
+        removal_instances = [Instance.load(self.context, inst_id)
+                             for inst_id in instances]
+        db_instances = DBInstance.find_all(
+            cluster_id=self.db_info.id, deleted=False).all()
+        if len(db_instances) - len(removal_instances) < 1:
+            raise exception.ClusterShrinkMustNotLeaveClusterEmpty()
+
+        self.db_info.update(task_status=ClusterTasks.SHRINKING_CLUSTER)
+        try:
+            task_api.load(self.context, self.ds_version.manager
+                          ).shrink_cluster(self.db_info.id,
+                                           [instance.id
+                                            for instance in removal_instances])
+        except Exception:
+            self.db_info.update(task_status=ClusterTasks.NONE)
+            raise
+
+        return self.__class__(self.context, self.db_info,
+                              self.ds, self.ds_version)
+
+    def restart(self):
+        self.rolling_restart()
+
+    def upgrade(self, datastore_version):
+        self.rolling_upgrade(datastore_version)
+
+    def configuration_attach(self, configuration_id):
+        self.rolling_configuration_update(configuration_id)
+
+    def configuration_detach(self):
+        self.rolling_configuration_remove()
+
+
+class MemberRolesMixin(object):
+    """Each member's role in the cluster, asked of the member when the view
+    shows the members in full, and the cluster's endpoint; a list shows
+    neither. List it before the view class it extends.
+
+    ``ROLES`` maps the (state, role) a member answers with to the role the
+    view shows; a state not in it shows as itself, in lower case.
+    ``_member_roles`` gives every member's role at once; by default each
+    member is asked for its own.
+    """
+
+    ROLES = {}
+
+    def _endpoint(self):
+        conf = CONF.get(self.cluster.datastore_version.manager)
+        if not getattr(conf, 'cluster_load_balancer', False):
+            return None
+        try:
+            return loadbalancer.find_endpoint(
+                loadbalancer.OctaviaClient(),
+                loadbalancer.cluster_load_balancer_name(self.cluster.id),
+                conf.cluster_load_balancer_port)
+        except Exception as err:
+            LOG.info("No endpoint for cluster %s: %s", self.cluster.id, err)
+            return None
+
+    def data(self):
+        result = super(MemberRolesMixin, self).data()
+        if self.load_servers:
+            endpoint = self._endpoint()
+            if endpoint:
+                result['cluster']['endpoint'] = endpoint
+        return result
+
+    def _role_name(self, answer):
+        state, role = answer.get('state'), answer.get('role')
+        if (state, role) in self.ROLES:
+            return self.ROLES[(state, role)]
+        return state.lower() if state else 'unknown'
+
+    def _member_role(self, instance):
+        if instance.status not in ANSWERING_STATUSES:
+            return 'unknown'
+        try:
+            answer = self.cluster.get_guest(instance).get_member_role()
+        except Exception as err:
+            LOG.info("Member %s did not tell its role: %s", instance.id, err)
+            return 'unknown'
+        return self._role_name(answer)
+
+    def _member_roles(self, instances):
+        """The role of every member, by id."""
+        return {instance.id: self._member_role(instance)
+                for instance in instances}
+
+    def _build_instances(self, ip_to_be_published_for=[],
+                         instance_dict_to_be_published_for=[]):
+        instances, ip_list = super(MemberRolesMixin, self)._build_instances(
+            ip_to_be_published_for, instance_dict_to_be_published_for)
+        if self.load_servers:
+            roles = self._member_roles(self.cluster.instances)
+            for instance_dict in instances:
+                if instance_dict['id'] in roles:
+                    instance_dict['role'] = roles[instance_dict['id']]
+        return instances, ip_list

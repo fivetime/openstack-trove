@@ -16,9 +16,7 @@ import abc
 import os
 import re
 
-import eventlet
 from oslo_log import log as logging
-from oslo_utils import encodeutils
 import sqlalchemy
 from sqlalchemy import event
 from sqlalchemy import exc
@@ -35,9 +33,9 @@ from trove.common import ssl
 from trove.common import utils
 from trove.guestagent.common.configuration import ConfigurationManager
 from trove.guestagent.common.configuration import ImportOverrideStrategy
+from trove.guestagent.common import container_exec
 from trove.guestagent.common import guestagent_utils
 from trove.guestagent.common import operating_system
-from trove.guestagent.common import readyport
 from trove.guestagent.common import sql_query
 from trove.guestagent.datastore import service
 from trove.guestagent.utils import docker as docker_util
@@ -460,25 +458,8 @@ class BaseMySqlAdmin(object, metaclass=abc.ABCMeta):
                 client.execute(text(stmt))
 
 
-def exec_client_in_container(docker_client, command, environment, timeout,
-                             container_name=readyport.CONTAINER_NAME):
-    """Run a client command in the database container and return what it
-    printed; raise when it failed, did not finish in time or the container
-    is not there.
-
-    For a cluster member asking a peer: the tenant NIC, through which the
-    members see each other, lives in the container (DOCKER_HOST_NIC_MODE),
-    and the guest agent's own namespace has only the management network.
-    The client in the image is used, with the password in the environment
-    and not on the command line.
-    """
-    container = docker_client.containers.get(container_name)
-    with eventlet.Timeout(timeout):
-        code, output = container.exec_run(command, environment=environment)
-    output = encodeutils.safe_decode(output or b'')
-    if code != 0:
-        raise exception.TroveError(output.strip())
-    return output
+# The name the MySQL family's modules have used.
+exec_client_in_container = container_exec.exec_client_in_container
 
 
 class BaseMySqlApp(service.BaseDbApp):
