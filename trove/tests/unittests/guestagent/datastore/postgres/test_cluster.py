@@ -470,8 +470,6 @@ class FailoverTest(ClusterAppTestBase):
         self.app._update_cluster(members=MEMBERS, mode='sync', self_id='i2',
                                  primary_id='i1', replication_user=USER)
         mock.patch.object(cluster.operating_system, 'remove').start()
-        self.connect = mock.patch.object(cluster.socket,
-                                         'create_connection').start()
         self.app._self_ip = mock.Mock(return_value='10.0.0.2')
         self.queries = []
 
@@ -580,9 +578,13 @@ class FailoverTest(ClusterAppTestBase):
         self.app.adm.query.return_value = [('streaming',)]
         self.app.fenced = True
         self.app.rejoin_cluster({'id': 'i3', 'host': '10.0.0.3'})
-        # The stale pid file goes, then pg_rewind runs in the parked
-        # container against the new primary, with the server's own
-        # configuration file.
+        # The primary is waited for from the parked container (the
+        # tenant NIC is the database container's); the stale pid file
+        # goes; then pg_rewind runs in the parked container against the
+        # new primary, with the server's own configuration file.
+        commands = [c.args[0] for c in container.exec_run.call_args_list]
+        self.assertEqual(['sh', 'pg_rewind'], [c[0] for c in commands])
+        self.assertIn('pg_isready -h 10.0.0.3 -p 5432 -q', commands[0][2])
         cluster.operating_system.remove.assert_called_once_with(
             self.app.datadir + '/postmaster.pid', force=True, as_root=True)
         self.assertEqual(
@@ -590,7 +592,7 @@ class FailoverTest(ClusterAppTestBase):
              '--source-server=host=10.0.0.3 port=5432 user=replicator '
              'dbname=postgres',
              '--config-file=/etc/postgresql/postgresql.conf', '--progress'],
-            container.exec_run.call_args.args[0])
+            commands[1])
         self.assertEqual({'PGPASSWORD': 'pw'},
                          container.exec_run.call_args.kwargs['environment'])
         cluster.utils.execute_with_timeout.assert_not_called()
@@ -606,40 +608,40 @@ class FailoverTest(ClusterAppTestBase):
                          [c[0] for c in self.app.calls])
         self.assertFalse(self.app.rebuilding)
         self.assertFalse(self.app.fenced)
-        self.connect.assert_called_with(('10.0.0.3', 5432), timeout=3)
 
-    @mock.patch.object(cluster.time, 'time', side_effect=range(0, 1000, 10))
-    def test_a_rejoin_waits_for_the_primary(self, _time):
-        # The member's own link may still be coming back: the primary
-        # is waited for; the cluster file names it already, so that the
-        # member stays closed and the task manager tells it again.
-        self.connect.side_effect = [OSError('no route'), OSError('no route'),
-                                    mock.Mock()]
-        with mock.patch.object(cluster.docker_util, 'start_container'), \
-                mock.patch.object(cluster.docker_util, 'remove_container'):
-            container = self.app.docker_client.containers.get.return_value
-            container.exec_run.return_value = (0, b'')
-            self.app.adm.query.return_value = [('streaming',)]
-            self.app.rejoin_cluster({'id': 'i3', 'host': '10.0.0.3'})
-        self.assertEqual(3, self.connect.call_count)
-        self.connect.side_effect = OSError('no route')
-        self.app.calls = []
+    @mock.patch.object(cluster.docker_util, 'start_container')
+    @mock.patch.object(cluster.docker_util, 'remove_container')
+    def test_a_rejoin_without_the_primary_leaves_the_member_stopped(
+            self, remove, start):
+        # The member's own link may still be coming back: when the
+        # primary is not reachable in time, the data is left alone, the
+        # member stays stopped and the cluster file names the primary,
+        # so that the task manager tells it again.
+        container = self.app.docker_client.containers.get.return_value
+        container.exec_run.return_value = (1, b'not reachable')
         self.assertRaises(exception.TroveError, self.app.rejoin_cluster,
                           {'id': 'i3', 'host': '10.0.0.3'})
-        self.assertEqual([], self.app.calls)
+        self.assertEqual([('stop_db',)], self.app.calls)
+        self.assertEqual(1, container.exec_run.call_count)
         self.assertEqual('i3', self.app.primary_id)
+        self.assertFalse(self.app.rebuilding)
+
+    def test_a_rejoin_under_way_is_not_started_twice(self):
+        self.app.rebuilding = True
+        self.app.rejoin_cluster({'id': 'i3', 'host': '10.0.0.3'})
+        self.assertEqual([], self.app.calls)
 
     @mock.patch.object(cluster.docker_util, 'start_container')
     @mock.patch.object(cluster.docker_util, 'remove_container')
     def test_rejoin_by_a_base_backup_when_the_rewind_fails(self, remove,
                                                            start):
         container = self.app.docker_client.containers.get.return_value
-        container.exec_run.side_effect = [(1, b'could not find common '
-                                              b'ancestor'), (0, b'')]
+        container.exec_run.side_effect = [
+            (0, b''), (1, b'could not find common ancestor'), (0, b'')]
         self.app.adm.query.return_value = [('streaming',)]
         self.app.rejoin_cluster({'id': 'i3', 'host': '10.0.0.3'})
         commands = [c.args[0][0] for c in container.exec_run.call_args_list]
-        self.assertEqual(['pg_rewind', 'pg_basebackup'], commands)
+        self.assertEqual(['sh', 'pg_rewind', 'pg_basebackup'], commands)
         self.assertEqual('10.0.0.3',
                          container.exec_run.call_args.args[0][2])
         cluster.utils.execute_with_timeout.assert_any_call(
@@ -653,7 +655,7 @@ class FailoverTest(ClusterAppTestBase):
     def test_a_rejoin_that_fails_leaves_the_member_down(self, remove,
                                                         start):
         container = self.app.docker_client.containers.get.return_value
-        container.exec_run.return_value = (1, b'no')
+        container.exec_run.side_effect = [(0, b''), (1, b'no'), (1, b'no')]
         self.assertRaises(exception.TroveError, self.app.rejoin_cluster,
                           {'id': 'i3', 'host': '10.0.0.3'})
         self.assertFalse(self.app.rebuilding)
