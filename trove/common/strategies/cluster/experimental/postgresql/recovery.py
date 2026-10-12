@@ -24,8 +24,9 @@ all converge under the same rules.
 
 With a primary answering: it gets the lease that keeps its write port
 open while no standby streams from it; a standby pointed elsewhere is
-pointed at it; a former primary (a lower timeline) rejoins it as a
-standby; a standby without it for too long is rebuilt from it.
+pointed at it; a former primary (a lower timeline) and a member whose
+server is down rejoin it as standbys; a standby without it for too long
+is rebuilt from it.
 
 Without one: the primary is given up only when every standby here has
 been without its WAL for the grace period and the primary itself does
@@ -247,12 +248,13 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
                     self._slot_then(context, leader, member_id,
                                     'rejoin_cluster', primary)
             elif state == topology.STOPPED:
-                if (other.get('primary_id') != leader or
-                        other.get('fenced')) and \
-                        self._due(cluster_id, member_id, now):
-                    LOG.info("Cluster %s: member %s is down and does not "
-                             "follow %s: rejoin.", cluster_id, member_id,
-                             leader)
+                # A member whose server is down: the fenced former
+                # primary, or a member whose rejoin failed (the primary
+                # not reachable yet); told again every interval.
+                if self._due(cluster_id, member_id, now):
+                    LOG.info("Cluster %s: member %s is down (follows %s): "
+                             "rejoin.", cluster_id, member_id,
+                             other.get('primary_id'))
                     self._slot_then(context, leader, member_id,
                                     'rejoin_cluster', primary)
             elif state == topology.STANDBY:

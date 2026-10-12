@@ -41,6 +41,7 @@ a base backup when that fails.
 import json
 import os
 import re
+import socket
 import time
 
 from oslo_log import log as logging
@@ -752,20 +753,43 @@ class PostgresqlClusterAppMixin(object):
              '--config-file=%s' % pg_service.CONFIG_FILE, '--progress'],
             {'PGPASSWORD': replication_user['password']})
 
+    def _wait_reachable(self, host, timeout=120):
+        """Until the primary accepts connections on the tenant network:
+        a member told to rejoin while its own link is still coming back
+        would fail its rewind and its base backup alike.
+        """
+        deadline = time.time() + timeout
+        while True:
+            try:
+                socket.create_connection((host, self.DATABASE_PORT),
+                                         timeout=3).close()
+                return
+            except OSError as err:
+                if time.time() >= deadline:
+                    raise exception.TroveError(
+                        _("The primary %(host)s is not reachable: %(err)s")
+                        % {'host': host, 'err': err})
+                LOG.info("The primary %s is not reachable yet (%s); "
+                         "waiting.", host, err)
+                time.sleep(5)
+
     def rejoin_cluster(self, primary):
         """A member that was the primary, or a standby that fell too far
         behind, becomes a standby of the primary: by a rewind when the
         primary still holds the WAL from where they parted, by a base
-        backup otherwise.
+        backup otherwise. The cluster file names the primary from the
+        start, so that a rejoin that fails leaves the member closed; the
+        task manager has it rejoin again.
         """
         LOG.info("Rejoining the cluster as a standby of %s (%s).",
                  primary['id'], primary['host'])
         cluster = self._read_cluster()
         replication_user = cluster['replication_user']
+        self._update_cluster(primary_id=primary['id'])
+        self._wait_reachable(primary['host'])
         self.fenced = False
         self.rebuilding = True
         try:
-            self._update_cluster(primary_id=primary['id'])
             self.configuration_manager.remove_system_override(CNF_SYNC)
             self._sync_names = None
             self.stop_db()

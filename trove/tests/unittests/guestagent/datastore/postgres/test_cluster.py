@@ -470,6 +470,8 @@ class FailoverTest(ClusterAppTestBase):
         self.app._update_cluster(members=MEMBERS, mode='sync', self_id='i2',
                                  primary_id='i1', replication_user=USER)
         mock.patch.object(cluster.operating_system, 'remove').start()
+        self.connect = mock.patch.object(cluster.socket,
+                                         'create_connection').start()
         self.app._self_ip = mock.Mock(return_value='10.0.0.2')
         self.queries = []
 
@@ -604,6 +606,28 @@ class FailoverTest(ClusterAppTestBase):
                          [c[0] for c in self.app.calls])
         self.assertFalse(self.app.rebuilding)
         self.assertFalse(self.app.fenced)
+        self.connect.assert_called_with(('10.0.0.3', 5432), timeout=3)
+
+    @mock.patch.object(cluster.time, 'time', side_effect=range(0, 1000, 10))
+    def test_a_rejoin_waits_for_the_primary(self, _time):
+        # The member's own link may still be coming back: the primary
+        # is waited for; the cluster file names it already, so that the
+        # member stays closed and the task manager tells it again.
+        self.connect.side_effect = [OSError('no route'), OSError('no route'),
+                                    mock.Mock()]
+        with mock.patch.object(cluster.docker_util, 'start_container'), \
+                mock.patch.object(cluster.docker_util, 'remove_container'):
+            container = self.app.docker_client.containers.get.return_value
+            container.exec_run.return_value = (0, b'')
+            self.app.adm.query.return_value = [('streaming',)]
+            self.app.rejoin_cluster({'id': 'i3', 'host': '10.0.0.3'})
+        self.assertEqual(3, self.connect.call_count)
+        self.connect.side_effect = OSError('no route')
+        self.app.calls = []
+        self.assertRaises(exception.TroveError, self.app.rejoin_cluster,
+                          {'id': 'i3', 'host': '10.0.0.3'})
+        self.assertEqual([], self.app.calls)
+        self.assertEqual('i3', self.app.primary_id)
 
     @mock.patch.object(cluster.docker_util, 'start_container')
     @mock.patch.object(cluster.docker_util, 'remove_container')

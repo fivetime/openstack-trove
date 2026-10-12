@@ -335,15 +335,26 @@ class HealthyRecoveryTest(RecoveryTestBase):
                           ('rejoin_cluster', 'i2',
                            {'id': 'i1', 'host': '10.0.0.1'})], self.calls)
 
-    def test_a_stopped_member_rejoins_unless_it_follows_the_primary(self):
+    def test_a_stopped_member_rejoins(self):
+        # Down: the fenced former primary, or a member whose rejoin
+        # failed; told again every interval.
         self._healthy()
         self.answers['i2'] = stopped('10.0.0.2', primary_id='i1')
-        self.answers['i3'] = stopped('10.0.0.3', primary_id='i1', fenced=True)
+        self.answers['i3'] = stopped('10.0.0.3', primary_id='i9', fenced=True)
         self._check_at(0)
         self.assertEqual([('renew_lease', 'i1', 60),
+                          ('create_member_slot', 'i1', 'i2'),
+                          ('rejoin_cluster', 'i2',
+                           {'id': 'i1', 'host': '10.0.0.1'}),
                           ('create_member_slot', 'i1', 'i3'),
                           ('rejoin_cluster', 'i3',
                            {'id': 'i1', 'host': '10.0.0.1'})], self.calls)
+        self.calls = []
+        self._check_at(10)
+        self.assertEqual([('renew_lease', 'i1', 60)], self.calls)
+        self._check_at(40)
+        self.assertEqual(['i2', 'i3'], [c[1] for c in self.calls
+                                        if c[0] == 'rejoin_cluster'])
 
     def test_a_standby_left_behind_rejoins(self):
         self._healthy()
