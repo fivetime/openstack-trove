@@ -20,6 +20,7 @@ from trove.common.strategies.cluster import base as cluster_base
 from trove.common.strategies.cluster.experimental.common import (
     api as common_api)
 from trove.extensions.mgmt.clusters.views import MgmtClusterView
+from trove.instance.models import DBInstance
 
 LOG = logging.getLogger(__name__)
 
@@ -68,32 +69,38 @@ class PostgresqlCluster(common_api.HomogeneousCluster):
     MODES = MODES
     DEFAULT_MODE = SYNC
 
-    def _primary_ids(self, instance_ids):
-        """Those of the members that are the primary, asked."""
-        primaries = []
+    def _roles(self, instance_ids):
+        """The members' role answers, for those that answer."""
+        answers = {}
         for instance_id in instance_ids:
             try:
-                answer = clients.create_guest_client(
+                answers[instance_id] = clients.create_guest_client(
                     self.context, instance_id,
                     self.ds_version.manager).get_member_role()
             except Exception as err:
                 LOG.info("Member %s did not tell its role: %s", instance_id,
                          err)
-                continue
-            if answer.get('state') == 'primary':
-                primaries.append(instance_id)
-        return primaries
+        return answers
 
     def shrink(self, instances):
-        # The primary is where the data is written: it cannot go until a
-        # standby has taken over, which the cluster does not do on request
-        # yet.
-        primaries = self._primary_ids(instances)
+        # The primary is where the data is written: it goes only when a
+        # standby that stays streams from it and can take over (the task
+        # manager switches over first).
+        answers = self._roles(instances)
+        primaries = [i for i, a in answers.items()
+                     if a.get('state') == 'primary']
         if primaries:
-            raise exception.BadRequest(
-                _("Member %(ids)s is the primary of the cluster and cannot "
-                  "be removed; remove a standby.") % {
-                    'ids': ', '.join(primaries)})
+            staying = [db_inst.id for db_inst in DBInstance.find_all(
+                cluster_id=self.db_info.id, deleted=False).all()
+                if db_inst.id not in instances]
+            successors = [i for i, a in self._roles(staying).items()
+                          if a.get('state') == 'standby' and
+                          a.get('role') == 'STREAMING']
+            if not successors:
+                raise exception.BadRequest(
+                    _("Member %(ids)s is the primary of the cluster and no "
+                      "standby that stays streams from it to take over.") %
+                    {'ids': ', '.join(primaries)})
         return super(PostgresqlCluster, self).shrink(instances)
 
 

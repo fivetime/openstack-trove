@@ -23,6 +23,19 @@ to none when no standby streams for a grace period; ``strict``, always)
 or for none (``async``); the primary keeps ``synchronous_standby_names``
 right every probe tick. The primary answers on its ready port; a standby
 that streams and keeps up answers on its read port.
+
+The primary takes writes only while something says it is the primary the
+cluster follows: a standby streaming from it, or a lease the task manager
+renews for the primary it judges healthy (for ``cluster_fence_grace``
+seconds after the last of either); a primary cut off from both closes
+its write port by itself, and opens it again when either is back. A
+member whose data is a primary's but whose cluster file names another
+primary (the cluster failed over while it was away) stays closed until
+the task manager has it rejoin. Failing over is the task manager's: it
+fences the old primary (a checkpoint, a fast stop), promotes the standby
+that holds the most, points the other standbys at it, and has the old
+primary rejoin as a standby: ``pg_rewind`` against the new primary, or
+a base backup when that fails.
 """
 
 import json
@@ -85,6 +98,17 @@ RECEIVER_QUERY = (
     "pg_wal_lsn_diff(pg_last_wal_receive_lsn(), "
     "pg_last_wal_replay_lsn())::bigint "
     "FROM pg_stat_wal_receiver")
+# Where the member stands in the cluster's history: its timeline, and
+# its position as a number of bytes.
+TIMELINE_QUERY = "SELECT timeline_id FROM pg_control_checkpoint()"
+PRIMARY_LSN_QUERY = (
+    "SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), '0/0')::bigint")
+RECEIVE_LSN_QUERY = (
+    "SELECT pg_wal_lsn_diff(pg_last_wal_receive_lsn(), '0/0')::bigint")
+REPLAY_LSN_QUERY = (
+    "SELECT pg_wal_lsn_diff(pg_last_wal_replay_lsn(), '0/0')::bigint")
+# Seconds pg_promote waits for the promotion.
+PROMOTE_TIMEOUT = 60
 
 
 def slot_name(member_id):
@@ -108,6 +132,15 @@ class PostgresqlClusterAppMixin(object):
     _no_standby_since = None
     _standbys = None
     rebuilding = False
+    # The primary's self-fencing: until when the task manager's lease
+    # runs, when a standby or the lease last said this is the primary,
+    # and whether the task manager fenced the member.
+    _lease_until = 0
+    _confirmed_at = None
+    _stale_warned = False
+    fenced = False
+    # A standby: since when it has not been streaming.
+    _detached_since = None
 
     # What the member knows of its cluster
 
@@ -166,12 +199,19 @@ class PostgresqlClusterAppMixin(object):
     def self_id(self):
         return self._read_cluster().get('self_id') or CONF.guest_id
 
-    def update_cluster_members(self, members, mode):
+    def update_cluster_members(self, members, mode, primary_id=None):
         """The members and the mode, as the task manager has them after
-        a grow or a shrink; the primary applies the mode at its next
-        tick.
+        a grow or a shrink, and the primary after a failover; the primary
+        applies the mode at its next tick.
         """
-        self._update_cluster(members=members, mode=mode)
+        changes = {'members': members, 'mode': mode}
+        if primary_id:
+            changes['primary_id'] = primary_id
+        self._update_cluster(**changes)
+
+    @property
+    def primary_id(self):
+        return self._read_cluster().get('primary_id')
 
     def get_cluster_context(self):
         cluster = self._read_cluster()
@@ -180,6 +220,19 @@ class PostgresqlClusterAppMixin(object):
                 'members': cluster.get('members') or {},
                 'primary_id': cluster.get('primary_id'),
                 'self_id': cluster.get('self_id')}
+
+    # The lease: the task manager's word that this is the primary
+
+    def renew_lease(self, ttl):
+        """The task manager judged this member the healthy primary: it
+        takes writes for ``ttl`` seconds more, standbys or not.
+        """
+        now = time.monotonic()
+        self._lease_until = now + ttl
+        self._confirmed_at = now
+
+    def lease_fresh(self):
+        return time.monotonic() < self._lease_until
 
     # Installing
 
@@ -355,20 +408,26 @@ class PostgresqlClusterAppMixin(object):
         self.rebuilding = True
         try:
             self.stop_db()
-            self._clear_data()
-            self._run_in_parked_container(
-                ['pg_basebackup', '-h', primary['host'],
-                 '-p', str(self.DATABASE_PORT),
-                 '-U', replication_user['name'], '-D', self.datadir,
-                 '-X', 'stream', '-S', slot_name(self.self_id),
-                 '--checkpoint=fast', '--no-password'],
-                {'PGPASSWORD': replication_user['password']})
+            self._base_backup(primary, replication_user)
             self._write_standby_signal()
             self.start_db(ds_version=CONF.datastore_version,
                           command=self._server_command())
             self._wait_streaming()
         finally:
             self.rebuilding = False
+
+    def _base_backup(self, primary, replication_user):
+        """The data directory emptied and taken from the primary, through
+        this member's slot.
+        """
+        self._clear_data()
+        self._run_in_parked_container(
+            ['pg_basebackup', '-h', primary['host'],
+             '-p', str(self.DATABASE_PORT),
+             '-U', replication_user['name'], '-D', self.datadir,
+             '-X', 'stream', '-S', slot_name(self.self_id),
+             '--checkpoint=fast', '--no-password'],
+            {'PGPASSWORD': replication_user['password']})
 
     # Slots
 
@@ -439,17 +498,16 @@ class PostgresqlClusterAppMixin(object):
         if not in_recovery:
             standbys = self._standbys_of_primary()
             self._standbys = standbys
-            synchronous = any(
-                s['state'] == STREAMING and
-                s['sync_state'] in SYNCHRONOUS_STATES
-                for s in standbys.values())
-            writable = (synchronous if self.cluster_mode == STRICT
-                        else True)
-            return cluster_probe.MemberView(PRIMARY, 'PRIMARY', writable,
-                                            False)
+            self._detached_since = None
+            return cluster_probe.MemberView(
+                PRIMARY, 'PRIMARY', self._primary_writable(standbys), False)
         receiver = self._receiver()
         conf = self._cluster_conf()
         streaming = bool(receiver and receiver['status'] == STREAMING)
+        if streaming:
+            self._detached_since = None
+        elif self._detached_since is None:
+            self._detached_since = time.monotonic()
         readable = (streaming and
                     receiver['last_msg_age'] is not None and
                     receiver['last_msg_age'] < 2 * conf.cluster_wal_timeout
@@ -458,6 +516,53 @@ class PostgresqlClusterAppMixin(object):
         return cluster_probe.MemberView(
             STANDBY, 'STREAMING' if streaming else 'DETACHED', False,
             False, readable)
+
+    def _primary_writable(self, standbys):
+        """Whether the primary takes writes now.
+
+        Never when the task manager fenced it, nor when the cluster file
+        names another member as the primary: this one was the primary
+        before it was away, and the cluster went on without it. In
+        strict mode, only with a synchronous standby streaming. Else,
+        with a standby streaming from it, or with the task manager's
+        lease, or for ``cluster_fence_grace`` seconds after the last of
+        either; a primary that has had neither since it came up waits
+        for one. A cluster of one member takes writes regardless.
+        """
+        if self.fenced:
+            return False
+        cluster = self._read_cluster()
+        primary_id = cluster.get('primary_id')
+        self_id = cluster.get('self_id') or CONF.guest_id
+        if primary_id and primary_id != self_id:
+            if not self._stale_warned:
+                LOG.warning("This member's data is a primary's, but the "
+                            "cluster's primary is %s: no writes until it "
+                            "rejoins.", primary_id)
+                self._stale_warned = True
+            return False
+        self._stale_warned = False
+        streaming = any(s['state'] == STREAMING for s in standbys.values())
+        if self.cluster_mode == STRICT:
+            return any(s['state'] == STREAMING and
+                       s['sync_state'] in SYNCHRONOUS_STATES
+                       for s in standbys.values())
+        if len(cluster.get('members') or {}) <= 1:
+            return True
+        now = time.monotonic()
+        if streaming or self.lease_fresh():
+            self._confirmed_at = now
+            return True
+        return (self._confirmed_at is not None and
+                now - self._confirmed_at <
+                self._cluster_conf().cluster_fence_grace)
+
+    def _timeline(self):
+        return int(self.adm.query(TIMELINE_QUERY)[0][0])
+
+    def _lsn(self, query):
+        value = self.adm.query(query)[0][0]
+        return int(value) if value is not None else None
 
     def _sync_names_wanted(self, mode, streaming):
         """What the primary's commits wait for, by the mode and whether a
@@ -482,7 +587,7 @@ class PostgresqlClusterAppMixin(object):
         """Every probe tick, on the primary: keep synchronous_standby_names
         as the mode and the standbys that stream warrant.
         """
-        if view.state != PRIMARY:
+        if view.state != PRIMARY or self.fenced:
             self._no_standby_since = None
             return
         if self._sync_names is None:
@@ -513,25 +618,162 @@ class PostgresqlClusterAppMixin(object):
         return bool(self.member_view().writable)
 
     def recovery_view(self):
-        """Where the member stands, for the task manager."""
+        """Where the member stands, for the task manager: its state and
+        whom it takes for the primary; on the primary its standbys, its
+        position and for how long no standby has streamed; on a standby
+        its receiver, its received and replayed positions and for how
+        long it has not been streaming; the timeline on both.
+        """
         view = self.member_view()
+        cluster = self._read_cluster()
+        now = time.monotonic()
         answer = {'ip': self._self_ip(), 'state': view.state,
                   'role': view.role, 'mode': self.cluster_mode,
-                  'self_id': self.self_id}
+                  'self_id': self.self_id,
+                  'primary_id': cluster.get('primary_id'),
+                  'writable': bool(view.writable),
+                  'fenced': self.fenced, 'lease_fresh': self.lease_fresh()}
         try:
             if view.state == PRIMARY:
                 answer['standbys'] = self._standbys or {}
-                answer['lsn'] = self.adm.query(
-                    "SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), '0/0')"
-                    "::bigint")[0][0]
+                answer['lsn'] = self._lsn(PRIMARY_LSN_QUERY)
+                answer['timeline'] = self._timeline()
+                answer['no_standby_for'] = (
+                    now - self._no_standby_since
+                    if self._no_standby_since is not None else None)
             elif view.state == STANDBY:
                 answer['receiver'] = self._receiver()
-                answer['lsn'] = self.adm.query(
-                    "SELECT pg_wal_lsn_diff(pg_last_wal_receive_lsn(), "
-                    "'0/0')::bigint")[0][0]
+                answer['lsn'] = self._lsn(RECEIVE_LSN_QUERY)
+                answer['replay_lsn'] = self._lsn(REPLAY_LSN_QUERY)
+                answer['timeline'] = self._timeline()
+                answer['disconnected_for'] = (
+                    now - self._detached_since
+                    if self._detached_since is not None else None)
         except Exception as err:
             LOG.debug("No position: %s", err)
         return answer
+
+    # Failing over: what the task manager has the members do
+
+    def fence_member(self):
+        """The task manager is moving the primary elsewhere: no more
+        writes here. The write port closes with the next tick, the
+        lease is gone, and the server stops: a fast stop after a
+        checkpoint when it answers (a rewind is quick then), a plain
+        stop otherwise.
+        """
+        LOG.info("Fencing the member: the primary is moving elsewhere.")
+        self.fenced = True
+        self._lease_until = 0
+        self._confirmed_at = None
+        try:
+            self.adm.query("CHECKPOINT")
+            docker_util.run_command(
+                self.docker_client, 'pg_ctl stop -m fast -D %s' % self.datadir)
+        except Exception as err:
+            LOG.info("No clean stop (%s); stopping the container.", err)
+        self.stop_db()
+
+    def promote_member(self, members, mode):
+        """A standby becomes the primary: as far as its received WAL goes.
+        It stops streaming, commits wait as the mode says, every other
+        member gets a slot, and a checkpoint marks the new timeline for
+        the rewinds to come.
+        """
+        LOG.info("Promoting the member to primary, mode %s.", mode)
+        self.fenced = False
+        self.configuration_manager.remove_system_override(CNF_REPLICATION)
+        self._write_sync_names(ANY_ONE if mode == STRICT else '')
+        self._no_standby_since = None
+        self._update_cluster(members=members, mode=mode,
+                             primary_id=self.self_id)
+        if self.adm.query("SELECT pg_is_in_recovery()")[0][0]:
+            promoted = self.adm.query(
+                "SELECT pg_promote(true, %s)" % PROMOTE_TIMEOUT)[0][0]
+            if not promoted:
+                raise exception.TroveError(
+                    _("The member was not promoted within %s seconds.") %
+                    PROMOTE_TIMEOUT)
+        self.reload()
+        self.adm.query("CHECKPOINT")
+        for member_id in members:
+            if member_id != self.self_id:
+                self.create_member_slot(member_id)
+        self._confirmed_at = time.monotonic()
+        return {'lsn': self._lsn(PRIMARY_LSN_QUERY),
+                'timeline': self._timeline()}
+
+    def follow_primary(self, primary):
+        """A standby streams from another primary from now on: its
+        connection settings change and the server reloads them, which
+        restarts the WAL receiver; the member is not restarted.
+        """
+        LOG.info("Following primary %s (%s).", primary['id'],
+                 primary['host'])
+        if not self.adm.query("SELECT pg_is_in_recovery()")[0][0]:
+            raise exception.TroveError(
+                _("The member is a primary: it has to rejoin instead."))
+        cluster = self._read_cluster()
+        self._write_replication(primary['host'], cluster['replication_user'])
+        self._update_cluster(primary_id=primary['id'])
+        self.reload()
+        self._detached_since = None
+
+    def _remove_stale_pid(self):
+        """A server that crashed leaves postmaster.pid behind, naming a
+        process that lives on in the tool's container (PID 1): pg_rewind
+        would take the server for running.
+        """
+        operating_system.remove(os.path.join(self.datadir, 'postmaster.pid'),
+                                force=True, as_root=True)
+
+    def _rewind(self, primary, replication_user):
+        """The data directory made a standby's of the primary again from
+        the point where the two parted: what this member wrote on its
+        own after that is gone.
+        """
+        self._remove_stale_pid()
+        self._run_in_parked_container(
+            ['pg_rewind', '--target-pgdata=%s' % self.datadir,
+             '--source-server=host=%s port=%s user=%s dbname=postgres' % (
+                 primary['host'], self.DATABASE_PORT,
+                 replication_user['name']),
+             '--config-file=%s' % pg_service.CONFIG_FILE, '--progress'],
+            {'PGPASSWORD': replication_user['password']})
+
+    def rejoin_cluster(self, primary):
+        """A member that was the primary, or a standby that fell too far
+        behind, becomes a standby of the primary: by a rewind when the
+        primary still holds the WAL from where they parted, by a base
+        backup otherwise.
+        """
+        LOG.info("Rejoining the cluster as a standby of %s (%s).",
+                 primary['id'], primary['host'])
+        cluster = self._read_cluster()
+        replication_user = cluster['replication_user']
+        self.fenced = False
+        self.rebuilding = True
+        try:
+            self._update_cluster(primary_id=primary['id'])
+            self.configuration_manager.remove_system_override(CNF_SYNC)
+            self._sync_names = None
+            self.stop_db()
+            try:
+                self._rewind(primary, replication_user)
+                LOG.info("pg_rewind done.")
+            except Exception as err:
+                LOG.warning("pg_rewind failed (%s); taking a base backup "
+                            "instead.", err)
+                self._base_backup(primary, replication_user)
+            self._write_replication(primary['host'], replication_user)
+            self._write_standby_signal()
+            self.start_db(ds_version=CONF.datastore_version,
+                          command=self._server_command())
+            self._wait_streaming()
+        finally:
+            self.rebuilding = False
+        self._detached_since = None
+        LOG.info("The member streams from %s.", primary['host'])
 
     def leave_group(self):
         """The member is being removed: its ports are closed by the
@@ -572,7 +814,29 @@ class PostgresqlMemberMixin(cluster_member.ClusterMemberMixin):
     def drop_member_slot(self, context, member_id):
         self.app.drop_member_slot(member_id)
 
-    def update_cluster_members(self, context, members, mode):
-        LOG.info("The cluster has members %s, mode %s.",
-                 sorted(members.values()), mode)
-        self.app.update_cluster_members(members, mode)
+    def update_cluster_members(self, context, members, mode,
+                               primary_id=None):
+        LOG.info("The cluster has members %s, mode %s%s.",
+                 sorted(members.values()), mode,
+                 ', primary %s' % primary_id if primary_id else '')
+        self.app.update_cluster_members(members, mode, primary_id=primary_id)
+
+    def renew_lease(self, context, ttl):
+        self.app.renew_lease(ttl)
+
+    def fence_member(self, context):
+        self.app.fence_member()
+
+    def promote_member(self, context, members, mode):
+        return self.app.promote_member(members, mode)
+
+    def follow_primary(self, context, primary):
+        self.app.follow_primary(primary)
+
+    def rejoin_cluster(self, context, primary):
+        try:
+            self.app.rejoin_cluster(primary)
+        except Exception:
+            LOG.exception("The member could not rejoin the cluster; the "
+                          "task manager tries again.")
+            raise

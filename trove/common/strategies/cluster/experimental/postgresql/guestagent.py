@@ -32,7 +32,8 @@ class PostgresqlGuestAgentStrategy(cluster_base.BaseGuestAgentStrategy):
 class PostgresqlGuestAgentAPI(common_guestagent.ClusterGuestAgentAPI):
     """The cluster calls of a PostgreSQL member: installed as the primary
     or as a standby of it, the slots the primary keeps for the standbys,
-    and the members list every member keeps.
+    the members list every member keeps, and the failover calls (the
+    lease, fencing, promotion, following, rejoining).
 
     **** VERSION CONTROLLED API ****
 
@@ -67,10 +68,47 @@ class PostgresqlGuestAgentAPI(common_guestagent.ClusterGuestAgentAPI):
                    version=guest_api.API.API_BASE_VERSION,
                    member_id=member_id)
 
-    def update_cluster_members(self, members, mode):
+    def update_cluster_members(self, members, mode, primary_id=None):
         """The members of the cluster, by id and address, and its mode,
-        kept by every member.
+        kept by every member; and the primary, after a failover.
         """
         self._call("update_cluster_members", self.agent_high_timeout,
                    version=guest_api.API.API_BASE_VERSION,
-                   members=members, mode=mode)
+                   members=members, mode=mode, primary_id=primary_id)
+
+    def renew_lease(self, ttl):
+        """On the primary the task manager judges healthy: it takes
+        writes for ``ttl`` seconds more, standbys streaming or not.
+        """
+        self._call("renew_lease", self.agent_low_timeout,
+                   version=guest_api.API.API_BASE_VERSION, ttl=ttl)
+
+    def fence_member(self):
+        """On a primary that is being replaced: no more writes, the
+        server stops.
+        """
+        self._call("fence_member", self.agent_high_timeout,
+                   version=guest_api.API.API_BASE_VERSION)
+
+    def promote_member(self, members, mode):
+        """On the standby that takes over: it becomes the primary.
+        Returns its position and timeline.
+        """
+        return self._call("promote_member", self.agent_high_timeout,
+                          version=guest_api.API.API_BASE_VERSION,
+                          members=members, mode=mode)
+
+    def follow_primary(self, primary):
+        """On a standby: it streams from the given primary (id and host)
+        from now on.
+        """
+        self._call("follow_primary", self.agent_high_timeout,
+                   version=guest_api.API.API_BASE_VERSION, primary=primary)
+
+    def rejoin_cluster(self, primary):
+        """On a former primary, or a standby left behind: it becomes a
+        standby of the given primary, by a rewind or a base backup. Not
+        waited for: as long as the data is.
+        """
+        self._cast("rejoin_cluster", version=guest_api.API.API_BASE_VERSION,
+                   primary=primary)

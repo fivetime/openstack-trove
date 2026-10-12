@@ -1543,6 +1543,11 @@ def _with_postgresql_cluster(opts):
                         'streaming (max_slot_wal_keep_size): a standby '
                         'that is away longer is made again from a base '
                         'backup.'),
+        cfg.IntOpt('cluster_standby_rebuild_after', default=600,
+                   help='Seconds a standby that answers may go without '
+                        'streaming from a healthy primary before the task '
+                        'manager has it rejoin (a rewind, or a base '
+                        'backup).'),
     ]
     names = {opt.name for opt in postgresql_cluster}
     return [opt for opt in opts if opt.name not in names] + postgresql_cluster

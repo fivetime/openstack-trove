@@ -21,6 +21,10 @@ from trove.common.strategies.cluster.experimental.common import (
     taskmanager as common_taskmanager)
 from trove.common.strategies.cluster.experimental.postgresql import (
     api as pg_api)
+from trove.common.strategies.cluster.experimental.postgresql import (
+    recovery as pg_recovery)
+from trove.common.strategies.cluster.experimental.postgresql import (
+    topology)
 from trove.common import utils
 from trove.guestagent.common import cluster_probe
 from trove.instance.models import DBInstance
@@ -48,8 +52,7 @@ class PostgresqlTaskManagerStrategy(
         return PostgresqlClusterTasks
 
     def cluster_recovery(self, manager):
-        # A primary that fails is not replaced yet: the next step.
-        return None
+        return pg_recovery.PostgresqlClusterRecovery(manager)
 
 
 class PostgresqlClusterTasks(common_taskmanager.ClusterEntryTasksMixin,
@@ -59,8 +62,9 @@ class PostgresqlClusterTasks(common_taskmanager.ClusterEntryTasksMixin,
     The member with the lowest address is the primary; the others are
     installed as standbys of it, each with a slot on the primary, and
     every member keeps the list of members and the mode. A standby that
-    leaves takes its slot with it. Restarts and upgrades go standbys
-    first, the primary last.
+    leaves takes its slot with it; a primary that is removed hands over
+    to the standby that holds the most first (a switchover). Restarts
+    and upgrades go standbys first, the primary last.
     """
 
     def _members(self, instances):
@@ -107,9 +111,52 @@ class PostgresqlClusterTasks(common_taskmanager.ClusterEntryTasksMixin,
             members, mode, replication_user, instance.id,
             {'id': primary.id, 'host': self.get_ip(primary)}))
 
-    def _update_members(self, instances, members, mode):
+    def _update_members(self, instances, members, mode, primary_id=None):
         for instance in instances:
-            self.get_guest(instance).update_cluster_members(members, mode)
+            self.get_guest(instance).update_cluster_members(
+                members, mode, primary_id=primary_id)
+
+    def _switchover(self, context, cluster_id, primary, standbys, members,
+                    mode):
+        """The primary hands over to a standby: writes stop on the primary
+        (its fast stop sends the standbys every last WAL record), the
+        standby that received the most is promoted, the other standbys
+        follow it. Returns the new primary.
+        """
+        LOG.info("Cluster %s: switchover from %s.", cluster_id, primary.id)
+        self.get_guest(primary).fence_member()
+        views = {}
+        for instance in standbys:
+            try:
+                views[instance.id] = self.get_guest(
+                    instance).get_recovery_view()
+            except Exception as err:
+                LOG.info("Member %s did not answer: %s", instance.id, err)
+        top = topology.Topology(standbys, [(i, views.get(i.id))
+                                           for i in standbys])
+        timelines = [top.timeline(i) for i in top.standbys
+                     if top.timeline(i) is not None]
+        candidates = topology.candidates(
+            top, max(timelines) if timelines else None)
+        if not candidates:
+            raise TroveError(_("No standby can take over from the primary "
+                               "%s.") % primary.id)
+        chosen = topology.choose(top, candidates)
+        target = [i for i in standbys if i.id == chosen][0]
+        LOG.info("Cluster %s: switchover: promote %s (%s, lsn %s).",
+                 cluster_id, chosen, self.get_ip(target),
+                 top.answer(chosen).get('lsn'))
+        self.get_guest(target).promote_member(members, mode)
+        new_primary = {'id': chosen, 'host': self.get_ip(target)}
+        for instance in standbys:
+            if instance is not target:
+                try:
+                    self.get_guest(instance).follow_primary(new_primary)
+                except Exception:
+                    LOG.exception("Standby %s could not follow the new "
+                                  "primary.", instance.id)
+        self._update_members(standbys, members, mode, primary_id=chosen)
+        return target
 
     def create_cluster(self, context, cluster_id):
         LOG.debug("Begin create_cluster for id: %s.", cluster_id)
@@ -237,9 +284,15 @@ class PostgresqlClusterTasks(common_taskmanager.ClusterEntryTasksMixin,
                                   if db_inst.id not in removal_instance_ids]
             removal_instances = [Instance.load(context, instance_id)
                                  for instance_id in removal_instance_ids]
-            # The API refuses the primary; so does this, should it be
-            # asked another way.
-            primary, cluster_context = self._primary(leftover_instances)
+            primary, cluster_context = self._primary(
+                leftover_instances + removal_instances)
+            mode = cluster_context.get('mode') or pg_api.SYNC
+            if primary.id in removal_instance_ids:
+                # The primary goes: a standby that stays takes over
+                # first.
+                primary = self._switchover(
+                    context, cluster_id, primary, leftover_instances,
+                    self._members(leftover_instances), mode)
             primary_guest = self.get_guest(primary)
             for instance in removal_instances:
                 # Its ports close before it goes: nothing new is sent to
@@ -272,8 +325,7 @@ class PostgresqlClusterTasks(common_taskmanager.ClusterEntryTasksMixin,
                 return
 
             self._update_members(leftover_instances,
-                                 self._members(leftover_instances),
-                                 cluster_context.get('mode') or pg_api.SYNC)
+                                 self._members(leftover_instances), mode)
             self._sync_load_balancer_or_log(context, cluster_id,
                                             leftover_instances)
 

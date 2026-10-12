@@ -24,6 +24,8 @@ from trove.common.strategies.cluster.experimental.postgresql import (
 from trove.common.strategies.cluster.experimental.postgresql import (
     guestagent as pg_guestagent)
 from trove.common.strategies.cluster.experimental.postgresql import (
+    recovery as pg_recovery)
+from trove.common.strategies.cluster.experimental.postgresql import (
     taskmanager as pg_taskmanager)
 from trove.common.strategies.cluster import strategy
 from trove.tests.unittests import trove_testtools
@@ -47,10 +49,14 @@ class PostgresqlConfTest(trove_testtools.TestCase):
         self.assertEqual('trove.extensions.common.service.'
                          'ClusterWriterRootController',
                          conf.root_controller)
-        self.assertEqual((15, 10, '1GB'),
+        self.assertEqual((15, 10, '1GB', 600, 15, 0, 1024 * 1024),
                          (conf.cluster_sync_fallback_grace,
                           conf.cluster_wal_timeout,
-                          conf.cluster_max_slot_wal_keep_size))
+                          conf.cluster_max_slot_wal_keep_size,
+                          conf.cluster_standby_rebuild_after,
+                          conf.cluster_fence_grace,
+                          conf.cluster_failover_force_after,
+                          conf.cluster_failover_max_lag_bytes))
         # Galera and Group Replication have no read port.
         self.assertEqual(0, CONF.pxc.cluster_read_port)
         self.assertEqual(0, CONF.mysql.cluster_read_load_balancer_port)
@@ -83,13 +89,19 @@ class PostgresqlAPITest(trove_testtools.TestCase):
             cluster._member_config(mock.Mock(id='c1'),
                                    {'replication_mode': 'async'}))
 
+    @mock.patch.object(pg_api.DBInstance, 'find_all')
     @mock.patch.object(common_api.HomogeneousCluster, 'shrink')
     @mock.patch.object(pg_api.clients, 'create_guest_client')
-    def test_shrink_refuses_the_primary(self, create, shrink):
+    def test_shrink_the_primary_needs_a_standby_that_stays(
+            self, create, shrink, find_all):
         cluster = pg_api.PostgresqlCluster.__new__(pg_api.PostgresqlCluster)
         cluster.context = 'ctx'
         cluster.ds_version = mock.Mock(manager='postgresql')
-        roles = {'i1': {'state': 'primary'}, 'i2': {'state': 'standby'},
+        cluster.db_info = mock.Mock(id='c1')
+        find_all.return_value.all.return_value = [
+            mock.Mock(id=i) for i in ('i1', 'i2', 'i3')]
+        roles = {'i1': {'state': 'primary', 'role': 'PRIMARY'},
+                 'i2': {'state': 'standby', 'role': 'STREAMING'},
                  'i3': exception.GuestTimeout()}
 
         def guest(context, instance_id, manager):
@@ -100,11 +112,17 @@ class PostgresqlAPITest(trove_testtools.TestCase):
                 g.get_member_role.return_value = roles[instance_id]
             return g
         create.side_effect = guest
+        # The primary with the streaming standby: nobody left to take
+        # over.
         self.assertRaises(exception.BadRequest, cluster.shrink, ['i2', 'i1'])
         shrink.assert_not_called()
+        # The primary alone: i2 takes over (the task manager switches
+        # over first).
+        cluster.shrink(['i1'])
+        shrink.assert_called_once_with(['i1'])
         # A standby, and a member that does not answer, go.
         cluster.shrink(['i2', 'i3'])
-        shrink.assert_called_once_with(['i2', 'i3'])
+        shrink.assert_called_with(['i2', 'i3'])
 
 
 class PostgresqlViewTest(trove_testtools.TestCase):
@@ -206,6 +224,12 @@ class PostgresqlGuestAPITest(trove_testtools.TestCase):
             api.drop_member_slot('i2')
             api.update_cluster_members({'i1': '10.0.0.1'}, 'sync')
             api.get_member_role()
+            api.renew_lease(60)
+            api.fence_member()
+            api.promote_member({'i1': '10.0.0.1'}, 'sync')
+            api.follow_primary({'id': 'i1', 'host': '10.0.0.1'})
+        with mock.patch.object(api, '_cast') as cast:
+            api.rejoin_cluster({'id': 'i1', 'host': '10.0.0.1'})
         self.assertEqual(
             [mock.call('install_cluster', 3600, version='1.0',
                        cluster_config={'members': {}}),
@@ -214,9 +238,18 @@ class PostgresqlGuestAPITest(trove_testtools.TestCase):
              mock.call('drop_member_slot', 600, version='1.0',
                        member_id='i2'),
              mock.call('update_cluster_members', 600, version='1.0',
+                       members={'i1': '10.0.0.1'}, mode='sync',
+                       primary_id=None),
+             mock.call('get_member_role', 15, version='1.0'),
+             mock.call('renew_lease', 15, version='1.0', ttl=60),
+             mock.call('fence_member', 600, version='1.0'),
+             mock.call('promote_member', 600, version='1.0',
                        members={'i1': '10.0.0.1'}, mode='sync'),
-             mock.call('get_member_role', 15, version='1.0')],
+             mock.call('follow_primary', 600, version='1.0',
+                       primary={'id': 'i1', 'host': '10.0.0.1'})],
             call.call_args_list)
+        cast.assert_called_once_with('rejoin_cluster', version='1.0',
+                                     primary={'id': 'i1', 'host': '10.0.0.1'})
 
 
 class PostgresqlTasksTest(trove_testtools.TestCase):
@@ -236,10 +269,20 @@ class PostgresqlTasksTest(trove_testtools.TestCase):
                 g = mock.Mock()
                 for name in ('install_cluster', 'cluster_complete',
                              'leave_cluster', 'create_member_slot',
-                             'drop_member_slot', 'update_cluster_members'):
+                             'drop_member_slot', 'update_cluster_members',
+                             'fence_member', 'follow_primary'):
                     getattr(g, name).side_effect = (
                         lambda *a, _n=name, _i=instance.id, **k:
-                        self.calls.append((_n, _i) + a))
+                        self.calls.append((_n, _i) + a + (
+                            (k,) if k.get('primary_id') else ())))
+                g.promote_member.side_effect = (
+                    lambda members, mode, _i=instance.id:
+                    self.calls.append(('promote_member', _i, members, mode))
+                    or {'lsn': 2000, 'timeline': 2})
+                g.get_recovery_view.side_effect = lambda _i=instance.id: {
+                    'ip': '10.0.0.%s' % _i[-1], 'state': 'standby',
+                    'timeline': 1, 'lsn': {'i2': 1500, 'i3': 1200}.get(_i),
+                    'receiver': {'status': 'streaming'}}
                 g.get_cluster_context.return_value = {
                     'mode': 'strict',
                     'replication_user': {'name': 'replicator',
@@ -368,12 +411,45 @@ class PostgresqlTasksTest(trove_testtools.TestCase):
 
     @mock.patch.object(pg_taskmanager, 'Instance')
     @mock.patch.object(pg_taskmanager, 'DBInstance')
-    def test_shrink_refuses_the_primary(self, db_instance, instance):
+    def test_shrink_the_primary_switches_over_first(self, db_instance,
+                                                    instance):
         db_instance.find_all.return_value.all.return_value = (
             self._instances('i1', 'i2', 'i3'))
         instance.load.side_effect = lambda ctx, i: mock.Mock(id=i)
         self.tasks.shrink_cluster('ctx', 'c1', ['i1'])
-        self.assertEqual([], self.calls)
+        members = {'i2': '10.0.0.2', 'i3': '10.0.0.3'}
+        # The primary is fenced (its fast stop sends the standbys every
+        # record), the standby that received the most is promoted, the
+        # other follows it; then the old primary goes as a standby
+        # would, its slot dropped on the new primary.
+        self.assertEqual(
+            [('fence_member', 'i1'),
+             ('promote_member', 'i2', members, 'strict'),
+             ('follow_primary', 'i3', {'id': 'i2', 'host': '10.0.0.2'}),
+             ('update_cluster_members', 'i2', members, 'strict',
+              {'primary_id': 'i2'}),
+             ('update_cluster_members', 'i3', members, 'strict',
+              {'primary_id': 'i2'}),
+             ('leave_cluster', 'i1'), ('drop_member_slot', 'i2', 'i1'),
+             ('update_cluster_members', 'i2', members, 'strict'),
+             ('update_cluster_members', 'i3', members, 'strict'),
+             ('sync', ('i2', 'i3'))],
+            self.calls)
+        instance.delete.assert_called_once()
+        self.tasks.update_statuses_on_failure.assert_not_called()
+
+    @mock.patch.object(pg_taskmanager, 'Instance')
+    @mock.patch.object(pg_taskmanager, 'DBInstance')
+    def test_shrink_the_primary_fails_without_a_successor(self, db_instance,
+                                                          instance):
+        db_instance.find_all.return_value.all.return_value = (
+            self._instances('i1', 'i2', 'i3'))
+        instance.load.side_effect = lambda ctx, i: mock.Mock(id=i)
+        for guest in (self.tasks.get_guest(i)
+                      for i in self._instances('i2', 'i3')):
+            guest.get_recovery_view.side_effect = Exception('timed out')
+        self.tasks.shrink_cluster('ctx', 'c1', ['i1'])
+        self.assertEqual([('fence_member', 'i1')], self.calls)
         instance.delete.assert_not_called()
         self.tasks.update_statuses_on_failure.assert_called_once_with('c1')
 
@@ -395,10 +471,12 @@ class PostgresqlTasksTest(trove_testtools.TestCase):
                 i.id for i in sorted(self._instances('i1', 'i2', 'i3'),
                                      key=key)])
 
-    def test_the_recovery_is_not_there_yet(self):
-        self.assertIsNone(
-            pg_taskmanager.PostgresqlTaskManagerStrategy().cluster_recovery(
-                mock.Mock()))
+    def test_the_recovery(self):
+        recovery = pg_taskmanager.PostgresqlTaskManagerStrategy(
+        ).cluster_recovery('postgresql')
+        self.assertIsInstance(recovery,
+                              pg_recovery.PostgresqlClusterRecovery)
+        self.assertEqual('postgresql', recovery.manager)
 
     def test_root_follows_the_members_that_join(self):
         # The common layer's: a cluster with root gives it to the members

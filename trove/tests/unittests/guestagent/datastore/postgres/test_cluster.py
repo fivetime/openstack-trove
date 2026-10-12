@@ -384,6 +384,276 @@ class ReconcileTest(ClusterAppTestBase):
         self.app.get_config_param.assert_not_called()
 
 
+MEMBERS = {'i1': '10.0.0.1', 'i2': '10.0.0.2', 'i3': '10.0.0.3'}
+
+
+class SelfFencingTest(ClusterAppTestBase):
+    """A primary takes writes only while a standby streams from it or
+    the task manager's lease says it is the primary.
+    """
+
+    def setUp(self):
+        super(SelfFencingTest, self).setUp()
+        self.app._update_cluster(members=MEMBERS, mode='sync', self_id='i2',
+                                 primary_id='i2')
+
+    def _primary_at(self, seconds, standbys=()):
+        self.app.adm.query.side_effect = [[(False,)], list(standbys)]
+        with mock.patch.object(cluster.time, 'monotonic',
+                               return_value=seconds):
+            return self.app.member_view()
+
+    def test_a_primary_alone_waits_for_the_lease(self):
+        # Up without a standby or a lease: closed, until the task manager
+        # says it is the primary; then open for the lease, and for the
+        # fence grace period after it.
+        self.assertFalse(self._primary_at(0).writable)
+        with mock.patch.object(cluster.time, 'monotonic', return_value=0):
+            self.app.renew_lease(60)
+        self.assertTrue(self._primary_at(1).writable)
+        self.assertTrue(self._primary_at(50).writable)
+        self.assertTrue(self._primary_at(60).writable)
+        self.assertFalse(self._primary_at(70).writable)
+        # A standby streaming says it as well.
+        streaming = [('i3', 'streaming', 'quorum', 0)]
+        self.assertTrue(self._primary_at(70, streaming).writable)
+        self.assertTrue(self._primary_at(80).writable)
+        self.assertFalse(self._primary_at(90).writable)
+
+    def test_a_primary_the_cluster_left(self):
+        # Its data is a primary's, but the cluster's primary is another
+        # member now: no writes, whatever streams from it.
+        self.app._update_cluster(primary_id='i1')
+        with mock.patch.object(cluster.time, 'monotonic', return_value=0):
+            self.app.renew_lease(60)
+        self.assertFalse(
+            self._primary_at(1, [('i3', 'streaming', 'quorum', 0)]).writable)
+        self.app._update_cluster(primary_id='i2')
+        self.assertTrue(
+            self._primary_at(2, [('i3', 'streaming', 'quorum', 0)]).writable)
+
+    def test_a_fenced_primary(self):
+        self.app.fenced = True
+        self.assertFalse(
+            self._primary_at(0, [('i3', 'streaming', 'quorum', 0)]).writable)
+
+    def test_a_cluster_of_one(self):
+        self.app._update_cluster(members={'i2': '10.0.0.2'})
+        self.assertTrue(self._primary_at(0).writable)
+
+    def test_a_standby_counts_its_time_without_the_primary(self):
+        with mock.patch.object(cluster.time, 'monotonic', return_value=100):
+            self.app.adm.query.side_effect = [[(True,)], []]
+            self.app.member_view()
+        self.assertEqual(100, self.app._detached_since)
+        with mock.patch.object(cluster.time, 'monotonic', return_value=130):
+            self.app.adm.query.side_effect = [
+                [(True,)], [('streaming', '10.0.0.1', 1.0, 0)]]
+            self.app.member_view()
+        self.assertIsNone(self.app._detached_since)
+
+
+class FailoverTest(ClusterAppTestBase):
+
+    def setUp(self):
+        super(FailoverTest, self).setUp()
+        self.app._update_cluster(members=MEMBERS, mode='sync', self_id='i2',
+                                 primary_id='i1', replication_user=USER)
+        mock.patch.object(cluster.operating_system, 'remove').start()
+        self.app._self_ip = mock.Mock(return_value='10.0.0.2')
+        self.queries = []
+
+    def _answers(self, *by_prefix):
+        """What the server answers, by the start of the query."""
+        def query(sql):
+            self.queries.append(sql)
+            for prefix, rows in by_prefix:
+                if sql.startswith(prefix):
+                    return rows
+            return []
+        self.app.adm.query.side_effect = query
+
+    def test_fence(self):
+        self._answers()
+        self.app.renew_lease(60)
+        with mock.patch.object(cluster.docker_util, 'run_command') as run:
+            self.app.fence_member()
+        self.assertIn('CHECKPOINT', self.queries)
+        run.assert_called_once_with(
+            self.app.docker_client,
+            'pg_ctl stop -m fast -D %s' % self.app.datadir)
+        self.assertEqual([('stop_db',)], self.app.calls)
+        self.assertTrue(self.app.fenced)
+        self.assertFalse(self.app.lease_fresh())
+        # A server that does not answer stops all the same.
+        self.app.adm.query.side_effect = Exception('refused')
+        self.app.fence_member()
+        self.assertEqual([('stop_db',), ('stop_db',)], self.app.calls)
+
+    def test_promote(self):
+        self._answers(('SELECT pg_is_in_recovery', [(True,)]),
+                      ('SELECT pg_promote', [(True,)]),
+                      ('SELECT timeline_id', [(2,)]),
+                      ('SELECT pg_wal_lsn_diff', [(2000,)]))
+        self.app.fenced = True
+        result = self.app.promote_member(MEMBERS, 'sync')
+        self.assertEqual({'lsn': 2000, 'timeline': 2}, result)
+        self.app.configuration_manager.remove_system_override \
+            .assert_called_once_with(cluster.CNF_REPLICATION)
+        self.assertEqual({'synchronous_standby_names': ''},
+                         self._override(cluster.CNF_SYNC))
+        self.assertEqual('i2', self.app.primary_id)
+        self.assertIn('SELECT pg_promote(true, 60)', self.queries)
+        self.assertIn('CHECKPOINT', self.queries)
+        self.assertIn("SELECT pg_create_physical_replication_slot('trove_i1')",
+                      self.queries)
+        self.assertIn("SELECT pg_create_physical_replication_slot('trove_i3')",
+                      self.queries)
+        self.assertNotIn("SELECT pg_create_physical_replication_slot("
+                         "'trove_i2')", self.queries)
+        self.assertEqual([('reload',)], self.app.calls)
+        self.assertFalse(self.app.fenced)
+        # Strict: commits wait from the start. Already a primary: no
+        # promotion.
+        self.queries = []
+        self._answers(('SELECT pg_is_in_recovery', [(False,)]),
+                      ('SELECT timeline_id', [(2,)]),
+                      ('SELECT pg_wal_lsn_diff', [(2000,)]))
+        self.app.promote_member(MEMBERS, 'strict')
+        self.assertEqual({'synchronous_standby_names': 'ANY 1 (*)'},
+                         self._override(cluster.CNF_SYNC))
+        self.assertNotIn('SELECT pg_promote(true, 60)', self.queries)
+
+    def test_a_promotion_that_does_not_happen(self):
+        self._answers(('SELECT pg_is_in_recovery', [(True,)]),
+                      ('SELECT pg_promote', [(False,)]))
+        self.assertRaises(exception.TroveError, self.app.promote_member,
+                          MEMBERS, 'sync')
+
+    def test_follow(self):
+        self._answers(('SELECT pg_is_in_recovery', [(True,)]))
+        self.app._detached_since = 5
+        self.app.follow_primary({'id': 'i3', 'host': '10.0.0.3'})
+        self.assertEqual(
+            {'primary_conninfo': 'host=10.0.0.3 port=5432 user=replicator '
+                                 'password=pw application_name=i2 '
+                                 'dbname=postgres',
+             'primary_slot_name': 'trove_i2'},
+            self._override(cluster.CNF_REPLICATION))
+        self.assertEqual('i3', self.app.primary_id)
+        self.assertEqual([('reload',)], self.app.calls)
+        self.assertIsNone(self.app._detached_since)
+        # A primary cannot follow: it rejoins.
+        self._answers(('SELECT pg_is_in_recovery', [(False,)]))
+        self.assertRaises(exception.TroveError, self.app.follow_primary,
+                          {'id': 'i3', 'host': '10.0.0.3'})
+
+    @mock.patch.object(cluster.docker_util, 'start_container')
+    @mock.patch.object(cluster.docker_util, 'remove_container')
+    def test_rejoin_by_a_rewind(self, remove, start):
+        container = self.app.docker_client.containers.get.return_value
+        container.exec_run.return_value = (0, b'Done!')
+        self.app.adm.query.return_value = [('streaming',)]
+        self.app.fenced = True
+        self.app.rejoin_cluster({'id': 'i3', 'host': '10.0.0.3'})
+        # The stale pid file goes, then pg_rewind runs in the parked
+        # container against the new primary, with the server's own
+        # configuration file.
+        cluster.operating_system.remove.assert_called_once_with(
+            self.app.datadir + '/postmaster.pid', force=True, as_root=True)
+        self.assertEqual(
+            ['pg_rewind', '--target-pgdata=%s' % self.app.datadir,
+             '--source-server=host=10.0.0.3 port=5432 user=replicator '
+             'dbname=postgres',
+             '--config-file=/etc/postgresql/postgresql.conf', '--progress'],
+            container.exec_run.call_args.args[0])
+        self.assertEqual({'PGPASSWORD': 'pw'},
+                         container.exec_run.call_args.kwargs['environment'])
+        cluster.utils.execute_with_timeout.assert_not_called()
+        self.assertEqual('10.0.0.3', self._override(
+            cluster.CNF_REPLICATION)['primary_conninfo'].split()[0][5:])
+        self.app.configuration_manager.remove_system_override \
+            .assert_called_once_with(cluster.CNF_SYNC)
+        self.assertEqual('i3', self.app.primary_id)
+        cluster.operating_system.execute_shell_cmd.assert_called_once_with(
+            'touch %s/standby.signal' % self.app.datadir, [], shell=True,
+            as_root=True)
+        self.assertEqual(['stop_db', 'start_db'],
+                         [c[0] for c in self.app.calls])
+        self.assertFalse(self.app.rebuilding)
+        self.assertFalse(self.app.fenced)
+
+    @mock.patch.object(cluster.docker_util, 'start_container')
+    @mock.patch.object(cluster.docker_util, 'remove_container')
+    def test_rejoin_by_a_base_backup_when_the_rewind_fails(self, remove,
+                                                           start):
+        container = self.app.docker_client.containers.get.return_value
+        container.exec_run.side_effect = [(1, b'could not find common '
+                                              b'ancestor'), (0, b'')]
+        self.app.adm.query.return_value = [('streaming',)]
+        self.app.rejoin_cluster({'id': 'i3', 'host': '10.0.0.3'})
+        commands = [c.args[0][0] for c in container.exec_run.call_args_list]
+        self.assertEqual(['pg_rewind', 'pg_basebackup'], commands)
+        self.assertEqual('10.0.0.3',
+                         container.exec_run.call_args.args[0][2])
+        cluster.utils.execute_with_timeout.assert_any_call(
+            'find', self.app.datadir, '-mindepth', '1', '-delete',
+            run_as_root=True, root_helper='sudo', timeout=600)
+        self.assertEqual(['stop_db', 'start_db'],
+                         [c[0] for c in self.app.calls])
+
+    @mock.patch.object(cluster.docker_util, 'start_container')
+    @mock.patch.object(cluster.docker_util, 'remove_container')
+    def test_a_rejoin_that_fails_leaves_the_member_down(self, remove,
+                                                        start):
+        container = self.app.docker_client.containers.get.return_value
+        container.exec_run.return_value = (1, b'no')
+        self.assertRaises(exception.TroveError, self.app.rejoin_cluster,
+                          {'id': 'i3', 'host': '10.0.0.3'})
+        self.assertFalse(self.app.rebuilding)
+        self.assertNotIn('start_db', [c[0] for c in self.app.calls])
+
+    def test_the_recovery_view_of_a_primary(self):
+        self.app._update_cluster(primary_id='i2')
+        self._answers(('SELECT pg_is_in_recovery', [(False,)]),
+                      ('SELECT application_name',
+                       [('i3', 'streaming', 'quorum', 0)]),
+                      ('SELECT timeline_id', [(1,)]),
+                      ('SELECT pg_wal_lsn_diff', [(1000,)]))
+        with mock.patch.object(cluster.time, 'monotonic', return_value=50):
+            self.app.renew_lease(60)
+            view = self.app.recovery_view()
+        self.assertEqual(
+            {'ip': '10.0.0.2', 'state': 'primary', 'role': 'PRIMARY',
+             'mode': 'sync', 'self_id': 'i2', 'primary_id': 'i2',
+             'writable': True, 'fenced': False, 'lease_fresh': True,
+             'standbys': {'i3': {'state': 'streaming',
+                                 'sync_state': 'quorum', 'lag_bytes': 0}},
+             'lsn': 1000, 'timeline': 1, 'no_standby_for': None}, view)
+
+    def test_the_recovery_view_of_a_standby(self):
+        self._answers(('SELECT pg_is_in_recovery', [(True,)]),
+                      ('SELECT status', []),
+                      ('SELECT timeline_id', [(1,)]),
+                      ('SELECT pg_wal_lsn_diff', [(900,)]))
+        with mock.patch.object(cluster.time, 'monotonic',
+                               side_effect=[100, 130, 130]):
+            view = self.app.recovery_view()
+        self.assertEqual(
+            {'ip': '10.0.0.2', 'state': 'standby', 'role': 'DETACHED',
+             'mode': 'sync', 'self_id': 'i2', 'primary_id': 'i1',
+             'writable': False, 'fenced': False, 'lease_fresh': False,
+             'receiver': None, 'lsn': 900, 'replay_lsn': 900,
+             'timeline': 1, 'disconnected_for': 30}, view)
+
+    def test_the_recovery_view_of_a_stopped_member(self):
+        self.app.adm.query.side_effect = Exception('refused')
+        view = self.app.recovery_view()
+        self.assertEqual(('stopped', 'i1', False), (
+            view['state'], view['primary_id'], view['writable']))
+        self.assertNotIn('lsn', view)
+
+
 class ManagerMixinTest(trove_testtools.TestCase):
 
     def setUp(self):
@@ -438,7 +708,32 @@ class ManagerMixinTest(trove_testtools.TestCase):
         self.manager.app.create_member_slot.assert_called_once_with('i3')
         self.manager.app.drop_member_slot.assert_called_once_with('i3')
         self.manager.app.update_cluster_members.assert_called_once_with(
-            {'i1': '10.0.0.1'}, 'async')
+            {'i1': '10.0.0.1'}, 'async', primary_id=None)
+        self.manager.update_cluster_members(None, {'i1': '10.0.0.1'},
+                                            'async', primary_id='i1')
+        self.manager.app.update_cluster_members.assert_called_with(
+            {'i1': '10.0.0.1'}, 'async', primary_id='i1')
+
+    def test_the_failover_calls(self):
+        self.manager.app.promote_member.return_value = {'lsn': 1}
+        self.manager.renew_lease(None, 60)
+        self.manager.fence_member(None)
+        self.assertEqual({'lsn': 1}, self.manager.promote_member(
+            None, {'i1': '10.0.0.1'}, 'sync'))
+        self.manager.follow_primary(None, {'id': 'i1', 'host': '10.0.0.1'})
+        self.manager.rejoin_cluster(None, {'id': 'i1', 'host': '10.0.0.1'})
+        self.manager.app.renew_lease.assert_called_once_with(60)
+        self.manager.app.fence_member.assert_called_once_with()
+        self.manager.app.promote_member.assert_called_once_with(
+            {'i1': '10.0.0.1'}, 'sync')
+        self.manager.app.follow_primary.assert_called_once_with(
+            {'id': 'i1', 'host': '10.0.0.1'})
+        self.manager.app.rejoin_cluster.assert_called_once_with(
+            {'id': 'i1', 'host': '10.0.0.1'})
+        self.manager.app.rejoin_cluster.side_effect = (
+            exception.TroveError('no'))
+        self.assertRaises(exception.TroveError, self.manager.rejoin_cluster,
+                          None, {'id': 'i1', 'host': '10.0.0.1'})
 
     def test_prepare_keeps_the_mode(self):
         with mock.patch.object(pg_manager.PostgresManager,

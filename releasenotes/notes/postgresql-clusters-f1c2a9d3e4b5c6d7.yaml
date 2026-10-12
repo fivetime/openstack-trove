@@ -1,0 +1,16 @@
+---
+features:
+  - |
+    PostgreSQL clusters: a primary and its streaming standbys behind one
+    endpoint for writes and one for reads, with the replication mode the
+    tenant chooses (``replication_mode``: ``async``, ``sync`` or
+    ``strict``, ``sync`` by default), grown and shrunk by members.
+  - |
+    A PostgreSQL cluster fails over by itself: the task manager gives up
+    a primary that its standbys have lost and that does not answer, or
+    answers that it has no standby either, promotes the standby that
+    holds the most once no acknowledged commit can be lost, points the
+    other standbys at it and has the old primary rejoin as a standby
+    (``pg_rewind``, or a base backup). A primary cut off from its
+    standbys and from the task manager's lease closes its write port by
+    itself. Removing the primary switches over to a standby first.
