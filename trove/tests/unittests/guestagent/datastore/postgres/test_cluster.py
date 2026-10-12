@@ -472,6 +472,9 @@ class FailoverTest(ClusterAppTestBase):
                     return rows
             return []
         self.app.adm.query.side_effect = query
+        # Statements without rows (CHECKPOINT) go through psql; query
+        # would fail on them with "no results to fetch".
+        self.app.adm.psql.side_effect = lambda sql: self.queries.append(sql)
 
     def test_fence(self):
         self._answers()
@@ -486,8 +489,10 @@ class FailoverTest(ClusterAppTestBase):
         self.assertTrue(self.app.fenced)
         self.assertFalse(self.app.lease_fresh())
         # A server that does not answer stops all the same.
-        self.app.adm.query.side_effect = Exception('refused')
-        self.app.fence_member()
+        self.app.adm.psql.side_effect = Exception('refused')
+        with mock.patch.object(cluster.docker_util, 'run_command',
+                               side_effect=Exception('no container')):
+            self.app.fence_member()
         self.assertEqual([('stop_db',), ('stop_db',)], self.app.calls)
 
     def test_promote(self):
@@ -504,7 +509,11 @@ class FailoverTest(ClusterAppTestBase):
                          self._override(cluster.CNF_SYNC))
         self.assertEqual('i2', self.app.primary_id)
         self.assertIn('SELECT pg_promote(true, 60)', self.queries)
-        self.assertIn('CHECKPOINT', self.queries)
+        # The slots before the checkpoint: a checkpoint that fails does
+        # not leave the members that rejoin without their slots.
+        self.assertLess(self.queries.index(
+            "SELECT pg_create_physical_replication_slot('trove_i3')"),
+            self.queries.index('CHECKPOINT'))
         self.assertIn("SELECT pg_create_physical_replication_slot('trove_i1')",
                       self.queries)
         self.assertIn("SELECT pg_create_physical_replication_slot('trove_i3')",
@@ -513,6 +522,9 @@ class FailoverTest(ClusterAppTestBase):
                          "'trove_i2')", self.queries)
         self.assertEqual([('reload',)], self.app.calls)
         self.assertFalse(self.app.fenced)
+        # A checkpoint that fails is logged, not fatal.
+        self.app.adm.psql.side_effect = Exception('no')
+        self.app.promote_member(MEMBERS, 'sync')
         # Strict: commits wait from the start. Already a primary: no
         # promotion.
         self.queries = []

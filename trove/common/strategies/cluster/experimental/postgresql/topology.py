@@ -117,7 +117,9 @@ def primary_dead(topology, primary_id, primary_host, grace):
     itself does not answer, or answers that it has had no standby for
     the grace period, or that its server is down. A standby that still
     streams from it says the primary lives, whatever the task manager
-    sees. Returns (dead, why).
+    sees. A standby that follows another primary (not yet pointed at
+    this one after a failover) says nothing about it. Returns
+    (dead, why).
     """
     standbys = [i for i in topology.standbys
                 if not topology.answer(i).get('rebuilding')]
@@ -125,8 +127,10 @@ def primary_dead(topology, primary_id, primary_host, grace):
                  if topology.streaming_from(i, primary_host)]
     if streaming:
         return False, 'standby %s streams from it' % ', '.join(streaming)
+    standbys = [i for i in standbys
+                if topology.answer(i).get('primary_id') in (None, primary_id)]
     if not standbys:
-        return False, 'no standby answers'
+        return False, 'no standby that follows it answers'
     waiting = [i for i in standbys
                if (topology.answer(i).get('disconnected_for') or 0) < grace]
     if waiting:

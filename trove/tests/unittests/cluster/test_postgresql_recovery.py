@@ -98,7 +98,13 @@ class TopologyTest(trove_testtools.TestCase):
             ({'i1': None, 'i2': standby('10.0.0.2'), 'i3': gone},
              False, 'streams from it'),
             # No standby answers: nothing to go on.
-            ({'i1': None, 'i2': None}, False, 'no standby answers'),
+            ({'i1': None, 'i2': None}, False, 'no standby that follows'),
+            # A standby that follows another primary (just after a
+            # failover) says nothing about this one.
+            ({'i1': None, 'i2': standby('10.0.0.2', status=None,
+                                        disconnected_for=40,
+                                        primary_id='i9')},
+             False, 'no standby that follows'),
             # A standby has not been without it for the grace period.
             ({'i1': None, 'i2': fresh, 'i3': gone}, False, 'has not been'),
             # Every standby without it, and it does not answer.
@@ -206,7 +212,8 @@ class RecoveryTestBase(trove_testtools.TestCase):
                     return dict(answer)
                 g.get_recovery_view.side_effect = view
                 for name in ('renew_lease', 'fence_member', 'follow_primary',
-                             'rejoin_cluster', 'update_cluster_members'):
+                             'rejoin_cluster', 'update_cluster_members',
+                             'create_member_slot'):
                     getattr(g, name).side_effect = (
                         lambda *a, _n=name, _i=member.id, **k:
                         self.calls.append((_n, _i) + a + (
@@ -280,6 +287,22 @@ class HealthyRecoveryTest(RecoveryTestBase):
             self.recovery.memory['c1'])
         self.assertEqual({}, self.recovery.waiting_since)
 
+    def test_a_new_primary_is_not_judged_by_standbys_still_on_the_old(self):
+        # Just promoted: the other standby still follows the old primary
+        # and has been without WAL for long; that is no evidence against
+        # the new primary, which gets its lease and the standby is told
+        # to follow.
+        self.answers = {'i1': None,
+                        'i2': primary('10.0.0.2', timeline=2, self_id='i2',
+                                      no_standby_for=100),
+                        'i3': standby('10.0.0.3', status=None,
+                                      disconnected_for=100, primary_id='i1')}
+        self._check_at(0)
+        self.assertEqual([('renew_lease', 'i2', 60),
+                          ('create_member_slot', 'i2', 'i3'),
+                          ('follow_primary', 'i3',
+                           {'id': 'i2', 'host': '10.0.0.2'})], self.calls)
+
     def test_a_primary_alone_keeps_the_lease(self):
         # Both standbys down: the primary goes on (sync falls back to
         # none), nothing is failed over.
@@ -296,7 +319,8 @@ class HealthyRecoveryTest(RecoveryTestBase):
                                      primary_id='i9')
         self._check_at(0)
         self._check_at(10)
-        self.assertEqual([('follow_primary', 'i3',
+        self.assertEqual([('create_member_slot', 'i1', 'i3'),
+                          ('follow_primary', 'i3',
                            {'id': 'i1', 'host': '10.0.0.1'})],
                          [c for c in self.calls if c[0] != 'renew_lease'])
 
@@ -307,6 +331,7 @@ class HealthyRecoveryTest(RecoveryTestBase):
         self.answers['i2'] = primary('10.0.0.2', timeline=1, self_id='i2')
         self._check_at(0)
         self.assertEqual([('renew_lease', 'i1', 60),
+                          ('create_member_slot', 'i1', 'i2'),
                           ('rejoin_cluster', 'i2',
                            {'id': 'i1', 'host': '10.0.0.1'})], self.calls)
 
@@ -316,6 +341,7 @@ class HealthyRecoveryTest(RecoveryTestBase):
         self.answers['i3'] = stopped('10.0.0.3', primary_id='i1', fenced=True)
         self._check_at(0)
         self.assertEqual([('renew_lease', 'i1', 60),
+                          ('create_member_slot', 'i1', 'i3'),
                           ('rejoin_cluster', 'i3',
                            {'id': 'i1', 'host': '10.0.0.1'})], self.calls)
 
@@ -377,6 +403,7 @@ class FailoverTest(RecoveryTestBase):
         self._check_at(90)
         self.assertEqual(
             [('promote', 'i2', 'sync'),
+             ('create_member_slot', 'i2', 'i3'),
              ('follow_primary', 'i3', {'id': 'i2', 'host': '10.0.0.2'}),
              ('update_cluster_members', 'i2',
               {'i1': '10.0.0.1', 'i2': '10.0.0.2', 'i3': '10.0.0.3'}, 'sync',
@@ -411,6 +438,7 @@ class FailoverTest(RecoveryTestBase):
         self.answers['i1'] = primary('10.0.0.1', timeline=1, self_id='i1')
         self._check_at(200)
         self.assertEqual([('renew_lease', 'i2', 60),
+                          ('create_member_slot', 'i2', 'i1'),
                           ('rejoin_cluster', 'i1',
                            {'id': 'i2', 'host': '10.0.0.2'})], self.calls)
 
@@ -427,13 +455,15 @@ class FailoverTest(RecoveryTestBase):
         self.assertEqual([], self.calls)
         self._check_at(140)
         self.assertEqual(
-            ['fence_member', 'promote', 'follow_primary',
-             'update_cluster_members', 'update_cluster_members',
+            ['fence_member', 'promote', 'create_member_slot',
+             'follow_primary', 'update_cluster_members',
+             'update_cluster_members', 'create_member_slot',
              'rejoin_cluster', 'renew_lease'],
             [c[0] for c in self.calls])
         self.assertEqual(('fence_member', 'i1'), self.calls[0])
+        self.assertEqual(('create_member_slot', 'i2', 'i1'), self.calls[6])
         self.assertEqual(('rejoin_cluster', 'i1',
-                          {'id': 'i2', 'host': '10.0.0.2'}), self.calls[5])
+                          {'id': 'i2', 'host': '10.0.0.2'}), self.calls[7])
 
     def test_a_primary_whose_server_is_down_is_replaced(self):
         self._healthy()

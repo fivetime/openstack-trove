@@ -101,6 +101,13 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
             self.memory.setdefault(cluster_id, {})['lease_at'] = \
                 time.monotonic()
 
+    def _slot_then(self, context, leader, member_id, what, primary):
+        """A member follows or rejoins the primary through its slot: the
+        slot first (kept when it is there), then the member.
+        """
+        self._tell(context, leader, 'create_member_slot', member_id)
+        self._tell(context, member_id, what, primary)
+
     def _due(self, cluster_id, member_id, now):
         """Whether a member may be told again: once an interval."""
         key = (cluster_id, member_id)
@@ -237,7 +244,8 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
                              "(timeline %s, the primary's %s): rejoin.",
                              cluster_id, member_id, other.get('timeline'),
                              answer.get('timeline'))
-                    self._tell(context, member_id, 'rejoin_cluster', primary)
+                    self._slot_then(context, leader, member_id,
+                                    'rejoin_cluster', primary)
             elif state == topology.STOPPED:
                 if (other.get('primary_id') != leader or
                         other.get('fenced')) and \
@@ -245,7 +253,8 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
                     LOG.info("Cluster %s: member %s is down and does not "
                              "follow %s: rejoin.", cluster_id, member_id,
                              leader)
-                    self._tell(context, member_id, 'rejoin_cluster', primary)
+                    self._slot_then(context, leader, member_id,
+                                    'rejoin_cluster', primary)
             elif state == topology.STANDBY:
                 receiver = other.get('receiver') or {}
                 elsewhere = (receiver.get('sender_host') not in (None, host)
@@ -255,13 +264,15 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
                     LOG.info("Cluster %s: standby %s follows %s, not the "
                              "primary %s: follow.", cluster_id, member_id,
                              other.get('primary_id'), leader)
-                    self._tell(context, member_id, 'follow_primary', primary)
+                    self._slot_then(context, leader, member_id,
+                                    'follow_primary', primary)
                 elif (away >= self.conf.cluster_standby_rebuild_after and
                       self._due(cluster_id, member_id, now)):
                     LOG.info("Cluster %s: standby %s has not streamed for "
                              "%s seconds: rejoin (rewind or base backup).",
                              cluster_id, member_id, int(away))
-                    self._tell(context, member_id, 'rejoin_cluster', primary)
+                    self._slot_then(context, leader, member_id,
+                                    'rejoin_cluster', primary)
 
     def _failover(self, context, db_cluster, top, primary_id=None,
                   host=None, why=''):
@@ -361,13 +372,15 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
         for member_id in top.standbys:
             if member_id != chosen and not top.answer(member_id).get(
                     'rebuilding'):
-                self._tell(context, member_id, 'follow_primary', primary)
+                self._slot_then(context, chosen, member_id, 'follow_primary',
+                                primary)
         for member_id in top.reachable:
             if member_id != old_id:
                 self._tell(context, member_id, 'update_cluster_members',
                            members, mode, primary_id=chosen)
         if old_id in top.reachable:
-            self._tell(context, old_id, 'rejoin_cluster', primary)
+            self._slot_then(context, chosen, old_id, 'rejoin_cluster',
+                            primary)
         self._renew_lease(context, cluster_id, chosen)
 
     def _follow(self, context, db_cluster):

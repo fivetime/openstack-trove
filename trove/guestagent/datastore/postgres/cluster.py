@@ -666,12 +666,16 @@ class PostgresqlClusterAppMixin(object):
         self.fenced = True
         self._lease_until = 0
         self._confirmed_at = None
+        # CHECKPOINT returns no rows: psql, not query.
         try:
-            self.adm.query("CHECKPOINT")
+            self.adm.psql("CHECKPOINT")
+        except Exception as err:
+            LOG.info("No checkpoint (%s).", err)
+        try:
             docker_util.run_command(
                 self.docker_client, 'pg_ctl stop -m fast -D %s' % self.datadir)
         except Exception as err:
-            LOG.info("No clean stop (%s); stopping the container.", err)
+            LOG.info("No fast stop (%s); stopping the container.", err)
         self.stop_db()
 
     def promote_member(self, members, mode):
@@ -694,11 +698,16 @@ class PostgresqlClusterAppMixin(object):
                 raise exception.TroveError(
                     _("The member was not promoted within %s seconds.") %
                     PROMOTE_TIMEOUT)
-        self.reload()
-        self.adm.query("CHECKPOINT")
         for member_id in members:
             if member_id != self.self_id:
                 self.create_member_slot(member_id)
+        self.reload()
+        # For the rewinds of the members that rejoin; CHECKPOINT returns
+        # no rows. A member that rejoins without it takes a base backup.
+        try:
+            self.adm.psql("CHECKPOINT")
+        except Exception as err:
+            LOG.warning("No checkpoint after the promotion: %s", err)
         self._confirmed_at = time.monotonic()
         return {'lsn': self._lsn(PRIMARY_LSN_QUERY),
                 'timeline': self._timeline()}
