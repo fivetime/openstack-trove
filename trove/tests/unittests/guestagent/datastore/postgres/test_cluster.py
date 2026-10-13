@@ -416,6 +416,86 @@ class ReconcileTest(ClusterAppTestBase):
 MEMBERS = {'i1': '10.0.0.1', 'i2': '10.0.0.2', 'i3': '10.0.0.3'}
 
 
+class ClusterSignalTest(ClusterAppTestBase):
+    """What the probe tells the control plane of this member."""
+
+    def setUp(self):
+        super(ClusterSignalTest, self).setUp()
+        self.app._update_cluster(members=MEMBERS, mode='sync', self_id='i2',
+                                 primary_id='i2')
+        self.now = 1000.0
+        mock.patch.object(cluster.time, 'monotonic',
+                          side_effect=lambda: self.now).start()
+        self.primary = cluster_probe.MemberView('primary', 'PRIMARY', True,
+                                                False)
+        self.detached = cluster_probe.MemberView('standby', 'DETACHED',
+                                                 False, False)
+
+    def test_a_primary_with_a_standby_or_alone_in_a_cluster_of_one(self):
+        self.assertEqual(cluster_probe.NORMAL,
+                         self.app.cluster_signal(self.primary))
+        self.app._no_standby_since = 990.0
+        self.app._update_cluster(members={'i2': '10.0.0.2'})
+        self.assertEqual(cluster_probe.NORMAL,
+                         self.app.cluster_signal(self.primary))
+
+    def test_a_primary_alone_asks_for_its_lease(self):
+        self.app._no_standby_since = 990.0
+        signal = self.app.cluster_signal(self.primary)
+        self.assertEqual((True, 'lease_request'),
+                         (signal.abnormal, signal.kind))
+        self.assertEqual('no standby streams for 10 seconds; the lease '
+                         'runs 0 more seconds', signal.reason)
+        self.assertEqual({'no_standby_for': 10.0, 'lease_left': 0,
+                          'lease_ttl': 0, 'writable': True}, signal.extra)
+        # Before a grant: every third of the fence grace.
+        self.assertEqual(5.0, signal.resend_after)
+        # Granted 60 s: again when a third of it is left.
+        self.app.renew_lease(60)
+        self.now = 1010.0
+        signal = self.app.cluster_signal(self.primary)
+        self.assertEqual(50.0, signal.extra['lease_left'])
+        self.assertEqual(30.0, signal.resend_after)
+        self.assertEqual(60, signal.extra['lease_ttl'])
+
+    def test_a_strict_primary_alone_cannot_be_leased(self):
+        self.app._update_cluster(mode='strict')
+        self.app._no_standby_since = 990.0
+        signal = self.app.cluster_signal(self.primary)
+        self.assertEqual((True, 'abnormal'), (signal.abnormal, signal.kind))
+        self.assertIn('strict mode', signal.reason)
+
+    def test_a_primary_the_cluster_left_fenced_rebuilding_stopped(self):
+        self.app._update_cluster(primary_id='i1')
+        self.assertIn("cluster's primary is i1",
+                      self.app.cluster_signal(self.primary).reason)
+        self.app._update_cluster(primary_id='i2')
+        self.app.fenced = True
+        self.assertEqual('fenced', self.app.cluster_signal(self.primary)
+                         .reason)
+        self.app.fenced = False
+        self.app.rebuilding = True
+        self.assertEqual('rebuilding', self.app.cluster_signal(self.primary)
+                         .reason)
+        self.app.rebuilding = False
+        stopped = cluster_probe.MemberView('stopped', None, False, False)
+        self.assertEqual('the server does not answer',
+                         self.app.cluster_signal(stopped).reason)
+
+    def test_a_standby(self):
+        streaming = cluster_probe.MemberView('standby', 'STREAMING', False,
+                                             False, True)
+        self.assertEqual(cluster_probe.NORMAL,
+                         self.app.cluster_signal(streaming))
+        self.app._detached_since = 970.0
+        self.app._update_cluster(primary_id='i1')
+        signal = self.app.cluster_signal(self.detached)
+        self.assertEqual((True, 'abnormal'), (signal.abnormal, signal.kind))
+        self.assertEqual('not streaming for 30 seconds', signal.reason)
+        self.assertEqual({'disconnected_for': 30.0, 'primary_id': 'i1'},
+                         signal.extra)
+
+
 class SelfFencingTest(ClusterAppTestBase):
     """A primary takes writes only while a standby streams from it or
     the task manager's lease says it is the primary.
@@ -571,6 +651,17 @@ class FailoverTest(ClusterAppTestBase):
         self.assertRaises(exception.TroveError, self.app.promote_member,
                           MEMBERS, 'sync')
 
+    def test_follow_twice_is_once(self):
+        # Already streaming from that primary (two task managers watch
+        # the cluster): nothing to change.
+        self.app._update_cluster(primary_id='i1')
+        self._answers(('SELECT pg_is_in_recovery', [(True,)]),
+                      ('SELECT status', [('streaming', '10.0.0.1', 1.0, 0)]))
+        self.app.follow_primary({'id': 'i1', 'host': '10.0.0.1'})
+        self.app.configuration_manager.apply_system_override \
+            .assert_not_called()
+        self.app.reload.assert_not_called()
+
     def test_follow(self):
         self._answers(('SELECT pg_is_in_recovery', [(True,)]))
         self.app._detached_since = 5
@@ -699,6 +790,20 @@ class FailoverTest(ClusterAppTestBase):
              'standbys': {'i3': {'state': 'streaming',
                                  'sync_state': 'quorum', 'lag_bytes': 0}},
              'lsn': 1000, 'timeline': 1, 'no_standby_for': None}, view)
+
+    def test_the_recovery_view_of_a_primary_alone_probes_the_peers(self):
+        self.app._update_cluster(primary_id='i2')
+        self._answers(('SELECT pg_is_in_recovery', [(False,)]),
+                      ('SELECT application_name', []),
+                      ('SELECT timeline_id', [(1,)]),
+                      ('SELECT pg_wal_lsn_diff', [(1000,)]))
+        container = self.app.docker_client.containers.get.return_value
+        container.exec_run.side_effect = lambda command: (2, b'')
+        self.app._no_standby_since = 1.0
+        with mock.patch.object(cluster.time, 'monotonic', return_value=50):
+            view = self.app.recovery_view()
+        self.assertEqual({'i1': False, 'i3': False}, view['peers'])
+        self.assertEqual(49, view['no_standby_for'])
 
     def test_the_recovery_view_of_a_standby(self):
         # Not streaming: with which members it reaches on the tenant

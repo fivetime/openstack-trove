@@ -467,6 +467,7 @@ class GaleraAppMixin(object):
         has none.
         """
         status = self._wsrep_status()
+        self._last_status = status
         if status is None:
             return cluster_probe.UNKNOWN_MEMBER
         state = status.get('wsrep_local_state_comment')
@@ -490,6 +491,56 @@ class GaleraAppMixin(object):
         # cannot ask each other where they stand (see recovery_view).
         return cluster_probe.MemberView(state, role, role == 'PRIMARY',
                                         False)
+
+    # What the probe tells the control plane: the member's last wsrep
+    # status (read by member_view), and since when it has not been
+    # synced.
+    _last_status = None
+    _unsynced_since = None
+
+    def cluster_signal(self, view):
+        """Abnormal when the server does not answer (waiting for a
+        primary component, or down), when the member is out of the
+        primary component, or when it has not been synced for the
+        recovery grace (a joiner is normal for a while).
+        """
+        signal = cluster_probe.ClusterSignal
+        status = self._last_status
+        if status is None:
+            self._unsynced_since = None
+            waiting = False
+            try:
+                waiting = self._waiting_for_primary()
+            except Exception as err:
+                LOG.debug("Not known whether the member waits: %s", err)
+            return signal(True, cluster_probe.ABNORMAL,
+                          'waiting for a primary component' if waiting
+                          else 'the server does not answer',
+                          extra={'waiting': waiting})
+        cluster_status = status.get('wsrep_cluster_status')
+        if cluster_status != PRIMARY:
+            self._unsynced_since = None
+            return signal(True, cluster_probe.ABNORMAL,
+                          'out of the primary component (%s, cluster size '
+                          '%s)' % (cluster_status,
+                                   status.get('wsrep_cluster_size')),
+                          extra={'cluster_status': cluster_status,
+                                 'cluster_size':
+                                     status.get('wsrep_cluster_size')})
+        state = status.get('wsrep_local_state_comment')
+        if state in (SYNCED, 'Donor/Desynced'):
+            self._unsynced_since = None
+            return cluster_probe.NORMAL
+        now = time.monotonic()
+        if self._unsynced_since is None:
+            self._unsynced_since = now
+        for_seconds = now - self._unsynced_since
+        grace = CONF.get(CONF.datastore_manager).cluster_recovery_grace
+        if for_seconds < grace:
+            return cluster_probe.NORMAL
+        return signal(True, cluster_probe.ABNORMAL,
+                      'not synced for %d seconds: %s' % (for_seconds, state),
+                      extra={'state': state})
 
     # Recovery, after every member went down. A member that comes up and
     # finds no primary component waits for one, with its database port

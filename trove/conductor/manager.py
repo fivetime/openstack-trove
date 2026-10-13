@@ -25,6 +25,7 @@ from trove.conductor.models import LastSeen
 from trove.extensions.common import models as common_models
 from trove.instance import models as inst_models
 from trove.instance import service_status as svc_status
+from trove.taskmanager import api as task_api
 
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
@@ -101,6 +102,31 @@ class Manager(periodic_task.PeriodicTasks):
                     payload['service_status'])
             )
         status.save()
+
+    def cluster_event(self, context, instance_id, kind, sent=None,
+                      cluster_id=None, payload=None):
+        """A cluster member's report of its cluster state (or its
+        request of a write lease), handed to every task manager: the
+        ones that watch the cluster look at it. The member does not
+        know its cluster; the instance does.
+        """
+        if self._message_too_old(instance_id, 'cluster_event', sent):
+            return
+        if not cluster_id:
+            try:
+                cluster_id = inst_models.DBInstance.find_by(
+                    id=instance_id, deleted=False).cluster_id
+            except trove_exception.NotFound:
+                cluster_id = None
+        if not cluster_id:
+            LOG.debug("Cluster event %s from instance %s, which is in no "
+                      "cluster: dropped.", kind, instance_id)
+            return
+        LOG.info("Cluster event %s from instance %s (cluster %s): %s.",
+                 kind, instance_id, cluster_id,
+                 (payload or {}).get('reason') or 'forwarded')
+        task_api.API(context).cluster_event(cluster_id, instance_id, kind,
+                                            payload=payload, sent=sent)
 
     def update_backup(self, context, instance_id, backup_id,
                       sent=None, **backup_fields):

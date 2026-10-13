@@ -88,10 +88,20 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
 
     @property
     def lease_ttl(self):
-        """A lease outlives two looks: one missed look does not close
-        the primary's write port.
-        """
-        return 2 * CONF.cluster_recovery_check_interval
+        return self.conf.cluster_lease_ttl
+
+    @property
+    def _reason(self):
+        """Why the cluster is being looked at (the hub's reason)."""
+        return getattr(self._local, 'reason', None) or ''
+
+    def check_now(self, context, db_cluster, reason=None):
+        self._local.reason = reason or ''
+        try:
+            super(PostgresqlClusterRecovery, self).check_now(
+                context, db_cluster, reason)
+        finally:
+            self._local.reason = ''
 
     def _tell(self, context, member_id, what, *args, **kwargs):
         """One call to a member, logged when it fails."""
@@ -281,7 +291,22 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
         mem.update(primary_id=leader, primary_ip=answer.get('ip'),
                    lsn=answer.get('lsn'), timeline=answer.get('timeline'),
                    sync_set=sync_set, alone=alone)
-        self._renew_lease(context, cluster_id, leader)
+        # The lease: only a primary without a standby needs one (a
+        # standby streaming from it keeps its write port open), when it
+        # asks or at every look while alone; and only when the members
+        # this replica does not reach are down for the whole control
+        # plane (their heartbeat is stale), not just out of its reach:
+        # a replica cut off from the standbys must not keep a primary
+        # writable that another replica is about to replace.
+        if alone or 'lease_request' in self._reason:
+            unreached = [i for i in top.ids if i not in top.reachable]
+            if unreached and self._stale_members(unreached) != set(unreached):
+                LOG.info("Cluster %s: no lease for the primary %s: members "
+                         "%s do not answer this replica but their heartbeat "
+                         "is fresh.", cluster_id, leader,
+                         ', '.join(unreached))
+            else:
+                self._renew_lease(context, cluster_id, leader)
         self._share_sync_set(context, top, leader, sync_set, alone,
                              answer.get('lsn')
                              if top.mode == topology.ASYNC else None)
@@ -466,13 +491,22 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
                       top.answer(chosen).get('lsn'),
                       self.conf.cluster_failover_max_lag_bytes, last_lsn)
             return
-        # A lease this task manager did not grant may have been granted
-        # by the one before it, until this one first looked.
-        lease_at = mem.get('lease_at')
-        if lease_at is None:
-            lease_at = self.first_seen.get(cluster_id)
-        lease_left = (lease_at + self.lease_ttl - now
-                      if lease_at is not None else 0)
+        # The old primary's lease has to have run out, and its fence
+        # grace after it: a lease another replica, or this task
+        # manager's predecessor, granted; none of them grants one after
+        # the primary is judged gone, and that is a function of the
+        # members' answers, so the latest grant is at the latest when
+        # this replica first saw the cluster failing (or the cluster at
+        # all). A primary that answers that it takes no writes already
+        # closed its port: nothing to wait for.
+        lease_at = max(mem.get('lease_at') or 0,
+                       mem.get('failing_since') or
+                       self.first_seen.get(cluster_id) or 0)
+        lease_left = (lease_at + self.lease_ttl +
+                      self.conf.cluster_fence_grace - now)
+        old_answer = top.answer(primary_id)
+        if old_answer and not old_answer.get('writable', True):
+            lease_left = 0
         if lease_left > 0:
             LOG.info("Cluster %s: the primary %s is gone (%s); its lease "
                      "runs %s more seconds.", cluster_id, primary_id, why,
@@ -542,7 +576,7 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
         """
         cluster_id = db_cluster.id
         now = time.monotonic()
-        since = self.forming_since.setdefault(cluster_id, now)
+        since = self._forming_since(cluster_id, db_cluster, now)
         members = self._members(context, cluster_id)
         self._current_members = members
         views = self._views(context, members)

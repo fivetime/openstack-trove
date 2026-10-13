@@ -92,6 +92,21 @@ class API(object):
                    sent=sent,
                    **backup_fields)
 
+    def cluster_event(self, instance_id, kind, sent=None, cluster_id=None,
+                      payload=None):
+        """A cluster member tells of a change of its cluster state, or
+        asks for its write lease; the conductor hands it to the task
+        manager. Fire and forget. A conductor without the method logs it
+        and drops it.
+        """
+        LOG.debug("Making async call to cast cluster_event %s for instance: "
+                  "%s", kind, instance_id)
+        version = self.API_BASE_VERSION
+        cctxt = self.client.prepare(version=version)
+        cctxt.cast(self.context, "cluster_event",
+                   instance_id=instance_id, kind=kind, sent=sent,
+                   cluster_id=cluster_id, payload=payload or {})
+
     def report_root(self, instance_id):
         LOG.debug("Making async call to cast report_root for instance: %s",
                   instance_id)

@@ -67,6 +67,36 @@ class ConductorMethodTests(trove_testtools.TestCase):
     def _get_backup(self, id):
         return bkup_models.DBBackup.find_by(id=id)
 
+    # --- Tests for cluster_event ---
+
+    @patch('trove.conductor.manager.task_api')
+    def test_cluster_event_forwarded_to_the_task_managers(self, task_api):
+        instance = t_models.DBInstance(
+            t_models.InstanceTasks.NONE, id=self.instance_id, name='m',
+            tenant_id='t', cluster_id='c1', deleted=False)
+        instance.save()
+        self.addCleanup(instance.delete)
+        payload = {'kind': 'abnormal', 'reason': 'detached'}
+        self.cond_mgr.cluster_event(None, self.instance_id, 'abnormal',
+                                    sent=10.0, payload=payload)
+        task_api.API.return_value.cluster_event.assert_called_once_with(
+            'c1', self.instance_id, 'abnormal', payload=payload, sent=10.0)
+        # An older report is discarded; a cluster id given is trusted.
+        self.cond_mgr.cluster_event(None, self.instance_id, 'normal',
+                                    sent=9.0, payload={})
+        self.assertEqual(1, task_api.API.return_value.cluster_event.call_count)
+        self.cond_mgr.cluster_event(None, self.instance_id, 'normal',
+                                    sent=11.0, cluster_id='c9', payload={})
+        self.assertEqual(('c9', self.instance_id, 'normal'),
+                         task_api.API.return_value.cluster_event.call_args
+                         .args)
+
+    @patch('trove.conductor.manager.task_api')
+    def test_cluster_event_of_no_cluster_is_dropped(self, task_api):
+        self.cond_mgr.cluster_event(None, utils.generate_uuid(), 'abnormal',
+                                    sent=10.0, payload={})
+        task_api.API.return_value.cluster_event.assert_not_called()
+
     # --- Tests for heartbeat ---
 
     def test_heartbeat_instance_not_found(self):

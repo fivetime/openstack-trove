@@ -31,9 +31,10 @@ from trove.common.strategies.cluster import strategy
 from trove.datastore.models import DatastoreVersion
 import trove.extensions.mgmt.instances.models as mgmtmodels
 from trove.instance.tasks import InstanceTasks
+from trove.quota.quota import QUOTAS
 from trove.taskmanager import models
 from trove.taskmanager.models import FreshInstanceTasks, BuiltInstanceTasks
-from trove.quota.quota import QUOTAS
+from trove.taskmanager import recovery
 
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
@@ -517,14 +518,32 @@ class Manager(periodic_task.PeriodicTasks):
             mgmtmodels.publish_exist_events(self.exists_transformer,
                                             self.admin_context)
 
+    def cluster_event(self, context, cluster_id, instance_id, kind,
+                      payload=None, sent=None):
+        """A cluster member's report of its cluster state, from the
+        conductor: a look at the cluster, when this replica watches it.
+        """
+        recovery.hub(self.admin_context).on_event(cluster_id, instance_id,
+                                                  kind, payload)
+
+    if CONF.cluster_recovery_scan_interval:
+        @periodic_task.periodic_task(
+            spacing=CONF.cluster_recovery_scan_interval)
+        def scan_clusters(self, context):
+            """The clusters the database says may need the task
+            manager: a member whose heartbeat is stale, or a recovery
+            under way.
+            """
+            recovery.hub(self.admin_context).scan()
+
     if CONF.cluster_recovery_check_interval:
         @periodic_task.periodic_task(
             spacing=CONF.cluster_recovery_check_interval)
         def recover_clusters(self, context):
-            """The clusters whose task manager strategy brings them back
-            after every member went down: one look at each.
+            """One look at every cluster this replica watches: for
+            clusters whose members do not report by themselves.
             """
-            models.recover_clusters(self.admin_context)
+            recovery.hub(self.admin_context).sweep()
 
     if CONF.quota_notification_interval:
         @periodic_task.periodic_task(spacing=CONF.quota_notification_interval)

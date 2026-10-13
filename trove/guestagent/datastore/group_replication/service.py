@@ -301,6 +301,41 @@ class GroupReplicationAppMixin(galera_service.GaleraAppMixin):
         return sum(1 for _id, state in self.execute_sql(MEMBERS_QUERY)
                    if state in IN_GROUP)
 
+    def cluster_signal(self, view):
+        """Abnormal when the server does not answer, when the member is
+        out of the group (the probe brings it back), while it recovers
+        into it, and while it is the only member of the group.
+        """
+        signal = cluster_probe.ClusterSignal
+        if view.state is None:
+            return signal(True, cluster_probe.ABNORMAL,
+                          'the server does not answer')
+        if view.down:
+            return signal(True, cluster_probe.ABNORMAL,
+                          'out of the group: %s' % view.state)
+        if view.state == 'RECOVERING':
+            return signal(True, cluster_probe.ABNORMAL,
+                          'distributed recovery under way')
+        if view.state == 'ONLINE' and self.was_last_standing():
+            return signal(True, cluster_probe.ABNORMAL,
+                          'the only member of the group',
+                          extra={'last_standing': True})
+        return cluster_probe.NORMAL
+
+    def cluster_event_view(self, view):
+        """What an event carries: not Galera's recovery view, which
+        asks wsrep status this server does not have.
+        """
+        answer = {'ip': self._self_ip(), 'state': view.state,
+                  'role': view.role, 'mode': self._group_mode(),
+                  'last_standing': self.was_last_standing()}
+        try:
+            answer['members_in_group'] = self._members_in_group()
+            answer['position'] = self._position()
+        except Exception as err:
+            LOG.debug("No group view for the event: %s", err)
+        return answer
+
     def _note_last_standing(self, alone):
         marked = self.configuration_manager.has_system_override(CNF_LAST)
         if alone and not marked:

@@ -28,7 +28,6 @@ from trove.common.strategies.cluster.experimental.group_replication import (
     taskmanager as gr_taskmanager)
 from trove.common.strategies.cluster import strategy
 from trove.instance.tasks import InstanceTasks
-from trove.taskmanager import models as task_models
 from trove.tests.unittests import trove_testtools
 
 CONF = cfg.CONF
@@ -75,10 +74,22 @@ class GaleraRecoveryTest(trove_testtools.TestCase):
             cluster_recovery_interval=30, cluster_auto_bootstrap=True,
             cluster_bootstrap_needs_all_members=False,
             cluster_bootstrap_jitter=0, cluster_recovery_timeout=3600)
-        self.db_cluster = mock.Mock(id='c1', task_status=ClusterTasks.NONE)
+        self.db_cluster = mock.Mock(id='c1', task_status=ClusterTasks.NONE,
+                                    updated=None)
         mock.patch.object(common_recovery.cluster_models.DBCluster, 'find_by',
                           return_value=self.db_cluster).start()
         mock.patch.object(common_recovery.time, 'sleep').start()
+
+        # Freeing the task is a compare-and-set too; here it frees the
+        # mock cluster's task the way the real one does.
+        def release(cluster_id, db_cluster=None):
+            self.recovery.forming_since.pop(cluster_id, None)
+            self.recovery.waiting_since.pop(cluster_id, None)
+            if self.db_cluster.task_status == ClusterTasks.RECOVERING_CLUSTER:
+                self.db_cluster.update(task_status=ClusterTasks.NONE)
+                self.db_cluster.task_status = ClusterTasks.NONE
+        mock.patch.object(common_recovery.ClusterRecovery, '_release',
+                          side_effect=release).start()
 
         # The lock is a compare-and-set on the clusters table; here it
         # takes the mock cluster's task the way the real one does.
@@ -402,26 +413,6 @@ class RecoveryWiringTest(trove_testtools.TestCase):
         self.assertIsInstance(
             strat, gr_taskmanager.GroupReplicationTaskManagerStrategy)
         self.assertIsNone(strat.cluster_recovery('mysql'))
-        self.assertEqual(30, CONF.cluster_recovery_check_interval)
-
-    @mock.patch.object(task_models.datastore_models.DatastoreVersion,
-                       'load_by_uuid')
-    @mock.patch.object(task_models.DBCluster, 'find_all')
-    def test_recover_clusters_groups_them_by_manager(self, find_all,
-                                                     load_by_uuid):
-        clusters = [mock.Mock(id='c1', datastore_version_id='v-pxc'),
-                    mock.Mock(id='c2', datastore_version_id='v-mysql'),
-                    mock.Mock(id='c3', datastore_version_id='v-pxc')]
-        find_all.return_value.all.return_value = clusters
-        load_by_uuid.side_effect = lambda i: mock.Mock(
-            manager=i[len('v-'):])
-        task_models._cluster_recoveries.clear()
-        with mock.patch.object(recovery.GaleraClusterRecovery, 'run') as run:
-            task_models.recover_clusters('ctx')
-            task_models.recover_clusters('ctx')
-        # The pxc clusters, by the same recovery each time (it remembers).
-        self.assertEqual(2, run.call_count)
-        self.assertEqual(['c1', 'c3'],
-                         [c.id for c in run.call_args[0][1]])
-        self.assertIsNone(task_models._cluster_recoveries['mysql'])
-        task_models._cluster_recoveries.clear()
+        # The poll is off by default: the members report, the scan runs.
+        self.assertEqual(0, CONF.cluster_recovery_check_interval)
+        self.assertEqual(300, CONF.cluster_recovery_scan_interval)

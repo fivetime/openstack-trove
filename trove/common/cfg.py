@@ -30,6 +30,7 @@ from osprofiler import opts as profiler
 
 from trove.common import cache
 from trove.common import constants
+from trove.common import coordination
 from trove.common.i18n import _
 from trove.version import version_info as version
 
@@ -288,17 +289,35 @@ common_opts = [
     cfg.IntOpt('load_balancer_timeout', default=600,
                help='Seconds to wait for a load balancer to be ACTIVE, or '
                     'gone, after a change.'),
-    cfg.IntOpt('cluster_recovery_check_interval', default=30,
-               help='Seconds between two looks of the task manager at the '
-                    'clusters whose members cannot bring the cluster back '
-                    'by themselves after every member went down (Galera): '
-                    'the members are asked where they stand and one is '
-                    'told to form the cluster again. 0 turns it off.'),
+    cfg.IntOpt('cluster_recovery_check_interval', default=0,
+               help='Seconds between two looks of the task manager at every '
+                    'cluster it watches, asking every member where it '
+                    'stands: the sweep the members\' own reports '
+                    '(cluster_events) and the scan of their heartbeats '
+                    '(cluster_recovery_scan_interval) make unnecessary, '
+                    'kept for clusters whose members do not report (guest '
+                    'images from before the reports). 0 turns it off.'),
+    cfg.IntOpt('cluster_recovery_scan_interval', default=300,
+               help='Seconds between two scans of the database for the '
+                    'clusters that may need the task manager: a member '
+                    'whose heartbeat is older than agent_heartbeat_expiry, '
+                    'or a recovery under way. The scan asks no member; the '
+                    'clusters it finds are looked at. 0 turns it off.'),
     cfg.IntOpt('cluster_recovery_workers', default=16, min=1,
                help='Clusters the task manager looks at at a time: a look '
                     'waits on the members of the cluster, up to their '
-                    'timeout when one is gone, and a look at every cluster '
-                    'has to end within cluster_recovery_check_interval.'),
+                    'timeout when one is gone.'),
+    cfg.IntOpt('cluster_recovery_coverage', default=2, min=1,
+               help='Task manager replicas that watch each cluster at once, '
+                    'chosen by rendezvous hashing among the replicas '
+                    'registered on the [coordination] backend; all of them '
+                    'act, and the cluster\'s recovery task keeps them from '
+                    'acting twice. With that many replicas or fewer, every '
+                    'replica watches every cluster.'),
+    cfg.IntOpt('cluster_event_coalesce', default=5, min=0,
+               help='Seconds between two looks of the task manager at one '
+                    'cluster: the reports of its members within that time '
+                    'make one look.'),
     cfg.StrOpt('cluster_default_locality', default='anti-affinity',
                choices=constants.VALID_LOCALITIES + ('',),
                help='Default Nova server group policy for the members of a '
@@ -846,6 +865,22 @@ def _with_cluster_probe_and_entry(opts, deprecated_prefix=None,
                    help='Seconds after which the task manager fails a '
                         'cluster over to the best member here although not '
                         'every member needed has answered. 0: never.'),
+        cfg.BoolOpt('cluster_events', default=True,
+                    help='Tell the control plane, through the conductor, of '
+                         'every change of the member\'s cluster state, and '
+                         'again every cluster_event_interval seconds while '
+                         'the member is not where it should be; a '
+                         'PostgreSQL primary without a standby asks for its '
+                         'write lease the same way. Off: the task manager '
+                         'only finds out by its scan.'),
+        cfg.IntOpt('cluster_event_interval', default=60, min=1,
+                   help='Seconds between two reports of a member that stays '
+                        'in an abnormal state, so that a lost report heals '
+                        'itself.'),
+        cfg.IntOpt('cluster_event_min_interval', default=5, min=0,
+                   help='At most one report per this many seconds: a member '
+                        'whose state flaps reports its latest state once '
+                        'the gap has passed.'),
     ]
     names = {opt.name for opt in cluster}
     return [opt for opt in opts if opt.name not in names] + cluster
@@ -1535,6 +1570,12 @@ def _with_postgresql_cluster(opts):
                         'primary last reported, and still be made the '
                         'primary of an async cluster when the primary '
                         'fails. 0: any.'),
+        cfg.IntOpt('cluster_lease_ttl', default=60, min=5,
+                   help='Seconds the write lease the task manager grants a '
+                        'primary without a standby lasts; the primary asks '
+                        'for it again when a third of it is left, and '
+                        'closes its write port cluster_fence_grace seconds '
+                        'after it ran out.'),
         cfg.IntOpt('cluster_wal_timeout', default=10,
                    help='Seconds without a message after which a primary '
                         'and a standby give each other up '
@@ -2070,7 +2111,10 @@ CONF.register_group(mariadb_group)
 CONF.register_group(network_group)
 CONF.register_group(service_credentials_group)
 CONF.register_group(guest_agent_group)
+CONF.register_group(coordination.coordination_group)
 
+CONF.register_opts(coordination.coordination_opts,
+                   coordination.coordination_group)
 CONF.register_opts(mysql_opts, mysql_group)
 CONF.register_opts(percona_opts, percona_group)
 CONF.register_opts(pxc_opts, pxc_group)

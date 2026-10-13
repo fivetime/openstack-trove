@@ -368,6 +368,37 @@ class TestGroupReplicationApp(trove_testtools.TestCase):
             self._states(state)
             self.assertEqual(writable, self.app.is_writable_member())
 
+    def test_cluster_signal(self):
+        self.configuration_manager.has_system_override.return_value = False
+        for state, kind, reason in (
+                (('ONLINE', 'PRIMARY'), 'normal', None),
+                (('OFFLINE', None), 'abnormal', 'out of the group: OFFLINE'),
+                (('RECOVERING', 'SECONDARY'), 'abnormal',
+                 'distributed recovery under way'),
+                ((None, None), 'abnormal', 'the server does not answer')):
+            self._states(state)
+            signal = self.app.cluster_signal(self.app.member_view())
+            self.assertEqual((kind, reason), (signal.kind, signal.reason))
+        # The only member of the group.
+        self.configuration_manager.has_system_override.return_value = True
+        self._states(('ONLINE', 'PRIMARY'))
+        signal = self.app.cluster_signal(self.app.member_view())
+        self.assertEqual('the only member of the group', signal.reason)
+        self.assertEqual({'last_standing': True}, signal.extra)
+
+    def test_cluster_event_view(self):
+        self.configuration_manager.has_system_override.return_value = False
+        self.app._self_ip = mock.Mock(return_value='10.0.0.2')
+        self.app._group_mode = mock.Mock(return_value='single')
+        self.app._members_in_group = mock.Mock(return_value=3)
+        self.app._position = mock.Mock(return_value='u:1-5')
+        view = self.app.cluster_event_view(
+            cluster_probe.MemberView('ONLINE', 'SECONDARY', False, False))
+        self.assertEqual({'ip': '10.0.0.2', 'state': 'ONLINE',
+                          'role': 'SECONDARY', 'mode': 'single',
+                          'last_standing': False, 'members_in_group': 3,
+                          'position': 'u:1-5'}, view)
+
     def test_member_role(self):
         self._states(('ONLINE', 'SECONDARY'))
         self.assertEqual({'state': 'ONLINE', 'role': 'SECONDARY',

@@ -98,6 +98,21 @@ class API(object):
             return obj_dict
         raise ValueError(_("Could not transform %s") % obj_ref)
 
+    def cluster_event(self, cluster_id, instance_id, kind, payload=None,
+                      sent=None):
+        """A cluster member's report of its cluster state, from the
+        conductor: to every task manager replica (fanout), so that the
+        ones that watch the cluster look at it. Fire and forget, no
+        notification.
+        """
+        LOG.debug("Casting cluster_event %s of cluster %s to every task "
+                  "manager", kind, cluster_id)
+        cctxt = self.client.prepare(version=self.API_BASE_VERSION,
+                                    fanout=True)
+        cctxt.cast(self.context, "cluster_event", cluster_id=cluster_id,
+                   instance_id=instance_id, kind=kind, payload=payload or {},
+                   sent=sent)
+
     def _delete_heartbeat(self, instance_id):
         agent_heart_beat = agent_models.AgentHeartBeat()
         try:

@@ -25,6 +25,7 @@ from trove.common import stream_codecs
 from trove.common import utils
 from trove.guestagent import api as guest_api
 from trove.guestagent.common import cluster_member
+from trove.guestagent.common import cluster_probe
 from trove.guestagent.datastore.galera_common import manager as galera_manager
 from trove.guestagent.datastore.galera_common import service as galera_service
 from trove.guestagent.datastore.mariadb import manager as mariadb_manager
@@ -940,6 +941,51 @@ class TestMemberView(trove_testtools.TestCase):
         self.app.docker_client.containers.get.side_effect = Exception('x')
         self.assertFalse(self.app._query_peer('10.0.0.1', 'r', 'p', 3)
                          .reachable)
+
+
+class TestClusterSignal(TestMemberView):
+    """What the probe tells the control plane of a Galera member."""
+
+    def _signal(self):
+        view = self.app.member_view()
+        return self.app.cluster_signal(view)
+
+    def test_synced_in_the_primary_component(self):
+        self.assertEqual(cluster_probe.NORMAL, self._signal())
+        self.assertEqual(self.status, self.app._last_status)
+
+    def test_out_of_the_primary_component(self):
+        self.status.update(wsrep_cluster_status='non-Primary',
+                           wsrep_cluster_size='1')
+        signal = self._signal()
+        self.assertEqual((True, 'abnormal'), (signal.abnormal, signal.kind))
+        self.assertEqual('out of the primary component (non-Primary, '
+                         'cluster size 1)', signal.reason)
+        self.assertEqual({'cluster_status': 'non-Primary',
+                          'cluster_size': '1'}, signal.extra)
+
+    def test_the_server_does_not_answer(self):
+        self.app.execute_sql = mock.Mock(side_effect=Exception('gone'))
+        self.app._waiting_for_primary = mock.Mock(return_value=True)
+        signal = self._signal()
+        self.assertEqual('waiting for a primary component', signal.reason)
+        self.assertEqual({'waiting': True}, signal.extra)
+        self.app._waiting_for_primary = mock.Mock(return_value=False)
+        self.assertEqual('the server does not answer', self._signal().reason)
+
+    def test_a_joiner_is_normal_for_the_grace_period(self):
+        self.status.update(wsrep_local_state_comment='Joiner')
+        clock = mock.patch.object(galera_service.time, 'monotonic').start()
+        clock.return_value = 1000.0
+        self.assertEqual(cluster_probe.NORMAL, self._signal())
+        clock.return_value = 1050.0
+        self.assertEqual(cluster_probe.NORMAL, self._signal())
+        clock.return_value = 1061.0
+        signal = self._signal()
+        self.assertEqual('not synced for 61 seconds: Joiner', signal.reason)
+        self.status.update(wsrep_local_state_comment='Synced')
+        self.assertEqual(cluster_probe.NORMAL, self._signal())
+        self.assertIsNone(self.app._unsynced_since)
 
 
 class TestClientCommands(trove_testtools.TestCase):

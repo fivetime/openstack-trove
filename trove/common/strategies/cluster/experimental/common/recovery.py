@@ -32,16 +32,19 @@ renew run out.
 """
 
 from concurrent import futures
+import datetime
 import random
 import time
 
 from oslo_log import log as logging
+from oslo_utils import timeutils
 
 from trove.cluster import models as cluster_models
 from trove.cluster.tasks import ClusterTasks
 from trove.common import cfg
 from trove.common import clients
 from trove.instance.models import DBInstance
+from trove.instance.models import InstanceServiceStatus
 from trove.instance import tasks as inst_tasks
 
 LOG = logging.getLogger(__name__)
@@ -110,6 +113,25 @@ class ClusterRecovery(object):
         except Exception:
             return False
 
+    def _stale_members(self, member_ids):
+        """Of the given members, those whose heartbeat is older than
+        ``agent_heartbeat_expiry`` (or missing): down, as far as the
+        whole control plane can tell, not just out of this replica's
+        reach.
+        """
+        member_ids = list(member_ids)
+        if not member_ids:
+            return set()
+        stale_before = timeutils.utcnow() - datetime.timedelta(
+            seconds=CONF.agent_heartbeat_expiry)
+        fresh = set()
+        with InstanceServiceStatus.query() as query:
+            for status in query.filter(
+                    InstanceServiceStatus.instance_id.in_(member_ids)).all():
+                if status.updated_at and status.updated_at >= stale_before:
+                    fresh.add(status.instance_id)
+        return set(member_ids) - fresh
+
     def _needs_look(self, answers):
         raise NotImplementedError()
 
@@ -118,6 +140,21 @@ class ClusterRecovery(object):
 
     def _settled(self, views):
         raise NotImplementedError()
+
+    def check_now(self, context, db_cluster, reason=None):
+        """One look at a cluster, asked for by the hub: a member's
+        report, the scan, or the look after the last one.
+        """
+        LOG.info("Cluster %s: %s; looking.", db_cluster.id,
+                 reason or 'asked for')
+        self.check(context, db_cluster)
+
+    def still_watching(self, cluster_id):
+        """Whether the cluster is waiting for a decision or recovering,
+        and so is to be looked at again by itself.
+        """
+        return (cluster_id in self.waiting_since or
+                cluster_id in self.forming_since)
 
     def check(self, context, db_cluster):
         """One look at a cluster."""
@@ -153,7 +190,7 @@ class ClusterRecovery(object):
         """
         cluster_id = db_cluster.id
         now = time.monotonic()
-        since = self.forming_since.setdefault(cluster_id, now)
+        since = self._forming_since(cluster_id, db_cluster, now)
         views = self._views(context, self._members(context, cluster_id))
         if self._settled(views):
             LOG.info("Cluster %s is back.", cluster_id)
@@ -165,25 +202,54 @@ class ClusterRecovery(object):
                       self.conf.cluster_recovery_timeout)
         self._release(cluster_id, db_cluster)
 
+    def _forming_since(self, cluster_id, db_cluster, now):
+        """Since when the cluster has been recovering: as this replica
+        remembers it, or else from when the recovery task was taken
+        (the cluster's ``updated``), so that every replica, and a
+        replica restarted meanwhile, counts the timeout from the same
+        moment.
+        """
+        since = self.forming_since.get(cluster_id)
+        if since is None:
+            updated = getattr(db_cluster, 'updated', None)
+            age = 0
+            if updated is not None:
+                age = max((timeutils.utcnow() - updated).total_seconds(), 0)
+            since = now - age
+            self.forming_since[cluster_id] = since
+        return since
+
     def _release(self, cluster_id, db_cluster=None):
+        """Free the cluster's recovery task: only when it is still on
+        it (another replica may have freed it first), in one statement.
+        """
         self.forming_since.pop(cluster_id, None)
         self.waiting_since.pop(cluster_id, None)
-        db_cluster = db_cluster or cluster_models.DBCluster.find_by(
-            id=cluster_id)
-        db_cluster.update(task_status=ClusterTasks.NONE)
+        with cluster_models.DBCluster.query() as query:
+            freed = query.filter_by(
+                id=cluster_id,
+                task_id=ClusterTasks.RECOVERING_CLUSTER.code).update(
+                    {'task_id': ClusterTasks.NONE.code,
+                     'updated': timeutils.utcnow()},
+                    synchronize_session=False)
+        if not freed:
+            LOG.info("Cluster %s: its recovery task was freed already.",
+                     cluster_id)
 
     def _take(self, cluster_id):
         """Take the cluster's recovery task, which keeps another task
         manager, and a grow or a shrink, off it meanwhile: only when no
-        task is on it, checked and set in one statement.
+        task is on it, checked and set in one statement, with when.
         """
+        now = time.monotonic()
         with cluster_models.DBCluster.query() as query:
             taken = query.filter_by(
                 id=cluster_id, task_id=ClusterTasks.NONE.code).update(
-                    {'task_id': ClusterTasks.RECOVERING_CLUSTER.code},
+                    {'task_id': ClusterTasks.RECOVERING_CLUSTER.code,
+                     'updated': timeutils.utcnow()},
                     synchronize_session=False)
         if taken:
-            self.forming_since[cluster_id] = time.monotonic()
+            self.forming_since[cluster_id] = now
         return bool(taken)
 
     def _unchanged_after_jitter(self, context, members, views, key):
@@ -212,15 +278,5 @@ class ClusterRecovery(object):
         else:
             with futures.ThreadPoolExecutor(max_workers=workers) as pool:
                 list(pool.map(look, db_clusters))
-        took = time.monotonic() - started
-        interval = CONF.cluster_recovery_check_interval
-        if took > interval:
-            LOG.warning("The look at the %s %s clusters took %d seconds, "
-                        "more than the %d between two looks: the primaries' "
-                        "leases may run out. More cluster_recovery_workers "
-                        "(%s now), or another task manager.",
-                        len(db_clusters), self.manager, took, interval,
-                        CONF.cluster_recovery_workers)
-        else:
-            LOG.debug("Looked at the %s %s clusters in %.1f seconds.",
-                      len(db_clusters), self.manager, took)
+        LOG.debug("Looked at the %s %s clusters in %.1f seconds.",
+                  len(db_clusters), self.manager, time.monotonic() - started)

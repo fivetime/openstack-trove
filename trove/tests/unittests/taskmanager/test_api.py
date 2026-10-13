@@ -68,6 +68,16 @@ class ApiTest(trove_testtools.TestCase):
             root_password='pwd', slave_of_id='slv-id', users={'name': 'usr1'},
             volume_size=1, volume_type='type', access=None, ds_version=None)
 
+    def test_cluster_event(self):
+        exp_resp = None
+        self.call_context.cast.return_value = exp_resp
+        self.api.cluster_event('c1', 'i1', 'abnormal',
+                               payload={'reason': 'x'}, sent=3.0)
+        self.api.client.prepare.assert_called_once_with(
+            version=self.api.API_BASE_VERSION, fanout=True)
+        self._verify_cast('cluster_event', cluster_id='c1', instance_id='i1',
+                          kind='abnormal', payload={'reason': 'x'}, sent=3.0)
+
     def test_detach_replica(self):
         self.api.detach_replica('some-instance-id')
 

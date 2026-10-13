@@ -1,0 +1,227 @@
+# Licensed under the Apache License, Version 2.0 (the "License"); you may
+# not use this file except in compliance with the License. You may obtain
+# a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+# License for the specific language governing permissions and limitations
+# under the License.
+
+"""The recovery hub: which clusters a task manager replica looks at,
+and when.
+"""
+
+import datetime
+from unittest import mock
+
+from oslo_utils import timeutils
+
+from trove.cluster.models import DBCluster
+from trove.cluster.tasks import ClusterTasks
+from trove.common import exception
+from trove.common import utils
+from trove.instance.models import DBInstance
+from trove.instance.models import InstanceServiceStatus
+from trove.instance.service_status import ServiceStatuses
+from trove.instance.tasks import InstanceTasks
+from trove.taskmanager import recovery
+from trove.tests.unittests import trove_testtools
+from trove.tests.unittests.util import util
+
+
+class HubTest(trove_testtools.TestCase):
+
+    def setUp(self):
+        super(HubTest, self).setUp()
+        self.patch_conf_property('cluster_event_coalesce', 5)
+        self.patch_conf_property('cluster_recovery_workers', 4)
+        self.coordinator = mock.Mock()
+        self.coordinator.covers.side_effect = lambda key: key != 'elsewhere'
+        self.coordinator.covered.side_effect = lambda keys: {
+            k for k in keys if k != 'elsewhere'}
+        self.hub = recovery.RecoveryHub(self.coordinator)
+        self.hub.context = 'ctx'
+        self.now = 1000.0
+        mock.patch.object(recovery.time, 'monotonic',
+                          side_effect=lambda: self.now).start()
+        self.addCleanup(mock.patch.stopall)
+
+    def test_an_event_asks_for_a_look_at_a_covered_cluster(self):
+        self.hub.on_event('c1', 'i1', 'abnormal', {'reason': 'detached'})
+        self.hub.on_event('elsewhere', 'i9', 'abnormal')
+        self.assertEqual({'c1': (1000.0, 'event abnormal from member i1 '
+                                         '(detached)')}, self.hub.pending)
+
+    def test_the_looks_at_one_cluster_are_coalesced(self):
+        self.hub.last_look['c1'] = 998.0
+        self.hub.on_event('c1', 'i1', 'abnormal')
+        self.hub.on_event('c1', 'i2', 'abnormal')
+        self.hub.request_look('c1', 'later', delay=30)
+        # One look, 5 s after the last one, with the earliest reason.
+        self.assertEqual({'c1': (1003.0, 'event abnormal from member i1 '
+                                         '(no reason)')}, self.hub.pending)
+        self.hub.request_look('c1', 'sooner', delay=1)
+        self.assertEqual((1003.0, 'event abnormal from member i1 '
+                                  '(no reason)'), self.hub.pending['c1'])
+
+    def test_the_tick_submits_the_due_looks_once(self):
+        self.hub._pool = mock.Mock()
+        self.hub.request_look('c1', 'now')
+        self.hub.request_look('c2', 'later', delay=10)
+        self.hub._tick()
+        self.hub._pool.submit.assert_called_once_with(
+            self.hub._look_safely, 'c1', 'now')
+        self.assertEqual({'c1'}, self.hub.inflight)
+        # An event during the look: one more look after it.
+        self.hub.request_look('c1', 'again')
+        self.hub._tick()
+        self.assertEqual(1, self.hub._pool.submit.call_count)
+        self.hub._look = mock.Mock()
+        self.hub._look_safely('c1', 'now')
+        self.assertEqual(set(), self.hub.inflight)
+        self.assertEqual(1000.0, self.hub.last_look['c1'])
+        self.now = 1006.0
+        self.hub._tick()
+        self.assertEqual([mock.call(self.hub._look_safely, 'c1', 'now'),
+                          mock.call(self.hub._look_safely, 'c1', 'again')],
+                         self.hub._pool.submit.call_args_list)
+
+    @mock.patch.object(recovery.DBCluster, 'find_by')
+    def test_a_look_runs_the_recovery_and_looks_again_while_watching(
+            self, find_by):
+        db_cluster = mock.Mock(id='c1', datastore_version_id='v1')
+        find_by.return_value = db_cluster
+        rec = mock.Mock()
+        rec.conf.cluster_recovery_interval = 30
+        rec.still_watching.return_value = True
+        self.hub.cluster_manager['c1'] = 'postgresql'
+        self.hub.recoveries['postgresql'] = rec
+        self.hub._look('c1', 'event')
+        find_by.assert_called_once_with(id='c1', deleted=False)
+        rec.check_now.assert_called_once_with('ctx', db_cluster, 'event')
+        self.assertEqual({'c1': (1030.0, 'still watching')},
+                         self.hub.pending)
+        # Settled: nothing more.
+        rec.still_watching.return_value = False
+        self.hub.pending.clear()
+        self.hub._look('c1', 'event')
+        self.assertEqual({}, self.hub.pending)
+
+    @mock.patch.object(recovery.datastore_models.DatastoreVersion,
+                       'load_by_uuid')
+    @mock.patch.object(recovery.strategy, 'load_taskmanager_strategy')
+    def test_the_recovery_of_a_cluster_comes_from_its_datastore(
+            self, load_strategy, load_by_uuid):
+        load_by_uuid.side_effect = lambda i: mock.Mock(
+            manager={'v-pxc': 'pxc', 'v-mysql': 'mysql'}[i])
+        strategies = {'pxc': mock.Mock(), 'mysql': mock.Mock()}
+        strategies['mysql'].cluster_recovery.return_value = None
+        load_strategy.side_effect = lambda m: strategies[m]
+        pxc = self.hub._recovery_of(mock.Mock(id='c1',
+                                              datastore_version_id='v-pxc'))
+        self.assertIs(strategies['pxc'].cluster_recovery.return_value, pxc)
+        self.assertIs(pxc, self.hub._recovery_of(
+            mock.Mock(id='c3', datastore_version_id='v-pxc')))
+        self.assertIsNone(self.hub._recovery_of(
+            mock.Mock(id='c2', datastore_version_id='v-mysql')))
+        # Each version and each manager asked once.
+        self.assertEqual(1, load_by_uuid.call_args_list.count(
+            mock.call('v-pxc')))
+        self.assertEqual(2, load_strategy.call_count)
+
+    @mock.patch.object(recovery, 'suspect_clusters')
+    def test_the_scan_looks_at_the_suspects_it_covers(self, suspects):
+        stale = timeutils.utcnow() - datetime.timedelta(seconds=200)
+        suspects.return_value = [
+            ('c1', ClusterTasks.NONE.code, 'v1', stale),
+            ('c2', ClusterTasks.RECOVERING_CLUSTER.code, 'v1', None),
+            ('elsewhere', ClusterTasks.NONE.code, 'v1', stale)]
+        self.hub.scan()
+        self.assertEqual(
+            {'c1': (1000.0, 'scan: the oldest heartbeat %s' % stale),
+             'c2': (1000.0, 'scan: a recovery under way')},
+            self.hub.pending)
+        self.assertLess(suspects.call_args.args[0], timeutils.utcnow())
+        # The sweep: every cluster.
+        self.hub.pending.clear()
+        self.hub.sweep()
+        suspects.assert_called_with(None)
+        self.assertEqual({'c1', 'c2'}, set(self.hub.pending))
+
+
+class SuspectClustersTest(trove_testtools.TestCase):
+    """The scan's query, on the real tables."""
+
+    def setUp(self):
+        super(SuspectClustersTest, self).setUp()
+        try:
+            util.init_db()
+        except exception.BadRequest:
+            # Set up earlier in this process and cleaned since: the
+            # tables are there, the session too; only db_sync balks.
+            pass
+        self.addCleanup(self._clean)
+        self.made = []
+
+    def _clean(self):
+        for row in reversed(self.made):
+            try:
+                row.delete()
+            except Exception:
+                pass
+
+    def _cluster(self, task=ClusterTasks.NONE, deleted=False,
+                 heartbeats=(0, 0, 0)):
+        cluster = DBCluster(task, id=utils.generate_uuid(), name='c',
+                            tenant_id='t', datastore_version_id='v1',
+                            created=timeutils.utcnow())
+        # The constructor sets deleted False.
+        cluster.deleted = deleted
+        cluster.save()
+        self.made.append(cluster)
+        for age in heartbeats:
+            member = DBInstance(InstanceTasks.NONE, id=utils.generate_uuid(),
+                                name='m', tenant_id='t', cluster_id=cluster.id,
+                                datastore_version_id='v1', deleted=False,
+                                created=timeutils.utcnow())
+            member.save()
+            self.made.append(member)
+            status = InstanceServiceStatus(ServiceStatuses.HEALTHY,
+                                           id=utils.generate_uuid(),
+                                           instance_id=member.id)
+            status.save()
+            self.made.append(status)
+            if age:
+                with InstanceServiceStatus.query() as query:
+                    query.filter_by(instance_id=member.id).update(
+                        {'updated_at': timeutils.utcnow() -
+                         datetime.timedelta(seconds=age)})
+        return cluster.id
+
+    def test_the_suspects(self):
+        fresh = self._cluster()
+        stale = self._cluster(heartbeats=(0, 200, 0))
+        recovering = self._cluster(task=ClusterTasks.RECOVERING_CLUSTER)
+        busy = self._cluster(task=ClusterTasks.GROWING_CLUSTER,
+                             heartbeats=(200, 200, 200))
+        gone = self._cluster(deleted=True, heartbeats=(200, 200, 200))
+        stale_before = timeutils.utcnow() - datetime.timedelta(seconds=90)
+        rows = recovery.suspect_clusters(stale_before)
+        found = {row[0]: row for row in rows}
+        self.assertIn(stale, found)
+        self.assertIn(recovering, found)
+        self.assertNotIn(fresh, found)
+        self.assertNotIn(busy, found)
+        self.assertNotIn(gone, found)
+        self.assertEqual(ClusterTasks.RECOVERING_CLUSTER.code,
+                         found[recovering][1])
+        self.assertEqual('v1', found[stale][2])
+        self.assertLess(found[stale][3], stale_before)
+        # Every cluster that is not deleted or busy.
+        every = {row[0] for row in recovery.suspect_clusters(None)}
+        self.assertTrue({fresh, stale, recovering} <= every)
+        self.assertNotIn(busy, every)
+        self.assertNotIn(gone, every)

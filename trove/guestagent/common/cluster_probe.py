@@ -31,10 +31,24 @@ small set of methods:
   cluster's history, and whether position ``a`` holds nothing that ``b``
   lacks.
 * ``rejoin_group(state)``, ``bootstrap_group()``: what recovery does.
+* ``cluster_signal(view)``, optional: a ``ClusterSignal`` saying whether
+  the member is where it should be in the cluster, for the control
+  plane; without it, a member that does not answer or is out of the
+  cluster is abnormal.
+* ``cluster_event_view(view)``, optional: what to attach to an event;
+  without it, ``recovery_view()`` when the app has one.
 
 The probe runs every few seconds, apart from the guest agent's periodic
 tasks, which run every report interval: a failover has to show on the
 ready port within seconds.
+
+The probe also tells the control plane, through the conductor, when the
+member's cluster state changes (``cluster_event``), and again every
+``cluster_event_interval`` seconds while the member is not where it
+should be, so that a lost message heals itself: the task manager looks
+at a cluster when a member says so, not by polling every member of
+every cluster. A PostgreSQL primary without a standby asks for its write
+lease the same way.
 """
 
 import collections
@@ -45,8 +59,11 @@ import time
 import eventlet
 from oslo_log import log as logging
 from oslo_service import loopingcall
+from oslo_utils import timeutils
 
 from trove.common import cfg
+from trove.common import context as trove_context
+from trove.conductor import api as conductor_api
 from trove.guestagent.common import readyport
 
 LOG = logging.getLogger(__name__)
@@ -65,6 +82,81 @@ PeerView = collections.namedtuple(
 MemberView = collections.namedtuple(
     'MemberView', 'state role writable down readable', defaults=(False,))
 UNKNOWN_MEMBER = MemberView(None, None, False, False)
+
+# What a member says of its cluster state: whether it is abnormal (not
+# where it should be), the kind the control plane acts on, a reason for
+# the log, extra signals for the control plane, and how soon to say it
+# again while it lasts (None: the configured event interval).
+ClusterSignal = collections.namedtuple(
+    'ClusterSignal', 'abnormal kind reason extra resend_after',
+    defaults=(None, None, None))
+# The kinds: the control plane dispatches on these three; a datastore's
+# finer word goes in the reason.
+NORMAL_KIND, ABNORMAL, LEASE_REQUEST = 'normal', 'abnormal', 'lease_request'
+NORMAL = ClusterSignal(False, NORMAL_KIND, None)
+
+
+class ClusterEventReporter(object):
+    """Decides when a member's cluster state is worth telling, and tells
+    it: on every change between normal and abnormal or of the kind,
+    again every ``interval`` seconds while abnormal (a lost message heals
+    itself, and a datastore may ask for sooner), never twice within
+    ``min_gap`` seconds (a member whose state flaps tells its latest
+    state once the gap has passed). A member that starts abnormal tells
+    it once; one that starts normal says nothing.
+
+    ``send(kind, signal, view, since)`` does the telling and may raise.
+    """
+
+    def __init__(self, interval, min_gap, send, now=None):
+        self.interval = interval
+        self.min_gap = min_gap
+        self.send = send
+        self._now = now or time.monotonic
+        # The (abnormal, kind) last seen and since when; when it was last
+        # told; whether a change waits for the gap to pass.
+        self.key = None
+        self.since = None
+        self.last_sent = None
+        self.pending = False
+        self.sent = 0
+
+    def observe(self, signal, view):
+        """One look at the member's signal. Returns the kind sent, or
+        None.
+        """
+        now = self._now()
+        key = (bool(signal.abnormal), signal.kind)
+        if key != self.key:
+            was_abnormal = self.key is not None and self.key[0]
+            self.since = now
+            due = bool(signal.abnormal) or was_abnormal
+        elif signal.abnormal:
+            period = self.interval
+            if signal.resend_after is not None:
+                period = min(period, max(signal.resend_after, 0))
+            due = self.last_sent is None or now - self.last_sent >= period
+        else:
+            due = False
+        self.key = key
+        gap_over = (self.last_sent is None or
+                    now - self.last_sent >= self.min_gap)
+        if due and not gap_over:
+            self.pending = True
+            return None
+        if self.pending and gap_over:
+            due = True
+        if not due:
+            return None
+        if signal.kind == LEASE_REQUEST:
+            kind = LEASE_REQUEST
+        elif signal.abnormal:
+            kind = ABNORMAL
+        else:
+            kind = NORMAL_KIND
+        self.send(kind, signal, view, now - self.since)
+        self.last_sent, self.pending, self.sent = now, False, self.sent + 1
+        return kind
 
 
 def ip_key(ip):
@@ -134,6 +226,16 @@ class ClusterProbe(object):
         self.needs_all = conf.cluster_bootstrap_needs_all_members
         self.jitter = conf.cluster_bootstrap_jitter
         self.last_recovery = 0
+        # Telling the control plane: whether to, and the reporter that
+        # decides when; a cast may block while the broker is away, so it
+        # runs apart from the tick, one at a time.
+        self.events = getattr(conf, 'cluster_events', True)
+        self.reporter = ClusterEventReporter(
+            getattr(conf, 'cluster_event_interval', 60),
+            getattr(conf, 'cluster_event_min_interval', 5),
+            send=self._send_event)
+        self._spawn = eventlet.spawn_n
+        self._sending = False
         self.port = readyport.ReadyPort(
             docker_client, conf.cluster_ready_port, app.DATABASE_PORT)
         # A second port, open on a member that serves reads (a standby of
@@ -261,6 +363,15 @@ class ClusterProbe(object):
                                   port.port)
         self.ticks += 1
 
+        # Tell the control plane, once the cluster is complete (a cluster
+        # being built is full of members not where they should be yet)
+        # and the ports are set: the ports never wait on it.
+        if self.events and self.complete and not self.leaving:
+            try:
+                self.reporter.observe(self._signal(view), view)
+            except Exception:
+                LOG.exception("The cluster event was not told; next tick.")
+
         now = time.monotonic()
         if (self.complete and not self.leaving and view.down and
                 now - self.since >= self.recovery_grace and
@@ -319,6 +430,70 @@ class ClusterProbe(object):
             return False
         return all(self.app._not_ahead(p.position, position)
                    for p in reachable)
+
+    # Telling the control plane
+
+    def _signal(self, view):
+        """What the member says of its cluster state: the datastore's
+        word, or else abnormal when the member does not answer or is out
+        of the cluster.
+        """
+        hook = getattr(self.app, 'cluster_signal', None)
+        if hook is not None:
+            signal = hook(view)
+            if signal is not None:
+                return signal
+        if view.state is None:
+            return ClusterSignal(True, ABNORMAL, 'the member does not answer')
+        if view.down:
+            return ClusterSignal(True, ABNORMAL,
+                                 'out of the cluster: %s' % view.state)
+        return NORMAL
+
+    def _event(self, kind, signal, view, since):
+        """What the event carries: the member as the probe sees it, the
+        datastore's extra signals, and its view for the task manager
+        (the one it would ask for), when the app gives one.
+        """
+        event = {'kind': kind, 'reason': signal.reason, 'since': since,
+                 'datastore_manager': CONF.datastore_manager,
+                 'member': self.snapshot(), 'extra': signal.extra or {},
+                 'view': None}
+        give = getattr(self.app, 'cluster_event_view', None)
+        if give is None:
+            give = getattr(self.app, 'recovery_view', None)
+            if give is not None:
+                give = lambda _view, _give=give: _give()  # noqa: E731
+        if give is not None:
+            try:
+                event['view'] = give(view)
+            except Exception as err:
+                LOG.debug("No view for the event: %s", err)
+        return event
+
+    def _send_event(self, kind, signal, view, since):
+        if self._sending:
+            LOG.warning("A cluster event is still being sent (the broker?); "
+                        "not sending %s now.", kind)
+            return
+        event = self._event(kind, signal, view, since)
+        LOG.info("Cluster event %s (%s): %s/%s, writable %s, readable %s, "
+                 "%ds in this state.", kind, signal.reason, view.state,
+                 view.role, self.writable(), self.readable(), int(since))
+        self._sending = True
+        self._spawn(self._cast_event, event)
+
+    def _cast_event(self, event):
+        try:
+            context = trove_context.TroveContext()
+            conductor_api.API(context).cluster_event(
+                CONF.guest_id, event['kind'],
+                sent=timeutils.utcnow_ts(microsecond=True), payload=event)
+        except Exception as err:
+            LOG.warning("The cluster event %s was not sent: %s",
+                        event['kind'], err)
+        finally:
+            self._sending = False
 
     def snapshot(self):
         snapshot = {'state': self.view.state, 'role': self.view.role,

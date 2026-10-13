@@ -375,10 +375,17 @@ class RecoveryTestBase(trove_testtools.TestCase):
             cluster_recovery_interval=30, cluster_recovery_timeout=3600,
             cluster_bootstrap_jitter=0, cluster_failover_force_after=0,
             cluster_failover_max_lag_bytes=MiB,
-            cluster_standby_rebuild_after=600, cluster_wal_timeout=10)
+            cluster_standby_rebuild_after=600, cluster_wal_timeout=10,
+            cluster_lease_ttl=60, cluster_fence_grace=15)
+        # A member this replica does not reach is down for the whole
+        # control plane (its heartbeat is stale), unless a test says.
+        self.stale = mock.patch.object(
+            pg_recovery.PostgresqlClusterRecovery, '_stale_members',
+            side_effect=lambda ids: set(ids)).start()
         mock.patch.object(pg_recovery.CONF, 'cluster_recovery_check_interval',
                           30).start()
-        self.db_cluster = mock.Mock(id='c1', task_status=ClusterTasks.NONE)
+        self.db_cluster = mock.Mock(id='c1', task_status=ClusterTasks.NONE,
+                                    updated=None)
         mock.patch.object(common_recovery.cluster_models.DBCluster, 'find_by',
                           return_value=self.db_cluster).start()
         mock.patch.object(common_recovery.time, 'sleep').start()
@@ -418,16 +425,42 @@ class RecoveryTestBase(trove_testtools.TestCase):
 
 class HealthyRecoveryTest(RecoveryTestBase):
 
-    def test_the_primary_gets_the_lease_and_is_remembered(self):
+    def test_the_primary_with_standbys_needs_no_lease_and_is_remembered(
+            self):
         self._healthy()
         self._check_at(0)
-        self.assertEqual([('renew_lease', 'i1', 60)], self.calls)
+        self.assertEqual([], self.calls)
         self.assertEqual(
             {'primary_id': 'i1', 'primary_ip': '10.0.0.1', 'lsn': 1000,
-             'timeline': 1, 'sync_set': ['i2', 'i3'], 'alone': False,
-             'lease_at': 0},
+             'timeline': 1, 'sync_set': ['i2', 'i3'], 'alone': False},
             self.recovery.memory['c1'])
         self.assertEqual({}, self.recovery.waiting_since)
+        self.assertFalse(self.recovery.still_watching('c1'))
+
+    def test_the_lease_when_the_primary_asks(self):
+        # A primary with standbys asks (its request crossed a standby
+        # coming back): granted all the same.
+        self._healthy()
+        with mock.patch.object(common_recovery.time, 'monotonic',
+                               return_value=0):
+            self.recovery.check_now('ctx', self.db_cluster,
+                                    'event lease_request from member i1')
+        self.assertEqual([('renew_lease', 'i1', 60)], self.calls)
+        self.assertEqual(0, self.recovery.memory['c1']['lease_at'])
+
+    def test_no_lease_while_the_unreached_members_heartbeat(self):
+        # The standbys do not answer this replica, but their heartbeat is
+        # fresh: this replica is cut off from them, not they from the
+        # primary; another replica decides. No lease from here.
+        self.answers = {'i1': primary('10.0.0.1', no_standby_for=100),
+                        'i2': None, 'i3': None}
+        self.stale.side_effect = lambda ids: set()
+        self._check_at(0)
+        self.assertEqual([], self.calls)
+        self.stale.assert_called_once_with(['i2', 'i3'])
+        self.stale.side_effect = lambda ids: {'i2', 'i3'}
+        self._check_at(30)
+        self.assertEqual([('renew_lease', 'i1', 60)], self.calls)
 
     def test_the_synchronous_set_is_kept_by_the_members(self):
         # Told once, to every other member; not again while they keep it.
@@ -473,6 +506,7 @@ class HealthyRecoveryTest(RecoveryTestBase):
         self.assertEqual([('renew_lease', 'i1', 60)] * 2, self.calls)
         mem = self.recovery.memory['c1']
         self.assertEqual((None, True), (mem['sync_set'], mem['alone']))
+        self.assertEqual(100, mem['lease_at'])
 
     def test_the_set_stands_while_the_primary_goes_on_alone(self):
         # The standbys stop streaming but answer (cut off themselves):
@@ -562,8 +596,7 @@ class HealthyRecoveryTest(RecoveryTestBase):
                                      self_id='i1')
         self.answers['i2'] = primary('10.0.0.2', timeline=1, self_id='i2')
         self._check_at(0)
-        self.assertEqual([('renew_lease', 'i1', 60),
-                          ('create_member_slot', 'i1', 'i2'),
+        self.assertEqual([('create_member_slot', 'i1', 'i2'),
                           ('rejoin_cluster', 'i2',
                            {'id': 'i1', 'host': '10.0.0.1'})], self.calls)
 
@@ -574,8 +607,7 @@ class HealthyRecoveryTest(RecoveryTestBase):
         self.answers['i2'] = stopped('10.0.0.2', primary_id='i1')
         self.answers['i3'] = stopped('10.0.0.3', primary_id='i9', fenced=True)
         self._check_at(0)
-        self.assertEqual([('renew_lease', 'i1', 60),
-                          ('create_member_slot', 'i1', 'i2'),
+        self.assertEqual([('create_member_slot', 'i1', 'i2'),
                           ('rejoin_cluster', 'i2',
                            {'id': 'i1', 'host': '10.0.0.1'}),
                           ('create_member_slot', 'i1', 'i3'),
@@ -583,7 +615,7 @@ class HealthyRecoveryTest(RecoveryTestBase):
                            {'id': 'i1', 'host': '10.0.0.1'})], self.calls)
         self.calls = []
         self._check_at(10)
-        self.assertEqual([('renew_lease', 'i1', 60)], self.calls)
+        self.assertEqual([], self.calls)
         self._check_at(40)
         self.assertEqual(['i2', 'i3'], [c[1] for c in self.calls
                                         if c[0] == 'rejoin_cluster'])
@@ -601,18 +633,18 @@ class HealthyRecoveryTest(RecoveryTestBase):
         self.calls = []
         self.answers['i3']['peers'] = cut('i2')
         self._check_at(50)
-        self.assertEqual([('renew_lease', 'i1', 60)], self.calls)
+        self.assertEqual([], self.calls)
         self.answers['i3']['disconnected_for'] = 100
         self.calls = []
         self._check_at(100)
-        self.assertEqual([('renew_lease', 'i1', 60)], self.calls)
+        self.assertEqual([], self.calls)
 
     def test_a_member_being_rebuilt_is_left_alone(self):
         self._healthy()
         self.answers['i3'] = standby('10.0.0.3', rebuilding=True,
                                      primary_id='i9')
         self._check_at(0)
-        self.assertEqual([('renew_lease', 'i1', 60)], self.calls)
+        self.assertEqual([], self.calls)
 
     def test_nothing_when_nobody_answers(self):
         self.answers = {}
@@ -693,8 +725,7 @@ class FailoverTest(RecoveryTestBase):
         self.calls = []
         self.answers['i1'] = primary('10.0.0.1', timeline=1, self_id='i1')
         self._check_at(200)
-        self.assertEqual([('renew_lease', 'i2', 60),
-                          ('create_member_slot', 'i2', 'i1'),
+        self.assertEqual([('create_member_slot', 'i2', 'i1'),
                           ('rejoin_cluster', 'i1',
                            {'id': 'i2', 'host': '10.0.0.2'})], self.calls)
 
@@ -704,6 +735,7 @@ class FailoverTest(RecoveryTestBase):
         self._primary_gone()
         self.answers['i1'] = primary('10.0.0.1', no_standby_for=100,
                                      self_id='i1')
+        self.answers['i1']['writable'] = False
         self.calls = []
         # It answers as a primary, but is given up all the same: no
         # lease for it, and after the grace period a failover.
@@ -734,6 +766,7 @@ class FailoverTest(RecoveryTestBase):
         self._primary_gone()
         self.answers['i1'] = primary('10.0.0.1', no_standby_for=130,
                                      self_id='i1')
+        self.answers['i1']['writable'] = False
         self._check_at(100)
         self._check_at(140)
         self.assertEqual([], self._promotions())
@@ -857,7 +890,7 @@ class FailoverTest(RecoveryTestBase):
         self.assertEqual([], self._promotions())
         # Forced after a while.
         self.recovery.conf.cluster_failover_force_after = 60
-        self._check_at(170)
+        self._check_at(180)
         self.assertEqual(['i2'], self._promotions())
 
     def test_the_synchronous_set_not_known(self):
@@ -955,12 +988,31 @@ class FailoverTest(RecoveryTestBase):
 
     def test_a_lease_granted_before_a_restart(self):
         # The task manager first looks at 100: the primary may hold a
-        # lease its predecessor renewed just before, until 160.
+        # lease its predecessor (or another replica) renewed just
+        # before, until 160, and keeps its port open 15 s after.
         self._primary_gone()
         self._check_at(100)
         self._check_at(130)
+        self._check_at(170)
         self.assertEqual([], self._promotions())
-        self._check_at(160)
+        self._check_at(200)
+        self.assertEqual(['i2'], self._promotions())
+
+    def test_the_lease_runs_from_the_last_grant_or_the_first_failing_look(
+            self):
+        # Granted at 50 (the primary alone, asking); gone at 100: as far
+        # as this replica knows another may have granted one until it
+        # first saw the cluster failing, so the lease and the fence
+        # grace run until 175.
+        self.answers = {'i1': primary('10.0.0.1', no_standby_for=10),
+                        'i2': None, 'i3': None}
+        self._check_at(50)
+        self.assertEqual([('renew_lease', 'i1', 60)], self.calls)
+        self._primary_gone()
+        self._check_at(100)
+        self._check_at(150)
+        self.assertEqual([], self._promotions())
+        self._check_at(180)
         self.assertEqual(['i2'], self._promotions())
 
     def test_the_address_of_the_primary_after_a_restart(self):
@@ -986,7 +1038,7 @@ class FailoverTest(RecoveryTestBase):
         self._check_at(100)
         self.assertEqual([], self._promotions())
         self.answers['i2']['lsn'] = 1500 + MiB
-        self._check_at(130)
+        self._check_at(180)
         self.assertEqual(['i2'], self._promotions())
 
     def test_the_timeline_rules_out_a_candidate(self):
@@ -1073,3 +1125,28 @@ class ParallelLookTest(trove_testtools.TestCase):
         self.assertEqual(
             {c.id: c.id + '-i1' for c in clusters},
             {i: m['primary_id'] for i, m in recovery.memory.items()})
+
+
+class TwoReplicasTest(RecoveryTestBase):
+    """Two task managers watch the cluster: both look, one promotes."""
+
+    def test_one_promotion(self):
+        other = pg_recovery.PostgresqlClusterRecovery(
+            'postgresql', self.recovery.guest_factory)
+        other._members = self.recovery._members
+        other.conf = self.recovery.conf
+        FailoverTest._primary_gone(self)
+        for replica in (self.recovery, other):
+            with mock.patch.object(common_recovery.time, 'monotonic',
+                                   return_value=0):
+                replica.check('ctx', self.db_cluster)
+        for replica in (self.recovery, other):
+            with mock.patch.object(common_recovery.time, 'monotonic',
+                                   return_value=100):
+                replica.check('ctx', self.db_cluster)
+        self.assertEqual(['i2'], self._promotions())
+        self.assertEqual(ClusterTasks.RECOVERING_CLUSTER,
+                         self.db_cluster.task_status)
+        # The loser follows the recovery from the same start.
+        self.assertIn('c1', other.forming_since)
+        self.assertTrue(other.still_watching('c1'))

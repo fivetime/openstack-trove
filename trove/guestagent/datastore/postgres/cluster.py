@@ -140,6 +140,7 @@ class PostgresqlClusterAppMixin(object):
     # runs, when a standby or the lease last said this is the primary,
     # and whether the task manager fenced the member.
     _lease_until = 0
+    _lease_ttl = 0
     _confirmed_at = None
     _stale_warned = False
     fenced = False
@@ -258,6 +259,7 @@ class PostgresqlClusterAppMixin(object):
         """
         now = time.monotonic()
         self._lease_until = now + ttl
+        self._lease_ttl = ttl
         self._confirmed_at = now
 
     def lease_fresh(self):
@@ -740,14 +742,76 @@ class PostgresqlClusterAppMixin(object):
                     if self._detached_since is not None else None)
         except Exception as err:
             LOG.debug("No position: %s", err)
-        if view.state == STANDBY and not (
-                receiver and receiver['status'] == STREAMING):
+        # Which members this one reaches on the tenant network: a
+        # standby that does not stream, and a primary without a standby
+        # (the task manager tells a primary cut off from the cluster
+        # from standbys cut off themselves by it).
+        if (view.state == STANDBY and not (
+                receiver and receiver['status'] == STREAMING)) or (
+                view.state == PRIMARY and self._no_standby_since is not None):
             try:
                 answer['peers'] = self._reach_peers(
                     cluster.get('members') or {})
             except Exception as err:
                 LOG.debug("No probe of the members: %s", err)
         return answer
+
+    def cluster_signal(self, view):
+        """What the probe tells the control plane: abnormal while
+        rebuilding, stopped, fenced, a primary the cluster left, a
+        primary in strict mode without a synchronous standby, or a
+        standby that does not stream; a primary alone in sync or async
+        mode asks for its lease instead, again when a third of it is
+        left (every few seconds before it is granted).
+        """
+        signal = cluster_probe.ClusterSignal
+        now = time.monotonic()
+        if self.rebuilding or view.state == REBUILDING:
+            return signal(True, cluster_probe.ABNORMAL, 'rebuilding')
+        if view.state == STOPPED:
+            return signal(True, cluster_probe.ABNORMAL,
+                          'the server does not answer')
+        if self.fenced:
+            return signal(True, cluster_probe.ABNORMAL, 'fenced')
+        if view.state == STANDBY:
+            if view.role != 'DETACHED':
+                return cluster_probe.NORMAL
+            away = now - (self._detached_since or now)
+            return signal(True, cluster_probe.ABNORMAL,
+                          'not streaming for %d seconds' % away,
+                          extra={'disconnected_for': away,
+                                 'primary_id': self.primary_id})
+        if view.state != PRIMARY:
+            return None
+        cluster = self._read_cluster()
+        self_id = cluster.get('self_id') or CONF.guest_id
+        if cluster.get('primary_id') not in (None, self_id):
+            return signal(True, cluster_probe.ABNORMAL,
+                          "a primary's data, but the cluster's primary is "
+                          "%s" % cluster.get('primary_id'))
+        if (len(cluster.get('members') or {}) <= 1 or
+                self._no_standby_since is None):
+            return cluster_probe.NORMAL
+        alone_for = now - self._no_standby_since
+        if self.cluster_mode == STRICT:
+            return signal(True, cluster_probe.ABNORMAL,
+                          'strict mode: no synchronous standby for %d '
+                          'seconds' % alone_for,
+                          extra={'no_standby_for': alone_for})
+        left = max(self._lease_until - now, 0)
+        grace = self._cluster_conf().cluster_fence_grace
+        # Before a grant, ask again well within the fence grace; after
+        # one, when a third of the lease is left.
+        resend = grace / 3.0
+        if self._lease_ttl:
+            resend = max(left - self._lease_ttl / 3.0, grace / 3.0)
+        return signal(True, cluster_probe.LEASE_REQUEST,
+                      'no standby streams for %d seconds; the lease runs %d '
+                      'more seconds' % (alone_for, left),
+                      extra={'no_standby_for': alone_for, 'lease_left': left,
+                             'lease_ttl': self._lease_ttl,
+                             'writable': bool(view.writable)},
+                      resend_after=resend)
 
     # Failing over: what the task manager has the members do
 
@@ -813,12 +877,20 @@ class PostgresqlClusterAppMixin(object):
         connection settings change and the server reloads them, which
         restarts the WAL receiver; the member is not restarted.
         """
-        LOG.info("Following primary %s (%s).", primary['id'],
-                 primary['host'])
         if not self.adm.query("SELECT pg_is_in_recovery()")[0][0]:
             raise exception.TroveError(
                 _("The member is a primary: it has to rejoin instead."))
         cluster = self._read_cluster()
+        receiver = self._receiver()
+        if (cluster.get('primary_id') == primary['id'] and receiver and
+                receiver['status'] == STREAMING and
+                receiver['sender_host'] == primary['host']):
+            # Told twice (two task managers watch the cluster).
+            LOG.info("Already following primary %s (%s).", primary['id'],
+                     primary['host'])
+            return
+        LOG.info("Following primary %s (%s).", primary['id'],
+                 primary['host'])
         self._write_replication(primary['host'], cluster['replication_user'])
         self._update_cluster(primary_id=primary['id'])
         self.reload()

@@ -46,7 +46,10 @@ class ProbeTestBase(trove_testtools.TestCase):
                               cluster_peer_timeout=3,
                               cluster_auto_bootstrap=True,
                               cluster_bootstrap_needs_all_members=False,
-                              cluster_bootstrap_jitter=0)
+                              cluster_bootstrap_jitter=0,
+                              cluster_events=False,
+                              cluster_event_interval=60,
+                              cluster_event_min_interval=5)
         # No eventlet timeout around the query in tests.
         timeout = mock.patch.object(probe.eventlet, 'Timeout').start()
         timeout.return_value.__enter__.return_value = None
@@ -213,6 +216,206 @@ class TestClusterProbe(ProbeTestBase):
         probe.ClusterProbe(self.app, mock.MagicMock(),
                            conf=self.conf).start()
         looping_call.assert_not_called()
+
+
+class TestClusterEventReporter(trove_testtools.TestCase):
+    """The state machine alone: when a signal is worth telling."""
+
+    def setUp(self):
+        super(TestClusterEventReporter, self).setUp()
+        self.now = 1000.0
+        self.sent = []
+        self.reporter = probe.ClusterEventReporter(
+            60, 5, send=lambda kind, signal, view, since: self.sent.append(
+                (kind, signal.reason, since)),
+            now=lambda: self.now)
+        self.abnormal = probe.ClusterSignal(True, probe.ABNORMAL, 'out')
+        self.lease = probe.ClusterSignal(True, probe.LEASE_REQUEST, 'alone',
+                                         resend_after=20)
+
+    def _at(self, now, signal):
+        self.now = now
+        return self.reporter.observe(signal, 'view')
+
+    def test_a_member_that_starts_normal_says_nothing(self):
+        self.assertIsNone(self._at(1000, probe.NORMAL))
+        self.assertIsNone(self._at(1003, probe.NORMAL))
+        self.assertEqual([], self.sent)
+
+    def test_a_member_that_starts_abnormal_says_so_once(self):
+        self.assertEqual('abnormal', self._at(1000, self.abnormal))
+        self.assertIsNone(self._at(1003, self.abnormal))
+        self.assertEqual([('abnormal', 'out', 0)], self.sent)
+
+    def test_every_transition_is_told(self):
+        self._at(1000, probe.NORMAL)
+        self.assertEqual('abnormal', self._at(1003, self.abnormal))
+        # A change of kind, once the gap has passed.
+        self.assertEqual('lease_request', self._at(1009, self.lease))
+        self.assertEqual('normal', self._at(1015, probe.NORMAL))
+        self.assertIsNone(self._at(1018, probe.NORMAL))
+        self.assertEqual(['abnormal', 'lease_request', 'normal'],
+                         [s[0] for s in self.sent])
+        # Since when the state lasts.
+        self.assertEqual(0, self.sent[2][2])
+
+    def test_an_abnormal_member_tells_again_every_interval(self):
+        self._at(1000, self.abnormal)
+        self.assertIsNone(self._at(1059, self.abnormal))
+        self.assertEqual('abnormal', self._at(1060, self.abnormal))
+        self.assertEqual(60, self.sent[-1][2])
+        # Sooner when the signal asks for it.
+        self._at(1066, self.lease)
+        self.assertIsNone(self._at(1085, self.lease))
+        self.assertEqual('lease_request', self._at(1086, self.lease))
+
+    def test_no_more_than_one_report_per_gap(self):
+        self._at(1000, self.abnormal)
+        # Flapping within the gap: deferred, then the latest state once.
+        self.assertIsNone(self._at(1001, probe.NORMAL))
+        self.assertIsNone(self._at(1002, self.abnormal))
+        self.assertIsNone(self._at(1004, probe.NORMAL))
+        self.assertEqual('normal', self._at(1005, probe.NORMAL))
+        self.assertEqual(['abnormal', 'normal'], [s[0] for s in self.sent])
+
+    def test_a_change_of_reason_alone_is_not_told(self):
+        self._at(1000, self.abnormal)
+        self.assertIsNone(self._at(1010, probe.ClusterSignal(
+            True, probe.ABNORMAL, 'another reason')))
+
+    def test_a_failing_send_is_tried_again_next_tick(self):
+        def fail(*args):
+            raise RuntimeError('no broker')
+        self.reporter.send = fail
+        self.assertRaises(RuntimeError, self._at, 1000, self.abnormal)
+        self.reporter.send = lambda *a: self.sent.append(a[0])
+        self.assertEqual('abnormal', self._at(1003, self.abnormal))
+
+
+class TestClusterEvents(ProbeTestBase):
+    """The probe tells the control plane through the conductor."""
+
+    def setUp(self):
+        super(TestClusterEvents, self).setUp()
+        self.conf.cluster_events = True
+        self.probe = probe.ClusterProbe(self.app, mock.MagicMock(),
+                                        conf=self.conf)
+        self.probe.port = mock.MagicMock(spec=readyport.ReadyPort)
+        self.probe.port.pid = 4242
+        self.probe.port.applied = None
+        self.probe.port.container_pid.return_value = 4242
+        self.probe.member = self.probe.complete = True
+        self.probe._flags_loaded = True
+        # The cast runs on the tick in tests, and the conductor is a mock.
+        self.probe._spawn = lambda fn, *args: fn(*args)
+        self.conductor = mock.patch.object(probe.conductor_api, 'API').start()
+        self.cast = self.conductor.return_value.cluster_event
+        self.now = 1000.0
+        mock.patch.object(probe.time, 'monotonic',
+                          side_effect=lambda: self.now).start()
+        self.probe.reporter._now = lambda: self.now
+        self.patch_conf_property('guest_id', 'i2')
+        self.patch_conf_property('datastore_manager', 'postgresql')
+        # No datastore hook: the generic signal.
+        del self.app.cluster_signal
+        del self.app.cluster_event_view
+        self.app.recovery_view.return_value = {'state': 'x'}
+
+    def _tick(self, view, now=None):
+        if now is not None:
+            self.now = now
+        self.app.member_view.return_value = view
+        self.probe._tick()
+
+    def test_a_member_that_comes_up_normal_says_nothing(self):
+        self._tick(_view('ONLINE', 'PRIMARY'))
+        self.cast.assert_not_called()
+
+    def test_a_member_that_comes_up_abnormal_says_so_once(self):
+        self._tick(_view('OFFLINE', None))
+        self._tick(_view('OFFLINE', None), 1003)
+        self.cast.assert_called_once()
+        kwargs = self.cast.call_args.kwargs
+        self.assertEqual(('i2', 'abnormal'), self.cast.call_args.args)
+        self.assertIsInstance(kwargs['sent'], float)
+        payload = kwargs['payload']
+        self.assertEqual('out of the cluster: OFFLINE', payload['reason'])
+        self.assertEqual({'state': 'x'}, payload['view'])
+        self.assertEqual('postgresql', payload['datastore_manager'])
+        self.assertEqual(self.probe.snapshot(), payload['member'])
+        self.assertEqual({}, payload['extra'])
+        self.assertEqual(0, payload['since'])
+
+    def test_transitions_and_the_datastore_hook(self):
+        self.app.cluster_signal = mock.Mock(return_value=probe.NORMAL)
+        self._tick(_view('ONLINE', 'PRIMARY'))
+        self.app.cluster_signal.assert_called_once_with(
+            _view('ONLINE', 'PRIMARY'))
+        self.app.cluster_signal.return_value = probe.ClusterSignal(
+            True, probe.LEASE_REQUEST, 'alone', extra={'left': 0})
+        self._tick(_view('ONLINE', 'PRIMARY'), 1003)
+        self.assertEqual(('i2', 'lease_request'), self.cast.call_args.args)
+        self.assertEqual({'left': 0},
+                         self.cast.call_args.kwargs['payload']['extra'])
+        self.app.cluster_signal.return_value = probe.NORMAL
+        self._tick(_view('ONLINE', 'PRIMARY'), 1010)
+        self.assertEqual(('i2', 'normal'), self.cast.call_args.args)
+        self.assertEqual(2, self.cast.call_count)
+
+    def test_the_event_view_hook(self):
+        self.app.cluster_event_view = mock.Mock(return_value={'gr': 1})
+        self._tick(_view('OFFLINE', None))
+        self.app.cluster_event_view.assert_called_once_with(
+            _view('OFFLINE', None))
+        self.assertEqual({'gr': 1}, self.cast.call_args.kwargs['payload']
+                         ['view'])
+        # A failing view does not keep the event.
+        self.app.cluster_event_view.side_effect = Exception('no')
+        self._tick(_view('OFFLINE', None), 1060)
+        self.assertIsNone(self.cast.call_args.kwargs['payload']['view'])
+
+    def test_the_ports_are_set_before_and_regardless_of_the_event(self):
+        order = []
+        self.probe.port.ensure.side_effect = lambda *a, **k: order.append(
+            'port')
+        self.app.reconcile.side_effect = lambda v: order.append('reconcile')
+        self.app.cluster_signal = mock.Mock(
+            side_effect=lambda v: order.append('signal') or probe.NORMAL)
+        self._tick(_view('ONLINE', 'PRIMARY'))
+        self.assertEqual(['reconcile', 'port', 'signal'], order)
+        # A failing hook or cast does not break the tick.
+        self.app.cluster_signal.side_effect = Exception('hook')
+        self._tick(_view('ONLINE', 'PRIMARY'), 1003)
+        self.conductor.side_effect = Exception('no transport')
+        self.app.cluster_signal.side_effect = None
+        self.app.cluster_signal.return_value = probe.ClusterSignal(
+            True, probe.ABNORMAL, 'out')
+        self._tick(_view('ONLINE', 'PRIMARY'), 1006)
+        self.assertFalse(self.probe._sending)
+        self.assertEqual(3, self.probe.port.ensure.call_count)
+
+    def test_nothing_before_the_cluster_is_complete_or_while_leaving(self):
+        self.probe.complete = False
+        self._tick(_view('OFFLINE', None))
+        self.cast.assert_not_called()
+        self.probe.complete = True
+        self.probe.disable()
+        self._tick(_view('OFFLINE', None), 1003)
+        self.cast.assert_not_called()
+
+    def test_a_cast_in_flight_is_not_doubled(self):
+        self.probe._sending = True
+        self._tick(_view('OFFLINE', None))
+        self.cast.assert_not_called()
+
+    def test_events_off(self):
+        self.conf.cluster_events = False
+        p = probe.ClusterProbe(self.app, mock.MagicMock(), conf=self.conf)
+        p.port = self.probe.port
+        p.member = p.complete = p._flags_loaded = True
+        self.app.member_view.return_value = _view('OFFLINE', None)
+        p._tick()
+        self.cast.assert_not_called()
 
 
 def _peer(ip, in_group=False, position='u:1-10', reachable=True,
