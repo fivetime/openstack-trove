@@ -38,6 +38,7 @@ primary rejoin as a standby: ``pg_rewind`` against the new primary, or
 a base backup when that fails.
 """
 
+from concurrent import futures
 import json
 import os
 import re
@@ -85,6 +86,9 @@ PRIMARY, STANDBY, REBUILDING, STOPPED = ('primary', 'standby',
 # for it.
 SYNCHRONOUS_STATES = ('sync', 'quorum')
 STREAMING = 'streaming'
+# Seconds a standby waits for another member on the tenant network;
+# the task manager waits cluster_peer_timeout for the whole answer.
+PEER_PROBE_TIMEOUT = 1
 
 SLOT_PATTERN = re.compile(r'^[a-z0-9_]{1,63}$')
 
@@ -139,8 +143,10 @@ class PostgresqlClusterAppMixin(object):
     _confirmed_at = None
     _stale_warned = False
     fenced = False
-    # A standby: since when it has not been streaming.
+    # A standby: since when it has not been streaming, and which
+    # members it last reached on the tenant network meanwhile.
     _detached_since = None
+    _reached = None
 
     # What the member knows of its cluster
 
@@ -213,20 +219,28 @@ class PostgresqlClusterAppMixin(object):
     def primary_id(self):
         return self._read_cluster().get('primary_id')
 
-    def remember_sync_set(self, primary_id, members, lsn=None):
-        """The standbys the primary last reported streaming, and in
-        async mode where it was, kept here for the task manager: when the
-        primary is gone, they say which standbys may hold its last
-        acknowledged commits and how far behind the best standby is, even
-        to a task manager that has restarted meanwhile. Returns whether
-        the primary or the standbys changed.
+    def remember_sync_set(self, primary_id, members, lsn=None, alone=False):
+        """The standbys the primary last streamed to, whether it has
+        gone on without any since, and in async mode where it was, kept
+        here for the task manager: when the primary is gone, they say
+        which standbys may hold its last acknowledged commits, whether
+        it may have acknowledged some alone, and how far behind the
+        best standby is, even to a task manager that has restarted
+        meanwhile. ``members`` None keeps the set kept for the same
+        primary. Returns whether the primary, the standbys or whether
+        it is alone changed.
         """
-        record = {'primary_id': primary_id, 'members': sorted(members),
-                  'lsn': lsn}
         kept = self._read_cluster().get('sync_set') or {}
+        if members is None and kept.get('primary_id') == primary_id:
+            members = kept.get('members')
+        record = {'primary_id': primary_id,
+                  'members': sorted(members) if members is not None
+                  else None,
+                  'lsn': lsn, 'alone': bool(alone)}
         self._update_cluster(sync_set=record)
-        return (kept.get('primary_id'), kept.get('members')) != (
-            primary_id, record['members'])
+        return (kept.get('primary_id'), kept.get('members'),
+                bool(kept.get('alone'))) != (
+            primary_id, record['members'], record['alone'])
 
     def get_cluster_context(self):
         cluster = self._read_cluster()
@@ -489,6 +503,53 @@ class PostgresqlClusterAppMixin(object):
                          'lag_bytes': int(row[3] or 0)}
                 for row in self.adm.query(STANDBYS_QUERY)}
 
+    def _reach_peers(self, members, timeout=PEER_PROBE_TIMEOUT):
+        """Which of the other members this one reaches on the tenant
+        network, from the database container (the tenant NIC is its):
+        ``pg_isready`` to each one at once; a server that answers at
+        all, accepting connections or not, is reached; a probe not back
+        in time says nothing (None). Asked while the member does not
+        stream, so that the task manager can tell a primary cut off from
+        the cluster from standbys cut off themselves; logged when what
+        is reached changes.
+        """
+        self_id = self.self_id
+        others = {i: ip for i, ip in members.items()
+                  if i != self_id and ip}
+        if not others:
+            return {}
+        container = self.docker_client.containers.get(readyport.CONTAINER_NAME)
+        user = (self._read_cluster().get('replication_user') or {}).get(
+            'name') or 'postgres'
+
+        def probe(ip):
+            code, _output = container.exec_run(
+                ['pg_isready', '-h', ip, '-p', str(self.port),
+                 '-t', str(timeout), '-U', user])
+            return code in (0, 1)
+        pool = futures.ThreadPoolExecutor(max_workers=len(others))
+        try:
+            asked = {i: pool.submit(probe, ip) for i, ip in others.items()}
+            futures.wait(asked.values(), timeout=timeout + 0.5)
+        finally:
+            pool.shutdown(wait=False)
+        reached = {}
+        for i, future in asked.items():
+            try:
+                reached[i] = future.result(timeout=0)
+            except Exception as err:
+                LOG.debug("No probe of %s: %s", others[i], err)
+                reached[i] = None
+        if reached != self._reached:
+            LOG.info("On the tenant network, this member reaches %s and "
+                     "not %s.",
+                     ', '.join(others[i] for i, r in reached.items() if r)
+                     or 'no member',
+                     ', '.join(others[i] for i, r in reached.items()
+                               if not r) or 'nobody')
+            self._reached = reached
+        return reached
+
     def _receiver(self):
         rows = self.adm.query(RECEIVER_QUERY)
         if not rows:
@@ -638,9 +699,11 @@ class PostgresqlClusterAppMixin(object):
         """Where the member stands, for the task manager: its state and
         whom it takes for the primary; on the primary its standbys, its
         position and for how long no standby has streamed; on a standby
-        its receiver, its received and replayed positions and for how
-        long it has not been streaming; the timeline on both.
+        its receiver, its received and replayed positions, for how long
+        it has not been streaming and, while it does not, which members
+        it reaches on the tenant network; the timeline on both.
         """
+        receiver = None
         view = self.member_view()
         cluster = self._read_cluster()
         now = time.monotonic()
@@ -660,7 +723,8 @@ class PostgresqlClusterAppMixin(object):
                     now - self._no_standby_since
                     if self._no_standby_since is not None else None)
             elif view.state == STANDBY:
-                answer['receiver'] = self._receiver()
+                receiver = self._receiver()
+                answer['receiver'] = receiver
                 answer['lsn'] = self._lsn(RECEIVE_LSN_QUERY)
                 answer['replay_lsn'] = self._lsn(REPLAY_LSN_QUERY)
                 answer['timeline'] = self._timeline()
@@ -669,6 +733,13 @@ class PostgresqlClusterAppMixin(object):
                     if self._detached_since is not None else None)
         except Exception as err:
             LOG.debug("No position: %s", err)
+        if view.state == STANDBY and not (
+                receiver and receiver['status'] == STREAMING):
+            try:
+                answer['peers'] = self._reach_peers(
+                    cluster.get('members') or {})
+            except Exception as err:
+                LOG.debug("No probe of the members: %s", err)
         return answer
 
     # Failing over: what the task manager has the members do
@@ -874,10 +945,18 @@ class PostgresqlMemberMixin(cluster_member.ClusterMemberMixin):
     def renew_lease(self, context, ttl):
         self.app.renew_lease(ttl)
 
-    def remember_sync_set(self, context, primary_id, members, lsn=None):
-        if self.app.remember_sync_set(primary_id, members, lsn=lsn):
-            LOG.info("The primary %s streams to %s.", primary_id,
-                     ', '.join(sorted(members)) or 'no standby')
+    def remember_sync_set(self, context, primary_id, members, lsn=None,
+                          alone=False):
+        if self.app.remember_sync_set(primary_id, members, lsn=lsn,
+                                      alone=alone):
+            if alone:
+                LOG.info("The primary %s goes on without a standby (it "
+                         "last streamed to %s).", primary_id,
+                         ', '.join(sorted(members)) if members
+                         else 'nobody known')
+            else:
+                LOG.info("The primary %s streams to %s.", primary_id,
+                         ', '.join(sorted(members or [])) or 'no standby')
 
     def fence_member(self, context):
         self.app.fence_member()

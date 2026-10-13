@@ -23,8 +23,15 @@ decision and an interval between decisions; takes the cluster's recovery
 task as a lock (compare-and-set, so that two task managers cannot both
 take it) while something is under way, and frees it once the cluster is
 settled or the recovery has had its time.
+
+A look waits on the members (a member that is gone, for its timeout),
+so the members of a cluster are asked at once, and the clusters are
+looked at ``cluster_recovery_workers`` at a time: a look at every
+cluster has to end well within the interval, or the leases the looks
+renew run out.
 """
 
+from concurrent import futures
 import random
 import time
 
@@ -77,19 +84,21 @@ class ClusterRecovery(object):
         return DBInstance.find_all(cluster_id=cluster_id, deleted=False).all()
 
     def _views(self, context, members):
-        """What every member says; a member that does not answer is
-        unreachable (None).
+        """What every member says, asked all at once; a member that
+        does not answer is unreachable (None).
         """
-        views = []
-        for member in members:
+        def ask(member):
             try:
                 answer = self.guest_factory(context, member).get_recovery_view(
                     timeout=self.conf.cluster_peer_timeout)
             except Exception as err:
                 LOG.debug("Member %s did not answer: %s", member.id, err)
                 answer = None
-            views.append((member, answer))
-        return views
+            return member, answer
+        if len(members) < 2:
+            return [ask(member) for member in members]
+        with futures.ThreadPoolExecutor(max_workers=len(members)) as pool:
+            return list(pool.map(ask, members))
 
     @staticmethod
     def _member_busy(member):
@@ -188,9 +197,30 @@ class ClusterRecovery(object):
                 [(m.id, key(a)) for m, a in views])
 
     def run(self, context, db_clusters):
-        for db_cluster in db_clusters:
+        """One look at every cluster, several at a time."""
+        def look(db_cluster):
             try:
                 self.check(context, db_cluster)
             except Exception:
                 LOG.exception("The recovery check of cluster %s failed.",
                               db_cluster.id)
+        started = time.monotonic()
+        workers = max(1, min(CONF.cluster_recovery_workers, len(db_clusters)))
+        if workers < 2:
+            for db_cluster in db_clusters:
+                look(db_cluster)
+        else:
+            with futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                list(pool.map(look, db_clusters))
+        took = time.monotonic() - started
+        interval = CONF.cluster_recovery_check_interval
+        if took > interval:
+            LOG.warning("The look at the %s %s clusters took %d seconds, "
+                        "more than the %d between two looks: the primaries' "
+                        "leases may run out. More cluster_recovery_workers "
+                        "(%s now), or another task manager.",
+                        len(db_clusters), self.manager, took, interval,
+                        CONF.cluster_recovery_workers)
+        else:
+            LOG.debug("Looked at the %s %s clusters in %.1f seconds.",
+                      len(db_clusters), self.manager, took)

@@ -294,6 +294,11 @@ common_opts = [
                     'by themselves after every member went down (Galera): '
                     'the members are asked where they stand and one is '
                     'told to form the cluster again. 0 turns it off.'),
+    cfg.IntOpt('cluster_recovery_workers', default=16, min=1,
+               help='Clusters the task manager looks at at a time: a look '
+                    'waits on the members of the cluster, up to their '
+                    'timeout when one is gone, and a look at every cluster '
+                    'has to end within cluster_recovery_check_interval.'),
     cfg.StrOpt('cluster_default_locality', default='anti-affinity',
                choices=constants.VALID_LOCALITIES + ('',),
                help='Default Nova server group policy for the members of a '

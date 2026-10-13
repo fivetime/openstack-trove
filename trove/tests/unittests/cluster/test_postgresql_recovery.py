@@ -14,6 +14,7 @@
 members' answers, and the reconciler that applies them.
 """
 
+import time
 from unittest import mock
 
 from trove.cluster.tasks import ClusterTasks
@@ -41,7 +42,7 @@ def primary(ip, standbys=(), lsn=1000, timeline=1, no_standby_for=None,
 
 def standby(ip, sender='10.0.0.1', status='streaming', lsn=1000, replay=None,
             timeline=1, disconnected_for=None, primary_id='i1',
-            rebuilding=False, mode='sync', self_id=None):
+            rebuilding=False, mode='sync', self_id=None, peers=None):
     answer = {'ip': ip, 'state': 'rebuilding' if rebuilding else 'standby',
               'role': 'STREAMING' if status == 'streaming' else 'DETACHED',
               'mode': mode, 'self_id': self_id, 'primary_id': primary_id,
@@ -52,7 +53,19 @@ def standby(ip, sender='10.0.0.1', status='streaming', lsn=1000, replay=None,
               'timeline': timeline, 'disconnected_for': disconnected_for,
               'writable': False, 'fenced': False, 'lease_fresh': False,
               'rebuilding': rebuilding}
+    if peers is not None:
+        answer['peers'] = peers
     return answer
+
+
+def cut(*reached, **unreached):
+    """What a standby reaches on the tenant network: the members given
+    and not the primary (i1), unless said otherwise.
+    """
+    peers = {'i1': False}
+    peers.update({i: True for i in reached})
+    peers.update(unreached)
+    return peers
 
 
 def stopped(ip, primary_id='i1', fenced=False):
@@ -120,11 +133,120 @@ class TopologyTest(trove_testtools.TestCase):
             # It answers, being rebuilt.
             ({'i1': standby('10.0.0.1', rebuilding=True), 'i2': gone},
              False, 'answers as rebuilding'),
+            # The standbys say what they reach on the tenant network:
+            # not it, but each other (a majority without it): gone.
+            ({'i1': None,
+              'i2': standby('10.0.0.2', status=None, disconnected_for=40,
+                            peers=cut('i3')),
+              'i3': standby('10.0.0.3', status=None, disconnected_for=40,
+                            peers=cut('i2'))},
+             True, 'cut off on the tenant network'),
+            # Not it, nor each other: they are cut off themselves.
+            ({'i1': primary('10.0.0.1', no_standby_for=35),
+              'i2': standby('10.0.0.2', status=None, disconnected_for=40,
+                            peers=cut(i3=False)),
+              'i3': standby('10.0.0.3', status=None, disconnected_for=40,
+                            peers=cut(i2=False))},
+             False, 'cut off themselves'),
+            # One reaches it: it lives on the tenant network.
+            ({'i1': None,
+              'i2': standby('10.0.0.2', status=None, disconnected_for=40,
+                            peers=cut('i3')),
+              'i3': standby('10.0.0.3', status=None, disconnected_for=40,
+                            peers=cut('i2', i1=True))},
+             False, 'reaches it'),
+            # Its server is down: the network does not matter.
+            ({'i1': stopped('10.0.0.1'),
+              'i2': standby('10.0.0.2', status=None, disconnected_for=40,
+                            peers=cut(i3=False))},
+             True, 'server is down'),
         ]
         for answers, dead, why in cases:
             got = topology.primary_dead(_top(answers), 'i1', '10.0.0.1', 30)
             self.assertEqual(dead, got[0], (answers, got))
             self.assertIn(why, got[1])
+
+    def test_cut_off(self):
+        def detached(ip, peers=None, **kwargs):
+            return standby(ip, status=None, disconnected_for=40,
+                           peers=peers, **kwargs)
+        cases = [
+            # No standby says what it reaches.
+            ({'i1': None, 'i2': detached('10.0.0.2')}, None, None,
+             'no standby says'),
+            # Three members: the two standbys reach each other.
+            ({'i1': None, 'i2': detached('10.0.0.2', cut('i3')),
+              'i3': detached('10.0.0.3', cut('i2'))},
+             True, ['i2', 'i3'], 'i2 reaches 1 other'),
+            # One standby suffices to say so, as long as it reaches the
+            # other (which may not answer the task manager).
+            ({'i1': None, 'i2': detached('10.0.0.2', cut('i3')),
+              'i3': None}, True, ['i2', 'i3'], 'cut off'),
+            # Five members: a standby reaching one other is no majority.
+            ({'i1': None, 'i2': detached('10.0.0.2', cut('i3')),
+              'i3': detached('10.0.0.3', cut('i2')), 'i4': None,
+              'i5': None}, False, None, '2 of 5'),
+            ({'i1': None, 'i2': detached('10.0.0.2', cut('i3', 'i4')),
+              'i3': detached('10.0.0.3', cut('i2')), 'i4': None,
+              'i5': None}, True, ['i2', 'i3', 'i4'], 'reaches 2 other'),
+            # A standby being rebuilt says nothing; one that does not
+            # say whether it reaches the primary neither.
+            ({'i1': None, 'i2': detached('10.0.0.2', cut('i3'),
+                                         rebuilding=True),
+              'i3': detached('10.0.0.3', {'i2': True})},
+             False, None, 'cut off themselves'),
+            # One reaches the primary: not cut off, whatever the others.
+            ({'i1': None, 'i2': detached('10.0.0.2', cut('i3')),
+              'i3': detached('10.0.0.3', cut('i2', i1=True))},
+             False, None, 'i3 reaches it'),
+        ]
+        for answers, verdict, side, why in cases:
+            got = topology.cut_off(_top(answers), 'i1')
+            self.assertEqual((verdict, side), got[:2], (answers, got))
+            self.assertIn(why, got[2])
+
+    def test_the_alone_check(self):
+        here = standby('10.0.0.2', status=None, disconnected_for=100,
+                       peers=cut('i3'))
+        there = standby('10.0.0.3', status=None, disconnected_for=90,
+                        peers=cut('i2'))
+        # The primary does not answer: nothing to check unless it is
+        # known to have gone on alone, and then nothing to go on.
+        self.assertIsNone(topology.alone_check(
+            _top({'i1': None, 'i2': here, 'i3': there}), 'i1', 20))
+        self.assertIsNone(topology.alone_check(
+            _top({'i1': None, 'i2': here, 'i3': there}), 'i1', 20, False))
+        got = topology.alone_check(
+            _top({'i1': None, 'i2': here, 'i3': there}), 'i1', 20, True)
+        self.assertEqual(False, got[0])
+        self.assertIn('does not answer how long', got[1])
+        # It answers, with a standby all along: nothing to check.
+        self.assertIsNone(topology.alone_check(
+            _top({'i1': primary('10.0.0.1', no_standby_for=None),
+                  'i2': here, 'i3': there}), 'i1', 20))
+        # Alone no longer than the standbys have been without it, give
+        # or take the slack, and cut off: safe.
+        got = topology.alone_check(
+            _top({'i1': primary('10.0.0.1', no_standby_for=115),
+                  'i2': here, 'i3': there}), 'i1', 20)
+        self.assertEqual(True, got[0])
+        self.assertIn('cut off on the tenant network since', got[1])
+        # Alone for longer: it may have acknowledged commits alone.
+        got = topology.alone_check(
+            _top({'i1': primary('10.0.0.1', no_standby_for=125),
+                  'i2': here, 'i3': there}), 'i1', 20)
+        self.assertEqual(False, got[0])
+        self.assertIn('longer than the standbys', got[1])
+        # Not cut off: the standbys are.
+        got = topology.alone_check(
+            _top({'i1': primary('10.0.0.1', no_standby_for=100),
+                  'i2': standby('10.0.0.2', status=None,
+                                disconnected_for=100, peers=cut(i3=False)),
+                  'i3': standby('10.0.0.3', status=None,
+                                disconnected_for=100,
+                                peers=cut(i2=False))}), 'i1', 20)
+        self.assertEqual(False, got[0])
+        self.assertIn('cut off themselves', got[1])
 
     def test_the_candidates_and_the_choice(self):
         top = _top({'i1': None,
@@ -164,13 +286,11 @@ class TopologyTest(trove_testtools.TestCase):
              False, '3 of the 4'),
             (five, ['i2', 'i3'], 'strict', ['i2', 'i3', 'i4', 'i5'], 0,
              False, '2 of the 4'),
-            # Not known: every standby has to be a candidate.
+            # Not known (or empty): every standby has to be a candidate.
             (three, ['i2', 'i3'], 'sync', None, 0, True, 'every standby'),
             (three, ['i2'], 'sync', None, 0, False, 'i3 cannot take over'),
-            # Empty: the primary committed without any standby.
-            (three, ['i2', 'i3'], 'sync', [], 0, False, 'without any'),
+            (three, ['i2', 'i3'], 'sync', [], 0, True, 'every standby'),
             # Forced after a while.
-            (three, ['i2', 'i3'], 'sync', [], 100, True, 'forced'),
             (five, ['i2', 'i3'], 'sync', ['i2', 'i3', 'i4', 'i5'], 100,
              True, 'forced'),
         ]
@@ -178,6 +298,20 @@ class TopologyTest(trove_testtools.TestCase):
             got = topology.quorum(top, cands, mode, sync_set, 'i1', failing,
                                   force_after=60)
             self.assertEqual(ok, got[0], (cands, mode, sync_set, got))
+            self.assertIn(why, got[1])
+        # Sync: a primary that went on without any standby may have
+        # acknowledged commits alone, unless the check says it could
+        # not; strict never commits alone.
+        cases = [
+            ('sync', (False, 'it may have'), 0, False, 'went on without'),
+            ('sync', (True, 'it could not have'), 0, True, 'could not'),
+            ('strict', (False, 'it may have'), 0, True, '2 of the 2'),
+            ('sync', (False, 'it may have'), 100, True, 'forced'),
+        ]
+        for mode, alone, failing, ok, why in cases:
+            got = topology.quorum(three, ['i2', 'i3'], mode, ['i2', 'i3'],
+                                  'i1', failing, force_after=60, alone=alone)
+            self.assertEqual(ok, got[0], (mode, alone, got))
             self.assertIn(why, got[1])
 
     def test_the_lag(self):
@@ -221,8 +355,10 @@ class RecoveryTestBase(trove_testtools.TestCase):
                             (k,) if k else ())))
                 # Kept apart: told on every change of the set.
                 g.remember_sync_set.side_effect = (
-                    lambda *a, _i=member.id, lsn=None: self.shared.append(
-                        (_i,) + a + ((lsn,) if lsn is not None else ())))
+                    lambda *a, _i=member.id, lsn=None, alone=False:
+                    self.shared.append(
+                        (_i,) + a + ((lsn,) if lsn is not None else ()) +
+                        (('alone',) if alone else ())))
                 g.promote_member.side_effect = (
                     lambda members, mode, _i=member.id:
                     self.calls.append(('promote', _i, mode)) or
@@ -239,7 +375,7 @@ class RecoveryTestBase(trove_testtools.TestCase):
             cluster_recovery_interval=30, cluster_recovery_timeout=3600,
             cluster_bootstrap_jitter=0, cluster_failover_force_after=0,
             cluster_failover_max_lag_bytes=MiB,
-            cluster_standby_rebuild_after=600)
+            cluster_standby_rebuild_after=600, cluster_wal_timeout=10)
         mock.patch.object(pg_recovery.CONF, 'cluster_recovery_check_interval',
                           30).start()
         self.db_cluster = mock.Mock(id='c1', task_status=ClusterTasks.NONE)
@@ -288,7 +424,8 @@ class HealthyRecoveryTest(RecoveryTestBase):
         self.assertEqual([('renew_lease', 'i1', 60)], self.calls)
         self.assertEqual(
             {'primary_id': 'i1', 'primary_ip': '10.0.0.1', 'lsn': 1000,
-             'timeline': 1, 'sync_set': ['i2', 'i3'], 'lease_at': 0},
+             'timeline': 1, 'sync_set': ['i2', 'i3'], 'alone': False,
+             'lease_at': 0},
             self.recovery.memory['c1'])
         self.assertEqual({}, self.recovery.waiting_since)
 
@@ -334,7 +471,79 @@ class HealthyRecoveryTest(RecoveryTestBase):
         self._check_at(0)
         self._check_at(100)
         self.assertEqual([('renew_lease', 'i1', 60)] * 2, self.calls)
-        self.assertEqual([], self.recovery.memory['c1']['sync_set'])
+        mem = self.recovery.memory['c1']
+        self.assertEqual((None, True), (mem['sync_set'], mem['alone']))
+
+    def test_the_set_stands_while_the_primary_goes_on_alone(self):
+        # The standbys stop streaming but answer (cut off themselves):
+        # the set the primary last streamed to stands, and the members
+        # are told it goes on alone; once they stream again, that it
+        # does not.
+        self._healthy()
+        self._check_at(0)
+        record = {'primary_id': 'i1', 'members': ['i2', 'i3']}
+        for i in ('i2', 'i3'):
+            self.answers[i]['sync_set'] = record
+        self._standbys_cut_off(since=20)
+        self.shared = []
+        self._check_at(30)
+        self.assertEqual([('i2', 'i1', ['i2', 'i3'], 'alone'),
+                          ('i3', 'i1', ['i2', 'i3'], 'alone')], self.shared)
+        mem = self.recovery.memory['c1']
+        self.assertEqual((['i2', 'i3'], True), (mem['sync_set'],
+                                                mem['alone']))
+        for i in ('i2', 'i3'):
+            self.answers[i]['sync_set'] = dict(record, alone=True)
+        self.shared = []
+        self._check_at(60)
+        self.assertEqual([], self.shared)
+        self._healthy()
+        self._check_at(90)
+        self.assertEqual([('i2', 'i1', ['i2', 'i3']),
+                          ('i3', 'i1', ['i2', 'i3'])], self.shared)
+        self.assertFalse(self.recovery.memory['c1']['alone'])
+
+    def _standbys_cut_off(self, since=100):
+        """The standbys lost the primary and reach nobody on the tenant
+        network; the primary answers, without a standby as long.
+        """
+        self.answers = {
+            'i1': primary('10.0.0.1', no_standby_for=since, self_id='i1'),
+            'i2': standby('10.0.0.2', status=None, disconnected_for=since,
+                          lsn=1500, self_id='i2', peers=cut(i3=False)),
+            'i3': standby('10.0.0.3', status=None, disconnected_for=since,
+                          lsn=1200, self_id='i3', peers=cut(i2=False))}
+
+    def test_standbys_cut_off_leave_the_primary_its_lease(self):
+        # Both standbys cut off from the tenant network: the primary
+        # has no standby, but the standbys reach nobody either, so it
+        # is not given up: it keeps its lease (and goes on, in sync
+        # and async mode), and no standby is told to rejoin it.
+        for mode in ('sync', 'async'):
+            self._healthy()
+            self._check_at(0)
+            self._standbys_cut_off()
+            for answer in self.answers.values():
+                answer['mode'] = mode
+            self.answers['i2']['disconnected_for'] = 700
+            self.calls = []
+            self._check_at(100)
+            self._check_at(140)
+            self.assertEqual([('renew_lease', 'i1', 60)] * 2, self.calls,
+                             mode)
+            self.assertEqual({}, self.recovery.waiting_since)
+
+    def test_a_standby_that_reaches_the_primary_says_it_lives(self):
+        # The standbys do not stream, but one reaches the primary on
+        # the tenant network: no partition, nothing to fail over.
+        self._healthy()
+        self._check_at(0)
+        self._standbys_cut_off()
+        self.answers['i3']['peers'] = cut('i2', i1=True)
+        self.calls = []
+        self._check_at(100)
+        self._check_at(140)
+        self.assertEqual([('renew_lease', 'i1', 60)] * 2, self.calls)
 
     def test_a_standby_pointed_elsewhere_follows_the_primary(self):
         self._healthy()
@@ -387,6 +596,12 @@ class HealthyRecoveryTest(RecoveryTestBase):
         self.assertIn(('rejoin_cluster', 'i3', {'id': 'i1',
                                                 'host': '10.0.0.1'}),
                       self.calls)
+        # Not while it does not reach the primary on the tenant network:
+        # the rebuild could not either.
+        self.calls = []
+        self.answers['i3']['peers'] = cut('i2')
+        self._check_at(50)
+        self.assertEqual([('renew_lease', 'i1', 60)], self.calls)
         self.answers['i3']['disconnected_for'] = 100
         self.calls = []
         self._check_at(100)
@@ -416,12 +631,19 @@ class HealthyRecoveryTest(RecoveryTestBase):
 class FailoverTest(RecoveryTestBase):
 
     def _primary_gone(self, since=100):
+        """The primary does not answer; the standbys lost it, and reach
+        every member but it on the tenant network.
+        """
+        ids = [m.id for m in self.members]
+
+        def peers(self_id):
+            return {i: i != 'i1' for i in ids if i != self_id}
         self.answers = {
             'i1': None,
             'i2': standby('10.0.0.2', status=None, disconnected_for=since,
-                          lsn=1500, self_id='i2'),
+                          lsn=1500, self_id='i2', peers=peers('i2')),
             'i3': standby('10.0.0.3', status=None, disconnected_for=since,
-                          lsn=1200, self_id='i3')}
+                          lsn=1200, self_id='i3', peers=peers('i3'))}
 
     def test_the_failover(self):
         self._healthy()
@@ -498,6 +720,80 @@ class FailoverTest(RecoveryTestBase):
         self.assertEqual(('create_member_slot', 'i2', 'i1'), self.calls[6])
         self.assertEqual(('rejoin_cluster', 'i1',
                           {'id': 'i2', 'host': '10.0.0.2'}), self.calls[7])
+
+    def test_a_primary_cut_off_in_sync_mode_is_replaced(self):
+        # The primary cut off from the tenant network: it went on
+        # without a standby (committing alone, sync mode), but for no
+        # longer than the standbys have been without it, so nothing was
+        # acknowledged meanwhile: fenced and replaced. Alone for longer
+        # (the standbys were away first): it may have acknowledged
+        # commits no standby holds, and the failover waits, unless
+        # forced.
+        self._healthy()
+        self._check_at(0)
+        self._primary_gone()
+        self.answers['i1'] = primary('10.0.0.1', no_standby_for=130,
+                                     self_id='i1')
+        self._check_at(100)
+        self._check_at(140)
+        self.assertEqual([], self._promotions())
+        self.answers['i1']['no_standby_for'] = 115
+        self.calls = []
+        self._check_at(170)
+        self.assertEqual(['i2'], self._promotions())
+        self.assertEqual(('fence_member', 'i1'), self.calls[0])
+
+    def test_a_primary_alone_for_longer_is_replaced_only_when_forced(self):
+        self._healthy()
+        self._check_at(0)
+        self._primary_gone()
+        self.answers['i1'] = primary('10.0.0.1', no_standby_for=200,
+                                     self_id='i1')
+        self._check_at(100)
+        self._check_at(140)
+        self._check_at(170)
+        self.assertEqual([], self._promotions())
+        self.recovery.conf.cluster_failover_force_after = 60
+        self._check_at(200)
+        self.assertEqual(['i2'], self._promotions())
+
+    def test_a_restart_learns_from_the_members_that_it_went_on_alone(self):
+        # The primary does not answer, and the members keep that it
+        # went on without any standby after streaming to them: whether
+        # it acknowledged commits alone cannot be known; waiting.
+        self._primary_gone()
+        for i in ('i2', 'i3'):
+            self.answers[i]['sync_set'] = {
+                'primary_id': 'i1', 'members': ['i2', 'i3'], 'alone': True}
+        self._check_at(0)
+        self._check_at(100)
+        self.assertEqual([], self._promotions())
+        for i in ('i2', 'i3'):
+            self.answers[i]['sync_set']['alone'] = False
+        self._check_at(130)
+        self.assertEqual(['i2'], self._promotions())
+
+    def test_the_candidate_is_on_the_side_of_the_majority(self):
+        # Five members, async: i5 holds the most but reaches nobody;
+        # i2, i3 and i4 reach each other: the best of them takes over.
+        for i in ('i4', 'i5'):
+            self.members.append(mock.Mock(id=i,
+                                          task_status=InstanceTasks.NONE))
+        self._primary_gone()
+        self._async()
+        self.answers['i4'] = standby('10.0.0.4', status=None,
+                                     disconnected_for=100, lsn=1600,
+                                     self_id='i4', mode='async',
+                                     peers=cut('i2', 'i3', i5=False))
+        self.answers['i5'] = standby('10.0.0.5', status=None,
+                                     disconnected_for=100, lsn=1900,
+                                     self_id='i5', mode='async',
+                                     peers=cut(i2=False, i3=False, i4=False))
+        for i in ('i2', 'i3'):
+            self.answers[i]['peers']['i5'] = False
+        self._check_at(0)
+        self._check_at(100)
+        self.assertEqual(['i4'], self._promotions())
 
     def test_a_primary_whose_server_is_down_is_replaced(self):
         self._healthy()
@@ -582,14 +878,10 @@ class FailoverTest(RecoveryTestBase):
         # primary died, and cannot take over); the task manager
         # restarted, so the set is only what the members keep.
         self.members.append(mock.Mock(id='i4', task_status=InstanceTasks.NONE))
-        self.answers = {
-            'i1': None,
-            'i2': standby('10.0.0.2', status=None, disconnected_for=100,
-                          lsn=1500, self_id='i2'),
-            'i3': standby('10.0.0.3', status=None, disconnected_for=100,
-                          lsn=1200, self_id='i3'),
-            'i4': standby('10.0.0.4', status=None, disconnected_for=100,
-                          lsn=None, self_id='i4')}
+        self._primary_gone()
+        self.answers['i4'] = standby('10.0.0.4', status=None,
+                                     disconnected_for=100, lsn=None,
+                                     self_id='i4', peers=cut('i2', 'i3'))
         for member_id, record in kept.items():
             self.answers[member_id]['sync_set'] = record
 
@@ -736,3 +1028,48 @@ class FailoverTest(RecoveryTestBase):
         self.assertEqual(ClusterTasks.NONE, self.db_cluster.task_status)
         self.assertEqual([], [c for c in self.calls
                               if c[0] == 'follow_primary'])
+
+
+class ParallelLookTest(trove_testtools.TestCase):
+    """The clusters are looked at several at a time, and the members of
+    each at once: a look at many clusters ends well within the interval
+    between looks.
+    """
+
+    def test_many_clusters_within_the_interval(self):
+        clusters = [mock.Mock(id='c%s' % n, task_status=ClusterTasks.NONE)
+                    for n in range(40)]
+        members = {c.id: [mock.Mock(id='%s-i%s' % (c.id, i),
+                                    task_status=InstanceTasks.NONE)
+                          for i in (1, 2, 3)] for c in clusters}
+        seen = []
+
+        def guest(context, member):
+            g = mock.Mock()
+
+            def view(timeout=None, _id=member.id):
+                # The time a member takes to answer over RPC.
+                time.sleep(0.02)
+                seen.append(_id)
+                if _id.endswith('-i1'):
+                    return primary('10.0.0.1', [_id[:-3] + '-i2',
+                                                _id[:-3] + '-i3'])
+                return standby('10.0.0.%s' % _id[-1])
+            g.get_recovery_view.side_effect = view
+            return g
+        recovery = pg_recovery.PostgresqlClusterRecovery('postgresql', guest)
+        recovery._members = lambda context, cluster_id: members[cluster_id]
+        recovery.conf = mock.Mock(
+            cluster_peer_timeout=3, cluster_recovery_grace=30,
+            cluster_recovery_interval=30, cluster_failover_max_lag_bytes=0,
+            cluster_standby_rebuild_after=600)
+        started = time.monotonic()
+        recovery.run('ctx', clusters)
+        took = time.monotonic() - started
+        # One at a time, it would take 40 clusters x 3 members x 0.02 s
+        # = 2.4 s; several at a time, a fraction of that.
+        self.assertLess(took, 1.0, took)
+        self.assertEqual(120, len(seen))
+        self.assertEqual(
+            {c.id: c.id + '-i1' for c in clusters},
+            {i: m['primary_id'] for i, m in recovery.memory.items()})

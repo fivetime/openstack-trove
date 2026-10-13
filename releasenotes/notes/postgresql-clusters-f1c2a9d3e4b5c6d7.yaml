@@ -17,4 +17,16 @@ features:
     standbys keep what a failover needs to know of the primary (the
     standbys it streamed to and, in async mode, where it was), so that a
     task manager that restarts meanwhile decides as safely; it also
-    waits out a lease its predecessor may have granted.
+    waits out a lease its predecessor may have granted. The standbys
+    that lost the primary say which members they reach on the tenant
+    network: a primary that a majority of the cluster does not reach
+    there is cut off from the clients too and is replaced, in sync mode
+    as well, since nothing was acknowledged while it went on alone;
+    standbys that reach nobody are cut off themselves, and the primary
+    keeps its lease and goes on serving.
+  - |
+    The task manager looks at the clusters of a datastore several at a
+    time (``cluster_recovery_workers``) and asks the members of each at
+    once, so that a look at many clusters ends within
+    ``cluster_recovery_check_interval``; a look that does not is logged
+    as a warning, since the primaries' leases may run out.

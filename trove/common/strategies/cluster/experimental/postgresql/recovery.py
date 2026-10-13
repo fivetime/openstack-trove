@@ -29,18 +29,22 @@ server is down rejoin it as standbys; a standby without it for too long
 is rebuilt from it.
 
 Without one: the primary is given up only when every standby here has
-been without its WAL for the grace period and the primary itself does
-not answer, or answers that it has no standby either; never when a
-standby still streams from it (it lives on the tenant network,
-whatever the management network says), never when no member answers at
-all (the task manager's network), never with two members, and never
-while the promotion could lose an acknowledged commit (the quorum rule)
-or, in async mode, more than ``cluster_failover_max_lag_bytes``. The
-old primary is fenced if it answers, the standby that holds the most is
+been without its WAL for the grace period, the primary itself does not
+answer, or answers that it has no standby either, and the standbys do
+not reach it on the tenant network while a majority of the cluster is
+there (standbys cut off themselves say nothing against it: it keeps
+its lease and goes on); never when a standby still streams from it (it
+lives on the tenant network, whatever the management network says),
+never when no member answers at all (the task manager's network),
+never with two members, and never while the promotion could lose an
+acknowledged commit (the quorum rule) or, in async mode, more than
+``cluster_failover_max_lag_bytes``. The old primary is fenced if it
+answers, the standby that holds the most on the majority's side is
 promoted once the old primary's lease has run out, the other standbys
 follow it, and the old primary rejoins it as a standby.
 """
 
+import threading
 import time
 
 from oslo_log import log as logging
@@ -68,9 +72,13 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
         super(PostgresqlClusterRecovery, self).__init__(manager,
                                                         guest_factory)
         # What the task manager remembers of each cluster's primary: its
-        # id and address, where it was, which standbys streamed from it
-        # (the synchronous set), and when its lease was last renewed.
+        # id and address, where it was, which standbys last streamed
+        # from it (the synchronous set) and whether it has gone on
+        # without any since, and when its lease was last renewed.
         self.memory = {}
+        # The members of the cluster under check, by the thread that
+        # checks it: the clusters are looked at several at a time.
+        self._local = threading.local()
         # When this task manager first looked at each cluster: a lease
         # it does not know of (granted by the task manager before a
         # restart) is taken as renewed then.
@@ -93,6 +101,14 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
         except Exception as err:
             LOG.warning("Member %s: %s failed: %s", member_id, what, err)
             return FAILED
+
+    @property
+    def _current_members(self):
+        return getattr(self._local, 'members', [])
+
+    @_current_members.setter
+    def _current_members(self, members):
+        self._local.members = members
 
     def _member(self, member_id):
         for member in self._current_members:
@@ -181,13 +197,18 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
         now = time.monotonic()
         if leader is not None:
             # A primary answers; still, when every standby here has been
-            # without its WAL for the grace period and it has had no
-            # standby as long, it is cut off from the standbys (the
-            # tenant network), not healthy: no lease for it.
+            # without its WAL for the grace period, it has had no
+            # standby as long, and the standbys do not reach it on the
+            # tenant network, it is cut off from the standbys and the
+            # clients, not healthy: no lease for it.
             primary_id, host = leader, top.ip(leader)
             dead, why = topology.primary_dead(
                 top, primary_id, host, self.conf.cluster_recovery_grace)
             if not dead:
+                if (top.answer(leader).get('no_standby_for') or 0) >= \
+                        self.conf.cluster_recovery_grace:
+                    LOG.info("Cluster %s: the primary %s has no standby; "
+                             "not given up: %s.", cluster_id, leader, why)
                 self.waiting_since.pop(cluster_id, None)
                 self._healthy(context, cluster_id, top, leader, now)
                 return
@@ -246,15 +267,22 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
         answer = top.answer(leader)
         mem = self.memory.setdefault(cluster_id, {})
         mem.pop('failing_since', None)
-        sync_set = sorted(i for i, s in
-                          (answer.get('standbys') or {}).items()
-                          if s.get('state') == topology.STREAMING and
-                          i in top.ids)
+        streaming = sorted(i for i, s in
+                           (answer.get('standbys') or {}).items()
+                           if s.get('state') == topology.STREAMING and
+                           i in top.ids)
+        if streaming:
+            sync_set, alone = streaming, False
+        else:
+            # The primary goes on without a standby: the set it last
+            # streamed to stands, and in sync mode it commits without
+            # waiting for one meanwhile.
+            sync_set, alone = self._known_sync_set(mem, top, leader), True
         mem.update(primary_id=leader, primary_ip=answer.get('ip'),
                    lsn=answer.get('lsn'), timeline=answer.get('timeline'),
-                   sync_set=sync_set)
+                   sync_set=sync_set, alone=alone)
         self._renew_lease(context, cluster_id, leader)
-        self._share_sync_set(context, top, leader, sync_set,
+        self._share_sync_set(context, top, leader, sync_set, alone,
                              answer.get('lsn')
                              if top.mode == topology.ASYNC else None)
         host = answer.get('ip')
@@ -290,12 +318,21 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
                 elsewhere = (receiver.get('sender_host') not in (None, host)
                              or other.get('primary_id') != leader)
                 away = other.get('disconnected_for') or 0
+                peers = other.get('peers')
+                unreached = peers is not None and \
+                    peers.get(leader) is False
                 if elsewhere and self._due(cluster_id, member_id, now):
                     LOG.info("Cluster %s: standby %s follows %s, not the "
                              "primary %s: follow.", cluster_id, member_id,
                              other.get('primary_id'), leader)
                     self._slot_then(context, leader, member_id,
                                     'follow_primary', primary)
+                elif unreached:
+                    # Cut off from the primary on the tenant network: a
+                    # rebuild could not reach it either.
+                    LOG.info("Cluster %s: standby %s does not reach the "
+                             "primary %s on the tenant network; waiting.",
+                             cluster_id, member_id, leader)
                 elif (away >= self.conf.cluster_standby_rebuild_after and
                       self._due(cluster_id, member_id, now)):
                     LOG.info("Cluster %s: standby %s has not streamed for "
@@ -304,12 +341,15 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
                     self._slot_then(context, leader, member_id,
                                     'rejoin_cluster', primary)
 
-    def _share_sync_set(self, context, top, leader, sync_set, lsn=None):
-        """Every other member keeps the standbys the primary streams to
-        and, in async mode, where the primary is: they outlive both the
-        primary and the task manager's memory. A member is told when what
-        it keeps differs, or when the primary has moved on by more than
-        half the lag a failover may lose since it was last told.
+    def _share_sync_set(self, context, top, leader, sync_set, alone,
+                        lsn=None):
+        """Every other member keeps the standbys the primary last
+        streamed to, whether it has gone on without any since, and, in
+        async mode, where the primary is: they outlive both the primary
+        and the task manager's memory. A member is told when what it
+        keeps differs (a set not known leaves the member's), or when the
+        primary has moved on by more than half the lag a failover may
+        lose since it was last told.
         """
         step = (self.conf.cluster_failover_max_lag_bytes or 0) // 2
         for member_id in top.reachable:
@@ -317,13 +357,15 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
                 continue
             kept = top.answer(member_id).get('sync_set') or {}
             stale = (kept.get('primary_id') != leader or
-                     kept.get('members') != sync_set)
+                     bool(kept.get('alone')) != alone)
+            if sync_set is not None:
+                stale = stale or kept.get('members') != sync_set
             if lsn is not None:
                 stale = stale or kept.get('lsn') is None or \
                     lsn - kept['lsn'] > step
             if stale:
                 self._tell(context, member_id, 'remember_sync_set', leader,
-                           sync_set, lsn=lsn)
+                           sync_set, lsn=lsn, alone=alone)
 
     @staticmethod
     def _kept(top, primary_id):
@@ -346,19 +388,30 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
 
     @classmethod
     def _known_sync_set(cls, mem, top, primary_id):
-        """The standbys the gone primary last reported streaming: as
-        the task manager remembers it, or else as the members keep it
-        (all of the sets they keep for that primary together, the safe
-        side when one missed an update); None when nobody knows.
+        """The standbys the gone primary last streamed to: as the task
+        manager remembers it, or else as the members keep it (all of
+        the sets they keep for that primary together, the safe side
+        when one missed an update); None when nobody knows.
         """
-        if mem.get('primary_id') == primary_id and \
-                mem.get('sync_set') is not None:
+        if mem.get('primary_id') == primary_id and mem.get('sync_set'):
             return mem['sync_set']
-        kept = [k for k in cls._kept(top, primary_id)
-                if k.get('members') is not None]
+        kept = [k for k in cls._kept(top, primary_id) if k.get('members')]
         if not kept:
             return None
         return sorted(set().union(*(k['members'] for k in kept)))
+
+    @classmethod
+    def _known_alone(cls, mem, top, primary_id):
+        """Whether the gone primary went on without any standby after
+        it last streamed to the set: as the task manager remembers it,
+        or else as any member keeps it; None when nobody knows.
+        """
+        if mem.get('primary_id') == primary_id and 'alone' in mem:
+            return mem['alone']
+        kept = cls._kept(top, primary_id)
+        if not kept:
+            return None
+        return any(k.get('alone') for k in kept)
 
     def _failover(self, context, db_cluster, top, primary_id=None,
                   host=None, why=''):
@@ -380,16 +433,23 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
             timelines.append(mem['timeline'])
         timeline = max(timelines) if timelines else None
         candidate_ids = topology.candidates(top, timeline)
+        # Only a standby the majority reaches on the tenant network.
+        _cut, side, _net_why = topology.cut_off(top, primary_id)
+        if side is not None:
+            candidate_ids = [i for i in candidate_ids if i in side]
         if not candidate_ids:
             LOG.error("Cluster %s: the primary %s is gone (%s), and no "
                       "standby on timeline %s can take over.", cluster_id,
                       primary_id, why, timeline)
             return
         failing_for = now - mem.get('failing_since', now)
+        alone = topology.alone_check(
+            top, primary_id, 2 * self.conf.cluster_wal_timeout,
+            self._known_alone(mem, top, primary_id))
         ok, quorum_why = topology.quorum(
             top, candidate_ids, mode,
             self._known_sync_set(mem, top, primary_id), primary_id,
-            failing_for, self.conf.cluster_failover_force_after)
+            failing_for, self.conf.cluster_failover_force_after, alone)
         if not ok:
             LOG.warning("Cluster %s: the primary %s is gone (%s); waiting: "
                         "%s.", cluster_id, primary_id, why, quorum_why)
@@ -456,7 +516,7 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
         host = top.ip(chosen)
         mem.update(primary_id=chosen, primary_ip=host,
                    lsn=result.get('lsn'), timeline=result.get('timeline'),
-                   sync_set=None, lease_at=now)
+                   sync_set=None, alone=False, lease_at=now)
         mem.pop('failing_since', None)
         LOG.info("Cluster %s: %s is the primary now (timeline %s).",
                  cluster_id, chosen, mem.get('timeline'))

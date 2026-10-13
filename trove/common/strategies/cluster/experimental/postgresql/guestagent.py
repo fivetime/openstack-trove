@@ -83,14 +83,16 @@ class PostgresqlGuestAgentAPI(common_guestagent.ClusterGuestAgentAPI):
         self._call("renew_lease", self.agent_low_timeout,
                    version=guest_api.API.API_BASE_VERSION, ttl=ttl)
 
-    def remember_sync_set(self, primary_id, members, lsn=None):
-        """On a member: the standbys the given primary last reported
-        streaming and, in async mode, where it was, for a failover
-        decided without the primary.
+    def remember_sync_set(self, primary_id, members, lsn=None, alone=False):
+        """On a member: the standbys the given primary last streamed to
+        (None: as kept), whether it has gone on without any since and,
+        in async mode, where it was, for a failover decided without the
+        primary.
         """
         self._cast("remember_sync_set",
                    version=guest_api.API.API_BASE_VERSION,
-                   primary_id=primary_id, members=members, lsn=lsn)
+                   primary_id=primary_id, members=members, lsn=lsn,
+                   alone=alone)
 
     def fence_member(self):
         """On a primary that is being replaced: no more writes, the

@@ -32,6 +32,7 @@ class FakeApp(cluster.PostgresqlClusterAppMixin):
         self.adm = mock.Mock()
         self.docker_client = mock.MagicMock()
         self.datadir = '/var/lib/postgresql/data/pgdata'
+        self.port = 5432
         self.database_service_uid = '999'
         self.database_service_gid = '999'
         self.calls = []
@@ -105,12 +106,23 @@ class ClusterFileTest(ClusterAppTestBase):
                          self.app.get_cluster_context())
         self.assertTrue(self.app.remember_sync_set('i1', ['i3', 'i2']))
         self.assertEqual({'primary_id': 'i1', 'members': ['i2', 'i3'],
-                          'lsn': None},
+                          'lsn': None, 'alone': False},
                          self.app._read_cluster()['sync_set'])
         # Only where the primary is changed: not worth a line in the log.
         self.assertFalse(self.app.remember_sync_set('i1', ['i2', 'i3'],
                                                     lsn=5))
         self.assertEqual(5, self.app._read_cluster()['sync_set']['lsn'])
+        # The primary goes on alone: the set it streamed to stands.
+        self.assertTrue(self.app.remember_sync_set('i1', None, alone=True))
+        self.assertEqual({'primary_id': 'i1', 'members': ['i2', 'i3'],
+                          'lsn': None, 'alone': True},
+                         self.app._read_cluster()['sync_set'])
+        self.assertFalse(self.app.remember_sync_set('i1', None, alone=True))
+        # Another primary, its set not known.
+        self.assertTrue(self.app.remember_sync_set('i9', None))
+        self.assertEqual({'primary_id': 'i9', 'members': None,
+                          'lsn': None, 'alone': False},
+                         self.app._read_cluster()['sync_set'])
         # Root alone reads the file: the replication password is in it.
         cluster.operating_system.chmod.assert_called_with(
             cluster.CLUSTER_FILE, cluster.operating_system.FileMode.SET_USR_RW,
@@ -690,10 +702,15 @@ class FailoverTest(ClusterAppTestBase):
              'lsn': 1000, 'timeline': 1, 'no_standby_for': None}, view)
 
     def test_the_recovery_view_of_a_standby(self):
+        # Not streaming: with which members it reaches on the tenant
+        # network, probed from the database container.
         self._answers(('SELECT pg_is_in_recovery', [(True,)]),
                       ('SELECT status', []),
                       ('SELECT timeline_id', [(1,)]),
                       ('SELECT pg_wal_lsn_diff', [(900,)]))
+        container = self.app.docker_client.containers.get.return_value
+        container.exec_run.side_effect = lambda command: (
+            (2, b'no response') if '10.0.0.1' in command else (1, b''))
         with mock.patch.object(cluster.time, 'monotonic',
                                side_effect=[100, 130, 130]):
             view = self.app.recovery_view()
@@ -703,7 +720,30 @@ class FailoverTest(ClusterAppTestBase):
              'sync_set': None,
              'writable': False, 'fenced': False, 'lease_fresh': False,
              'receiver': None, 'lsn': 900, 'replay_lsn': 900,
-             'timeline': 1, 'disconnected_for': 30}, view)
+             'timeline': 1, 'disconnected_for': 30,
+             'peers': {'i1': False, 'i3': True}}, view)
+        self.app.docker_client.containers.get.assert_called_with('database')
+        self.assertEqual(
+            sorted([['pg_isready', '-h', '10.0.0.1', '-p', '5432', '-t', '1',
+                     '-U', 'replicator'],
+                    ['pg_isready', '-h', '10.0.0.3', '-p', '5432', '-t', '1',
+                     '-U', 'replicator']]),
+            sorted(c.args[0] for c in container.exec_run.call_args_list))
+        # Streaming: no probe.
+        self._answers(('SELECT pg_is_in_recovery', [(True,)]),
+                      ('SELECT status', [('streaming', '10.0.0.1', 1.0, 0)]),
+                      ('SELECT timeline_id', [(1,)]),
+                      ('SELECT pg_wal_lsn_diff', [(900,)]))
+        container.exec_run.reset_mock()
+        self.assertNotIn('peers', self.app.recovery_view())
+        container.exec_run.assert_not_called()
+
+    def test_a_probe_that_fails_says_nothing(self):
+        container = self.app.docker_client.containers.get.return_value
+        container.exec_run.side_effect = lambda command: (
+            (0, b'') if '10.0.0.3' in command else Exception('no exec'))
+        self.assertEqual({'i1': None, 'i3': True},
+                         self.app._reach_peers(MEMBERS))
 
     def test_the_recovery_view_of_a_stopped_member(self):
         self.app.adm.query.side_effect = Exception('refused')
@@ -778,7 +818,10 @@ class ManagerMixinTest(trove_testtools.TestCase):
         self.manager.renew_lease(None, 60)
         self.manager.remember_sync_set(None, 'i1', ['i2'], lsn=7)
         self.manager.app.remember_sync_set.assert_called_once_with(
-            'i1', ['i2'], lsn=7)
+            'i1', ['i2'], lsn=7, alone=False)
+        self.manager.remember_sync_set(None, 'i1', None, alone=True)
+        self.manager.app.remember_sync_set.assert_called_with(
+            'i1', None, lsn=None, alone=True)
         self.manager.fence_member(None)
         self.assertEqual({'lsn': 1}, self.manager.promote_member(
             None, {'i1': '10.0.0.1'}, 'sync'))
