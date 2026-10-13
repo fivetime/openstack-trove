@@ -521,32 +521,39 @@ class PostgresqlClusterAppMixin(object):
         container = self.docker_client.containers.get(readyport.CONTAINER_NAME)
         user = (self._read_cluster().get('replication_user') or {}).get(
             'name') or 'postgres'
+        port = cfg.get_configuration_property('postgresql_port')
 
         def probe(ip):
             code, _output = container.exec_run(
-                ['pg_isready', '-h', ip, '-p', str(self.port),
+                ['pg_isready', '-h', ip, '-p', str(port),
                  '-t', str(timeout), '-U', user])
             return code in (0, 1)
         pool = futures.ThreadPoolExecutor(max_workers=len(others))
         try:
             asked = {i: pool.submit(probe, ip) for i, ip in others.items()}
-            futures.wait(asked.values(), timeout=timeout + 0.5)
+            # A probe that fails takes the timeout, and the exec some
+            # more.
+            futures.wait(asked.values(), timeout=timeout + 1)
         finally:
             pool.shutdown(wait=False)
         reached = {}
         for i, future in asked.items():
             try:
                 reached[i] = future.result(timeout=0)
+            except futures.TimeoutError:
+                LOG.warning("The probe of %s is not back in time.",
+                            others[i])
+                reached[i] = None
             except Exception as err:
-                LOG.debug("No probe of %s: %s", others[i], err)
+                LOG.warning("No probe of %s: %s", others[i], err)
                 reached[i] = None
         if reached != self._reached:
-            LOG.info("On the tenant network, this member reaches %s and "
-                     "not %s.",
-                     ', '.join(others[i] for i, r in reached.items() if r)
-                     or 'no member',
-                     ', '.join(others[i] for i, r in reached.items()
-                               if not r) or 'nobody')
+            def which(wanted):
+                return ', '.join(others[i] for i, r in reached.items()
+                                 if r is wanted) or 'nobody'
+            LOG.info("On the tenant network, this member reaches %s, not "
+                     "%s; no answer about %s.", which(True), which(False),
+                     which(None))
             self._reached = reached
         return reached
 

@@ -32,7 +32,6 @@ class FakeApp(cluster.PostgresqlClusterAppMixin):
         self.adm = mock.Mock()
         self.docker_client = mock.MagicMock()
         self.datadir = '/var/lib/postgresql/data/pgdata'
-        self.port = 5432
         self.database_service_uid = '999'
         self.database_service_gid = '999'
         self.calls = []
