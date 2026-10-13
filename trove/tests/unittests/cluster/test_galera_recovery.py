@@ -167,6 +167,13 @@ class GaleraRecoveryTest(trove_testtools.TestCase):
         self._check_at(92)
         self.assertEqual(['i1', 'i1'], self._bootstraps())
 
+    def test_the_watch_ends_when_another_replica_freed_the_cluster(self):
+        self.recovery.forming_since['c1'] = 10
+        self.db_cluster.task_status = ClusterTasks.NONE
+        self._check_at(0)
+        # (The members here wait for a decision: that watch stays.)
+        self.assertNotIn('c1', self.recovery.forming_since)
+
     def test_the_most_advanced_member_forms_the_cluster(self):
         self.answers['i3'] = _answer('10.0.0.3', seqno=12)
         self._check_at(0)

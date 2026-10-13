@@ -230,6 +230,7 @@ class PostgresqlGuestAPITest(trove_testtools.TestCase):
             api.follow_primary({'id': 'i1', 'host': '10.0.0.1'})
         with mock.patch.object(api, '_cast') as cast:
             api.rejoin_cluster({'id': 'i1', 'host': '10.0.0.1'})
+            api.fence_member(wait=False)
         self.assertEqual(
             [mock.call('install_cluster', 3600, version='1.0',
                        cluster_config={'members': {}}),
@@ -242,14 +243,17 @@ class PostgresqlGuestAPITest(trove_testtools.TestCase):
                        primary_id=None),
              mock.call('get_member_role', 15, version='1.0'),
              mock.call('renew_lease', 15, version='1.0', ttl=60),
-             mock.call('fence_member', 600, version='1.0'),
+             mock.call('fence_member', 15, version='1.0'),
              mock.call('promote_member', 600, version='1.0',
                        members={'i1': '10.0.0.1'}, mode='sync'),
              mock.call('follow_primary', 600, version='1.0',
                        primary={'id': 'i1', 'host': '10.0.0.1'})],
             call.call_args_list)
-        cast.assert_called_once_with('rejoin_cluster', version='1.0',
-                                     primary={'id': 'i1', 'host': '10.0.0.1'})
+        self.assertEqual(
+            [mock.call('rejoin_cluster', version='1.0',
+                       primary={'id': 'i1', 'host': '10.0.0.1'}),
+             mock.call('fence_member', version='1.0')],
+            cast.call_args_list)
 
 
 class PostgresqlTasksTest(trove_testtools.TestCase):

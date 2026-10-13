@@ -177,6 +177,8 @@ class ClusterRecovery(object):
         if db_cluster.task_status == ClusterTasks.RECOVERING_CLUSTER:
             self._follow(context, db_cluster)
             return
+        # Not recovering any more: another replica freed it meanwhile.
+        self.forming_since.pop(cluster_id, None)
         if db_cluster.task_status != ClusterTasks.NONE:
             return
         members = self._members(context, cluster_id)

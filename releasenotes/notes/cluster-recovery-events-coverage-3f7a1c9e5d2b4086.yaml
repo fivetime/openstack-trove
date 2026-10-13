@@ -56,3 +56,17 @@ upgrade:
     The task manager may run with several replicas; set ``[coordination]
     backend_url`` so that they share the clusters. The conductor and the
     task managers are to be upgraded before the guest images.
+fixes:
+  - |
+    A task manager replica that followed a cluster's recovery which
+    another replica then freed kept looking at the cluster every
+    recovery interval for ever; the watch ends with the next look now.
+  - |
+    A PostgreSQL failover waited up to ``agent_call_high_timeout`` (180
+    seconds) for the former primary's answer to the fence, and once
+    lost that answer on production; the fence is now told without
+    waiting when the former primary already takes no writes, and waited
+    for ``agent_call_low_timeout`` seconds otherwise. On the guest, the
+    fence stops the container (a fast stop by the image's stop signal)
+    instead of ``pg_ctl stop`` inside it, after which the container
+    restarted by itself as a primary with its port closed.

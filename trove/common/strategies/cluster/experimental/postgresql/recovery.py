@@ -183,6 +183,8 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
         if db_cluster.task_status == ClusterTasks.RECOVERING_CLUSTER:
             self._follow(context, db_cluster)
             return
+        # Not recovering any more: another replica freed it meanwhile.
+        self.forming_since.pop(cluster_id, None)
         if db_cluster.task_status != ClusterTasks.NONE:
             return
         members = self._members(context, cluster_id)
@@ -544,9 +546,15 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
                      now):
         mem = self.memory[cluster_id]
         if old_id in top.reachable:
-            LOG.info("Cluster %s: fencing the former primary %s.",
-                     cluster_id, old_id)
-            self._tell(context, old_id, 'fence_member')
+            # A primary that answers that it takes no writes already
+            # closed its port: the fence is told, not waited for. The
+            # wait for the others is short; the fence closes the port
+            # on the member's next tick whether or not it answers.
+            wait = (top.answer(old_id) or {}).get('writable', True)
+            LOG.info("Cluster %s: fencing the former primary %s%s.",
+                     cluster_id, old_id,
+                     '' if wait else ' (it takes no writes already)')
+            self._tell(context, old_id, 'fence_member', wait=wait)
         members = self.guest_factory(
             context, self._member(chosen)).get_cluster_context()['members']
         result = self.guest_factory(context, self._member(chosen)

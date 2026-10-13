@@ -818,9 +818,11 @@ class PostgresqlClusterAppMixin(object):
     def fence_member(self):
         """The task manager is moving the primary elsewhere: no more
         writes here. The write port closes with the next tick, the
-        lease is gone, and the server stops: a fast stop after a
-        checkpoint when it answers (a rewind is quick then), a plain
-        stop otherwise.
+        lease is gone, and the server stops: a checkpoint when it
+        answers (a rewind is quick then), then the container is
+        stopped, which is a fast stop (the image's stop signal is
+        SIGINT). Not pg_ctl stop inside the container: the container
+        restarts on its own then (its restart policy), as a primary.
         """
         LOG.info("Fencing the member: the primary is moving elsewhere.")
         self.fenced = True
@@ -831,11 +833,6 @@ class PostgresqlClusterAppMixin(object):
             self.adm.psql("CHECKPOINT")
         except Exception as err:
             LOG.info("No checkpoint (%s).", err)
-        try:
-            docker_util.run_command(
-                self.docker_client, 'pg_ctl stop -m fast -D %s' % self.datadir)
-        except Exception as err:
-            LOG.info("No fast stop (%s); stopping the container.", err)
         self.stop_db()
 
     def promote_member(self, members, mode):

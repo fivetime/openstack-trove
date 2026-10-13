@@ -748,7 +748,9 @@ class FailoverTest(RecoveryTestBase):
              'update_cluster_members', 'create_member_slot',
              'rejoin_cluster', 'renew_lease'],
             [c[0] for c in self.calls])
-        self.assertEqual(('fence_member', 'i1'), self.calls[0])
+        # It takes no writes already: the fence is told, not waited for.
+        self.assertEqual(('fence_member', 'i1', {'wait': False}),
+                         self.calls[0])
         self.assertEqual(('create_member_slot', 'i2', 'i1'), self.calls[6])
         self.assertEqual(('rejoin_cluster', 'i1',
                           {'id': 'i2', 'host': '10.0.0.2'}), self.calls[7])
@@ -774,7 +776,35 @@ class FailoverTest(RecoveryTestBase):
         self.calls = []
         self._check_at(170)
         self.assertEqual(['i2'], self._promotions())
-        self.assertEqual(('fence_member', 'i1'), self.calls[0])
+        self.assertEqual(('fence_member', 'i1', {'wait': False}),
+                         self.calls[0])
+
+    def test_the_fence_is_waited_for_while_the_old_primary_writes(self):
+        # Cut off from the standbys but still writable as far as it
+        # knows: the failover waits out its lease, then fences it and
+        # waits (briefly) for the fence before promoting.
+        self._healthy()
+        self._check_at(0)
+        self._primary_gone()
+        self.answers['i1'] = primary('10.0.0.1', no_standby_for=100,
+                                     self_id='i1')
+        self.calls = []
+        self._check_at(100)
+        self._check_at(140)
+        self.assertEqual([], self._promotions())
+        self._check_at(180)
+        self.assertEqual(['i2'], self._promotions())
+        self.assertEqual(('fence_member', 'i1', {'wait': True}),
+                         self.calls[0])
+
+    def test_the_watch_ends_when_another_replica_freed_the_cluster(self):
+        # This replica followed the recovery; the other freed the
+        # cluster: the next look at the healthy cluster ends the watch.
+        self._healthy()
+        self.recovery.forming_since['c1'] = 10
+        self.assertTrue(self.recovery.still_watching('c1'))
+        self._check_at(100)
+        self.assertFalse(self.recovery.still_watching('c1'))
 
     def test_a_primary_alone_for_longer_is_replaced_only_when_forced(self):
         self._healthy()

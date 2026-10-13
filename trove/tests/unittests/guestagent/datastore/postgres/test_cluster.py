@@ -588,20 +588,19 @@ class FailoverTest(ClusterAppTestBase):
     def test_fence(self):
         self._answers()
         self.app.renew_lease(60)
+        # A checkpoint, then the container is stopped (a fast stop by
+        # the image's stop signal); never pg_ctl stop in the container,
+        # after which the container restarts by itself.
         with mock.patch.object(cluster.docker_util, 'run_command') as run:
             self.app.fence_member()
         self.assertIn('CHECKPOINT', self.queries)
-        run.assert_called_once_with(
-            self.app.docker_client,
-            'pg_ctl stop -m fast -D %s' % self.app.datadir)
+        run.assert_not_called()
         self.assertEqual([('stop_db',)], self.app.calls)
         self.assertTrue(self.app.fenced)
         self.assertFalse(self.app.lease_fresh())
         # A server that does not answer stops all the same.
         self.app.adm.psql.side_effect = Exception('refused')
-        with mock.patch.object(cluster.docker_util, 'run_command',
-                               side_effect=Exception('no container')):
-            self.app.fence_member()
+        self.app.fence_member()
         self.assertEqual([('stop_db',), ('stop_db',)], self.app.calls)
 
     def test_promote(self):

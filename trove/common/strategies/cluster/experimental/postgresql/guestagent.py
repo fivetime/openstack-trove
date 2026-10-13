@@ -94,11 +94,16 @@ class PostgresqlGuestAgentAPI(common_guestagent.ClusterGuestAgentAPI):
                    primary_id=primary_id, members=members, lsn=lsn,
                    alone=alone)
 
-    def fence_member(self):
+    def fence_member(self, wait=True):
         """On a primary that is being replaced: no more writes, the
-        server stops.
+        server stops. Waited for briefly (the checkpoint before the
+        stop may take a while, and the failover need not wait for it),
+        or not at all.
         """
-        self._call("fence_member", self.agent_high_timeout,
+        if not wait:
+            self._cast("fence_member", version=guest_api.API.API_BASE_VERSION)
+            return
+        self._call("fence_member", self.agent_low_timeout,
                    version=guest_api.API.API_BASE_VERSION)
 
     def promote_member(self, members, mode):
