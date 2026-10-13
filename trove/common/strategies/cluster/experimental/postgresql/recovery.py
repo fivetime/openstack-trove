@@ -71,6 +71,10 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
         # id and address, where it was, which standbys streamed from it
         # (the synchronous set), and when its lease was last renewed.
         self.memory = {}
+        # When this task manager first looked at each cluster: a lease
+        # it does not know of (granted by the task manager before a
+        # restart) is taken as renewed then.
+        self.first_seen = {}
         # When a member was last told to follow, rejoin or be rebuilt.
         self.last_action = {}
 
@@ -127,7 +131,8 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
     def _decide(self, context, db_cluster, members, views):
         self._current_members = members
         top = topology.Topology(members, views)
-        primary_id, host = self._expected_primary(db_cluster.id, top)
+        primary_id, host = self._expected_primary(context, db_cluster.id,
+                                                  top)
         self._failover(context, db_cluster, top, primary_id, host,
                        'decided on')
 
@@ -160,6 +165,7 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
             return
         if any(self._member_busy(member) for member in members):
             return
+        self.first_seen.setdefault(cluster_id, time.monotonic())
         views = self._views(context, members)
         top = topology.Topology(members, views)
         if not top.reachable:
@@ -186,7 +192,8 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
                 self._healthy(context, cluster_id, top, leader, now)
                 return
         else:
-            primary_id, host = self._expected_primary(cluster_id, top)
+            primary_id, host = self._expected_primary(context, cluster_id,
+                                                      top)
             dead, why = topology.primary_dead(
                 top, primary_id, host, self.conf.cluster_recovery_grace)
         since = self.waiting_since.setdefault(cluster_id, now)
@@ -209,11 +216,28 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
         self.memory.setdefault(cluster_id, {})['failing_since'] = since
         self._failover(context, db_cluster, top, primary_id, host, why)
 
-    def _expected_primary(self, cluster_id, top):
+    def _expected_primary(self, context, cluster_id, top):
+        """The primary the members follow and its address: as the task
+        manager remembers them, or as the members say; the address, when
+        no standby streams any more and the task manager has restarted,
+        from the members' list of the cluster.
+        """
         mem = self.memory.get(cluster_id) or {}
         voted_id, voted_host = top.expected_primary()
-        return (mem.get('primary_id') or voted_id,
-                mem.get('primary_ip') or voted_host)
+        primary_id = mem.get('primary_id') or voted_id
+        host = mem.get('primary_ip') or voted_host
+        if primary_id and not host:
+            host = self._address_of(context, top, primary_id)
+        return primary_id, host
+
+    def _address_of(self, context, top, member_id):
+        for other in top.reachable:
+            known = self._tell(context, other, 'get_cluster_context')
+            if known is not FAILED and known:
+                address = (known.get('members') or {}).get(member_id)
+                if address:
+                    return address
+        return None
 
     def _healthy(self, context, cluster_id, top, leader, now):
         """A primary answers: it keeps its lease, the task manager
@@ -230,7 +254,9 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
                    lsn=answer.get('lsn'), timeline=answer.get('timeline'),
                    sync_set=sync_set)
         self._renew_lease(context, cluster_id, leader)
-        self._share_sync_set(context, top, leader, sync_set)
+        self._share_sync_set(context, top, leader, sync_set,
+                             answer.get('lsn')
+                             if top.mode == topology.ASYNC else None)
         host = answer.get('ip')
         primary = {'id': leader, 'host': host}
         for member_id in top.reachable:
@@ -278,21 +304,48 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
                     self._slot_then(context, leader, member_id,
                                     'rejoin_cluster', primary)
 
-    def _share_sync_set(self, context, top, leader, sync_set):
-        """Every other member keeps the standbys the primary streams to,
-        told only when what it keeps differs: the set outlives both the
-        primary and the task manager's memory.
+    def _share_sync_set(self, context, top, leader, sync_set, lsn=None):
+        """Every other member keeps the standbys the primary streams to
+        and, in async mode, where the primary is: they outlive both the
+        primary and the task manager's memory. A member is told when what
+        it keeps differs, or when the primary has moved on by more than
+        half the lag a failover may lose since it was last told.
         """
-        record = {'primary_id': leader, 'members': sync_set}
+        step = (self.conf.cluster_failover_max_lag_bytes or 0) // 2
         for member_id in top.reachable:
             if member_id == leader:
                 continue
-            if top.answer(member_id).get('sync_set') != record:
+            kept = top.answer(member_id).get('sync_set') or {}
+            stale = (kept.get('primary_id') != leader or
+                     kept.get('members') != sync_set)
+            if lsn is not None:
+                stale = stale or kept.get('lsn') is None or \
+                    lsn - kept['lsn'] > step
+            if stale:
                 self._tell(context, member_id, 'remember_sync_set', leader,
-                           sync_set)
+                           sync_set, lsn=lsn)
 
     @staticmethod
-    def _known_sync_set(mem, top, primary_id):
+    def _kept(top, primary_id):
+        """What the members keep of the given primary."""
+        kept = [top.answer(i).get('sync_set') for i in top.reachable]
+        return [k for k in kept
+                if k and k.get('primary_id') == primary_id]
+
+    @classmethod
+    def _known_lsn(cls, mem, top, primary_id):
+        """Where the gone primary last was: as the task manager
+        remembers it, or else the furthest the members keep.
+        """
+        if mem.get('primary_id') == primary_id and \
+                mem.get('lsn') is not None:
+            return mem['lsn']
+        kept = [k['lsn'] for k in cls._kept(top, primary_id)
+                if k.get('lsn') is not None]
+        return max(kept) if kept else None
+
+    @classmethod
+    def _known_sync_set(cls, mem, top, primary_id):
         """The standbys the gone primary last reported streaming: as
         the task manager remembers it, or else as the members keep it
         (all of the sets they keep for that primary together, the safe
@@ -301,10 +354,8 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
         if mem.get('primary_id') == primary_id and \
                 mem.get('sync_set') is not None:
             return mem['sync_set']
-        kept = [top.answer(i).get('sync_set') for i in top.reachable]
-        kept = [k for k in kept
-                if k and k.get('primary_id') == primary_id and
-                k.get('members') is not None]
+        kept = [k for k in cls._kept(top, primary_id)
+                if k.get('members') is not None]
         if not kept:
             return None
         return sorted(set().union(*(k['members'] for k in kept)))
@@ -344,17 +395,22 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
                         "%s.", cluster_id, primary_id, why, quorum_why)
             return
         chosen = topology.choose(top, candidate_ids)
+        last_lsn = self._known_lsn(mem, top, primary_id)
         if mode == topology.ASYNC and not topology.lag_ok(
-                top, chosen, mem.get('lsn'),
+                top, chosen, last_lsn,
                 self.conf.cluster_failover_max_lag_bytes):
             LOG.error("Cluster %s: the primary %s is gone (%s), but the best "
                       "standby %s is at %s, more than %s bytes behind where "
                       "the primary was (%s); an operator decides.",
                       cluster_id, primary_id, why, chosen,
                       top.answer(chosen).get('lsn'),
-                      self.conf.cluster_failover_max_lag_bytes, mem['lsn'])
+                      self.conf.cluster_failover_max_lag_bytes, last_lsn)
             return
+        # A lease this task manager did not grant may have been granted
+        # by the one before it, until this one first looked.
         lease_at = mem.get('lease_at')
+        if lease_at is None:
+            lease_at = self.first_seen.get(cluster_id)
         lease_left = (lease_at + self.lease_ttl - now
                       if lease_at is not None else 0)
         if lease_left > 0:

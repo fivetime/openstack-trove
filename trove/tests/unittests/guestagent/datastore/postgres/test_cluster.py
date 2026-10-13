@@ -103,9 +103,14 @@ class ClusterFileTest(ClusterAppTestBase):
                           'members': {'i1': '10.0.0.1', 'i2': '10.0.0.2'},
                           'primary_id': None, 'self_id': None},
                          self.app.get_cluster_context())
-        self.app.remember_sync_set('i1', ['i3', 'i2'])
-        self.assertEqual({'primary_id': 'i1', 'members': ['i2', 'i3']},
+        self.assertTrue(self.app.remember_sync_set('i1', ['i3', 'i2']))
+        self.assertEqual({'primary_id': 'i1', 'members': ['i2', 'i3'],
+                          'lsn': None},
                          self.app._read_cluster()['sync_set'])
+        # Only where the primary is changed: not worth a line in the log.
+        self.assertFalse(self.app.remember_sync_set('i1', ['i2', 'i3'],
+                                                    lsn=5))
+        self.assertEqual(5, self.app._read_cluster()['sync_set']['lsn'])
         # Root alone reads the file: the replication password is in it.
         cluster.operating_system.chmod.assert_called_with(
             cluster.CLUSTER_FILE, cluster.operating_system.FileMode.SET_USR_RW,
@@ -771,9 +776,9 @@ class ManagerMixinTest(trove_testtools.TestCase):
     def test_the_failover_calls(self):
         self.manager.app.promote_member.return_value = {'lsn': 1}
         self.manager.renew_lease(None, 60)
-        self.manager.remember_sync_set(None, 'i1', ['i2'])
+        self.manager.remember_sync_set(None, 'i1', ['i2'], lsn=7)
         self.manager.app.remember_sync_set.assert_called_once_with(
-            'i1', ['i2'])
+            'i1', ['i2'], lsn=7)
         self.manager.fence_member(None)
         self.assertEqual({'lsn': 1}, self.manager.promote_member(
             None, {'i1': '10.0.0.1'}, 'sync'))

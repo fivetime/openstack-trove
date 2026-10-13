@@ -221,7 +221,8 @@ class RecoveryTestBase(trove_testtools.TestCase):
                             (k,) if k else ())))
                 # Kept apart: told on every change of the set.
                 g.remember_sync_set.side_effect = (
-                    lambda *a, _i=member.id: self.shared.append((_i,) + a))
+                    lambda *a, _i=member.id, lsn=None: self.shared.append(
+                        (_i,) + a + ((lsn,) if lsn is not None else ())))
                 g.promote_member.side_effect = (
                     lambda members, mode, _i=member.id:
                     self.calls.append(('promote', _i, mode)) or
@@ -617,6 +618,68 @@ class FailoverTest(RecoveryTestBase):
         self._check_at(0)
         self._check_at(100)
         self.assertEqual([], self._promotions())
+
+    def _async(self):
+        for answer in self.answers.values():
+            if answer:
+                answer['mode'] = 'async'
+
+    def test_where_the_async_primary_is_kept_by_the_members(self):
+        # Sent with the set; again only once the primary has moved on by
+        # more than half the lag a failover may lose.
+        self._healthy()
+        self._async()
+        self._check_at(0)
+        self.assertEqual([('i2', 'i1', ['i2', 'i3'], 1000),
+                          ('i3', 'i1', ['i2', 'i3'], 1000)], self.shared)
+        for i in ('i2', 'i3'):
+            self.answers[i]['sync_set'] = {
+                'primary_id': 'i1', 'members': ['i2', 'i3'], 'lsn': 1000}
+        self.shared = []
+        self.answers['i1']['lsn'] = 1000 + MiB // 2
+        self._check_at(30)
+        self.assertEqual([], self.shared)
+        self.answers['i1']['lsn'] = 1001 + MiB // 2
+        self._check_at(60)
+        self.assertEqual(['i2', 'i3'], [c[0] for c in self.shared])
+
+    def test_the_lag_after_a_restart(self):
+        # The task manager restarted: where the primary was is what the
+        # members keep, and the best standby is too far behind it.
+        self._primary_gone()
+        self._async()
+        for i in ('i2', 'i3'):
+            self.answers[i]['sync_set'] = {
+                'primary_id': 'i1', 'members': ['i2', 'i3'],
+                'lsn': 1500 + 2 * MiB}
+        self._check_at(0)
+        self._check_at(100)
+        self.assertEqual([], self._promotions())
+        # Nothing kept: nothing to compare with, the failover goes on.
+        for i in ('i2', 'i3'):
+            self.answers[i].pop('sync_set')
+        self._check_at(130)
+        self.assertEqual(['i2'], self._promotions())
+
+    def test_a_lease_granted_before_a_restart(self):
+        # The task manager first looks at 100: the primary may hold a
+        # lease its predecessor renewed just before, until 160.
+        self._primary_gone()
+        self._check_at(100)
+        self._check_at(130)
+        self.assertEqual([], self._promotions())
+        self._check_at(160)
+        self.assertEqual(['i2'], self._promotions())
+
+    def test_the_address_of_the_primary_after_a_restart(self):
+        # No standby streams and the task manager has no memory: the
+        # address comes from the members' list of the cluster.
+        self._primary_gone()
+        top = pg_recovery.topology.Topology(
+            self.members, [(m, self.answers[m.id]) for m in self.members])
+        self.recovery._current_members = self.members
+        self.assertEqual(('i1', '10.0.0.1'),
+                         self.recovery._expected_primary('ctx', 'c1', top))
 
     def test_async_with_the_best_standby_too_far_behind(self):
         self._healthy()

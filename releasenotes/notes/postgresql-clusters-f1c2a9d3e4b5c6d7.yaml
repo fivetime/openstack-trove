@@ -13,4 +13,8 @@ features:
     other standbys at it and has the old primary rejoin as a standby
     (``pg_rewind``, or a base backup). A primary cut off from its
     standbys and from the task manager's lease closes its write port by
-    itself. Removing the primary switches over to a standby first.
+    itself. Removing the primary switches over to a standby first. The
+    standbys keep what a failover needs to know of the primary (the
+    standbys it streamed to and, in async mode, where it was), so that a
+    task manager that restarts meanwhile decides as safely; it also
+    waits out a lease its predecessor may have granted.

@@ -213,14 +213,20 @@ class PostgresqlClusterAppMixin(object):
     def primary_id(self):
         return self._read_cluster().get('primary_id')
 
-    def remember_sync_set(self, primary_id, members):
-        """The standbys the primary last reported streaming, kept here
-        for the task manager: when the primary is gone, they say which
-        standbys may hold its last acknowledged commits, even to a task
-        manager that has restarted meanwhile.
+    def remember_sync_set(self, primary_id, members, lsn=None):
+        """The standbys the primary last reported streaming, and in
+        async mode where it was, kept here for the task manager: when the
+        primary is gone, they say which standbys may hold its last
+        acknowledged commits and how far behind the best standby is, even
+        to a task manager that has restarted meanwhile. Returns whether
+        the primary or the standbys changed.
         """
-        self._update_cluster(sync_set={'primary_id': primary_id,
-                                       'members': sorted(members)})
+        record = {'primary_id': primary_id, 'members': sorted(members),
+                  'lsn': lsn}
+        kept = self._read_cluster().get('sync_set') or {}
+        self._update_cluster(sync_set=record)
+        return (kept.get('primary_id'), kept.get('members')) != (
+            primary_id, record['members'])
 
     def get_cluster_context(self):
         cluster = self._read_cluster()
@@ -868,10 +874,10 @@ class PostgresqlMemberMixin(cluster_member.ClusterMemberMixin):
     def renew_lease(self, context, ttl):
         self.app.renew_lease(ttl)
 
-    def remember_sync_set(self, context, primary_id, members):
-        LOG.info("The primary %s streams to %s.", primary_id,
-                 ', '.join(sorted(members)) or 'no standby')
-        self.app.remember_sync_set(primary_id, members)
+    def remember_sync_set(self, context, primary_id, members, lsn=None):
+        if self.app.remember_sync_set(primary_id, members, lsn=lsn):
+            LOG.info("The primary %s streams to %s.", primary_id,
+                     ', '.join(sorted(members)) or 'no standby')
 
     def fence_member(self, context):
         self.app.fence_member()
