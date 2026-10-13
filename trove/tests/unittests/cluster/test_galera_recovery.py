@@ -149,10 +149,15 @@ class GaleraRecoveryTest(trove_testtools.TestCase):
 
     def test_the_grace_period_and_the_interval(self):
         self._check_at(0)
+        # Looked at again when the grace period ends, not after the
+        # interval; a cluster not waiting after the interval.
+        self.assertEqual(30, self.recovery.look_again_in('c1'))
         self._check_at(59)
-        self.assertEqual([], self._bootstraps())
+        self.assertEqual(1, self.recovery.look_again_in('c1'))
+        self.assertEqual(30, self.recovery.look_again_in('c9'))
         self._check_at(61)
         self.assertEqual(['i1'], self._bootstraps())
+        self.assertEqual(30, self.recovery.look_again_in('c1'))
         # Were the cluster freed and still waiting: not before the
         # interval.
         self.db_cluster.task_status = ClusterTasks.NONE

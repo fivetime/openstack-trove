@@ -95,7 +95,7 @@ class HubTest(trove_testtools.TestCase):
         db_cluster = mock.Mock(id='c1', datastore_version_id='v1')
         find_by.return_value = db_cluster
         rec = mock.Mock()
-        rec.conf.cluster_recovery_interval = 30
+        rec.look_again_in.return_value = 30
         rec.still_watching.return_value = True
         self.hub.cluster_manager['c1'] = 'postgresql'
         self.hub.recoveries['postgresql'] = rec
@@ -104,6 +104,7 @@ class HubTest(trove_testtools.TestCase):
         rec.check_now.assert_called_once_with('ctx', db_cluster, 'event')
         self.assertEqual({'c1': (1030.0, 'still watching')},
                          self.hub.pending)
+        rec.look_again_in.assert_called_once_with('c1')
         # Settled: nothing more.
         rec.still_watching.return_value = False
         self.hub.pending.clear()

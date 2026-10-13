@@ -33,6 +33,7 @@ renew run out.
 
 from concurrent import futures
 import datetime
+import math
 import random
 import time
 
@@ -74,6 +75,9 @@ class ClusterRecovery(object):
         self.waiting_since = {}
         self.last_try = {}
         self.forming_since = {}
+        # How soon a waiting cluster is to be looked at again (seconds),
+        # when the wait ends before the next interval.
+        self.next_look = {}
         self.guest_factory = guest_factory or self._guest
 
     def _guest(self, context, member):
@@ -156,6 +160,17 @@ class ClusterRecovery(object):
         return (cluster_id in self.waiting_since or
                 cluster_id in self.forming_since)
 
+    def look_again_in(self, cluster_id):
+        """How many seconds until the cluster is to be looked at again:
+        when the wait it is in (the grace period, a lease) ends, else
+        after the recovery interval.
+        """
+        interval = self.conf.cluster_recovery_interval
+        soon = self.next_look.pop(cluster_id, None)
+        if soon is None:
+            return interval
+        return max(1, min(interval, int(math.ceil(soon))))
+
     def check(self, context, db_cluster):
         """One look at a cluster."""
         cluster_id = db_cluster.id
@@ -177,6 +192,8 @@ class ClusterRecovery(object):
         now = time.monotonic()
         since = self.waiting_since.setdefault(cluster_id, now)
         if now - since < self.conf.cluster_recovery_grace:
+            self.next_look[cluster_id] = (
+                self.conf.cluster_recovery_grace - (now - since))
             return
         if now - self.last_try.get(cluster_id, 0) < \
                 self.conf.cluster_recovery_interval:

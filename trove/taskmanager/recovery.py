@@ -16,9 +16,9 @@ replica looks at, and when.
 A cluster is looked at when one of its members says so (a cluster event,
 through the conductor, to every task manager replica), when the scan of
 the database finds a member whose heartbeat is stale or a recovery under
-way, and, while a cluster waits or recovers, again every recovery
-interval; a sweep of every cluster (the old poll) only when configured.
-Each replica looks only at the clusters it covers
+way, and, while a cluster waits or recovers, again when its wait ends or
+after the recovery interval; a sweep of every cluster (the old poll)
+only when configured. Each replica looks only at the clusters it covers
 (``trove.common.coordination``: ``cluster_recovery_coverage`` replicas
 per cluster, all acting, deduplicated by the cluster's recovery task),
 so the replicas share the work and a healthy cluster costs nothing.
@@ -243,7 +243,7 @@ class RecoveryHub(object):
         recovery.check_now(self.context, db_cluster, reason)
         if recovery.still_watching(cluster_id):
             self.request_look(cluster_id, 'still watching',
-                              delay=recovery.conf.cluster_recovery_interval)
+                              delay=recovery.look_again_in(cluster_id))
 
     def _forget(self, cluster_id):
         with self._lock:

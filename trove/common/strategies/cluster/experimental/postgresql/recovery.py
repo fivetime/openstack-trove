@@ -235,10 +235,11 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
                 self.waiting_since.pop(cluster_id, None)
             return
         if now - since < self.conf.cluster_recovery_grace:
+            left = self.conf.cluster_recovery_grace - (now - since)
             LOG.info("Cluster %s: the primary %s seems gone (%s); %s more "
                      "seconds before deciding.", cluster_id, primary_id,
-                     why, int(self.conf.cluster_recovery_grace -
-                              (now - since)))
+                     why, int(left))
+            self.next_look[cluster_id] = left
             return
         if now - self.last_try.get(cluster_id, 0) < \
                 self.conf.cluster_recovery_interval:
@@ -511,6 +512,9 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
             LOG.info("Cluster %s: the primary %s is gone (%s); its lease "
                      "runs %s more seconds.", cluster_id, primary_id, why,
                      int(lease_left) + 1)
+            # Not a try: look again when the lease ends.
+            self.last_try.pop(cluster_id, None)
+            self.next_look[cluster_id] = lease_left
             return
         if not self._unchanged_after_jitter(
                 context, top.members, top.views,

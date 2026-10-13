@@ -230,9 +230,11 @@ class FakeMember(object):
         if self.fenced:
             return S(True, cluster_probe.ABNORMAL, 'fenced')
         if not self.is_primary:
-            if self.streaming():
+            # The receiver reports streaming until the WAL timeout.
+            if (self.streaming() or self.detached_since is None or
+                    now < self.detached_since):
                 return cluster_probe.NORMAL
-            away = now - (self.detached_since or now)
+            away = now - self.detached_since
             return S(True, cluster_probe.ABNORMAL,
                      'not streaming for %d seconds' % away,
                      extra={'disconnected_for': away})
@@ -393,8 +395,9 @@ class FakeGuests(object):
                 target = messaging.Target(
                     topic='guestagent.%s' % member.id, server=member.id,
                     version=guest_api.API.API_LATEST_VERSION)
-                server = rpc.get_server(target, [FakeEndpoint(member,
-                                                              self.stats)])
+                # No encryption key: the seeded instances have none.
+                server = rpc.get_server(
+                    target, [FakeEndpoint(member, self.stats)], key=None)
                 server.start()
                 self.servers.append(server)
         eventlet.spawn_n(self._ticks)
@@ -555,13 +558,17 @@ def main():
     parser.add_argument('--mode', default='sync')
     parser.add_argument('--port', type=int, default=9800)
     parser.add_argument('--seed', action='store_true')
+    parser.add_argument('--seed-only', action='store_true',
+                        help='write the rows and exit (the scan at scale)')
     args, rest = parser.parse_known_args()
     CONF(rest, project='trove')
     rpc.init(CONF)
-    if args.seed:
+    if args.seed or args.seed_only:
         from trove.db import get_db_api
         get_db_api().configure_db()
         seed(args.first, args.clusters)
+        if args.seed_only:
+            return
     guests = FakeGuests(args.first, args.clusters, args.mode)
     guests.start()
     Control.guests = guests

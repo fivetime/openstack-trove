@@ -986,6 +986,23 @@ class FailoverTest(RecoveryTestBase):
         self._check_at(130)
         self.assertEqual(['i2'], self._promotions())
 
+    def test_the_next_look_is_when_the_wait_ends(self):
+        # Seen gone at 100: the grace period ends at 130; then the
+        # lease (and the fence grace) at 175, never later than the
+        # interval; a look that waits for the lease is no failover try,
+        # so the look at 175 is not rate-limited.
+        self._primary_gone()
+        self._check_at(100)
+        self.assertEqual(30, self.recovery.look_again_in('c1'))
+        self.assertEqual(30, self.recovery.look_again_in('c2'))
+        self._check_at(130)
+        self.assertEqual(30, self.recovery.look_again_in('c1'))
+        self._check_at(160)
+        self.assertEqual(15, self.recovery.look_again_in('c1'))
+        self._check_at(175)
+        self.assertEqual(['i2'], self._promotions())
+        self.assertEqual(30, self.recovery.look_again_in('c1'))
+
     def test_a_lease_granted_before_a_restart(self):
         # The task manager first looks at 100: the primary may hold a
         # lease its predecessor (or another replica) renewed just

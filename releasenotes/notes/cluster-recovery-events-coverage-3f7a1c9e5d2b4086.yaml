@@ -1,0 +1,58 @@
+---
+features:
+  - |
+    The task manager looks at a cluster when one of its members reports
+    that something is wrong, instead of polling every cluster. The guest
+    agent's cluster probe sends a ``cluster_event`` through the conductor
+    whenever the member's state changes (normal, abnormal, or a
+    PostgreSQL primary asking for its write lease), again every
+    ``cluster_event_interval`` seconds while it stays abnormal, and never
+    more than once per ``cluster_event_min_interval`` seconds. Every task
+    manager replica receives the event (fanout) and looks at the cluster
+    when it covers it. A cluster that waits for a decision or recovers is
+    looked at again when its wait (the grace period, a lease) ends, or
+    after ``cluster_recovery_interval`` seconds at the latest. A healthy
+    cluster costs the control plane nothing.
+  - |
+    The task manager replicas share the clusters: with ``[coordination]
+    backend_url`` set (a tooz backend, for example
+    ``etcd3+http://coordination-etcd:2379``), the replicas register in a
+    group and each cluster is covered by ``cluster_recovery_coverage``
+    (default 2) of them, chosen by rendezvous hashing, so that a replica
+    that dies leaves no cluster unwatched and adding a replica moves only
+    the clusters it takes. Both covering replicas act; the actions are
+    deduplicated by the cluster's recovery task (compare-and-set). With
+    two replicas, both watch every cluster. Without a backend URL, or
+    until the backend answers, a replica watches every cluster.
+  - |
+    A backstop scan of the database every ``cluster_recovery_scan_interval``
+    seconds (default 300) finds, in one query and without any RPC, the
+    clusters that may need a look: a member whose heartbeat is older than
+    ``agent_heartbeat_expiry``, or a recovery under way.
+  - |
+    A PostgreSQL primary's write lease is renewed on demand: only a
+    primary without standbys (alone) needs one, and it asks for it
+    through a cluster event; ``[postgresql] cluster_lease_ttl`` (default
+    60) is its length. The task manager renews it only when every member
+    it cannot reach has a stale heartbeat too, so that a replica with a
+    network problem of its own cannot keep a primary writable that
+    another replica is about to replace.
+  - |
+    A fake guest for scale tests of the cluster recovery
+    (``trove.tests.scale.fake_guest``): thousands of PostgreSQL-shaped
+    cluster members on a real RabbitMQ, answering every recovery call,
+    heartbeating and reporting cluster events, with an HTTP control to
+    kill and restore primaries. Not part of the guest image.
+upgrade:
+  - |
+    ``tooz`` is a new requirement of the task manager (the coordination
+    of its replicas); the etcd3gw driver needs ``etcd3gw``.
+  - |
+    ``cluster_recovery_check_interval``, the poll of every cluster, now
+    defaults to 0 (off): clusters are looked at on their members' events
+    and by the scan. Set it back to 30 while clusters still run a guest
+    image that sends no cluster events.
+  - |
+    The task manager may run with several replicas; set ``[coordination]
+    backend_url`` so that they share the clusters. The conductor and the
+    task managers are to be upgraded before the guest images.
