@@ -138,6 +138,13 @@ class OctaviaClient(object):
         return self._request('GET', '/listeners/%s' % listener_id)[
             'listener']
 
+    def get_pool(self, pool_id):
+        return self._request('GET', '/pools/%s' % pool_id)['pool']
+
+    def get_health_monitor(self, monitor_id):
+        return self._request('GET', '/healthmonitors/%s' % monitor_id)[
+            'healthmonitor']
+
     def create_pool(self, listener_id, name):
         body = {'pool': {
             'name': name, 'listener_id': listener_id, 'protocol': 'TCP',
@@ -164,14 +171,34 @@ class OctaviaClient(object):
 
     # Waiting
 
-    def wait_active(self, lb_id):
-        """The load balancer once Octavia is done with it."""
+    def wait_active(self, lb_id, **children):
+        """The load balancer once Octavia is done with it, and with the
+        children named (``listener=``, ``pool=``, ``health_monitor=``
+        an id). The balancer saying ACTIVE does not mean a child it is
+        making is: a provider reports the balancer ACTIVE on its own
+        account (the OVN provider does on a member's health change)
+        while the child is still PENDING_CREATE, and Octavia refuses
+        the next request on that child as immutable (409).
+        """
+        getters = {'listener': self.get_listener, 'pool': self.get_pool,
+                   'health_monitor': self.get_health_monitor}
+
         def done(lb):
             status = lb['provisioning_status']
             if status == ERROR:
                 raise LoadBalancerError(name=lb.get('name') or lb_id,
                                         reason='provisioning failed')
-            return status == ACTIVE
+            if status != ACTIVE:
+                return False
+            for kind, child_id in children.items():
+                child_status = getters[kind](child_id)['provisioning_status']
+                if child_status == ERROR:
+                    raise LoadBalancerError(
+                        name='%s %s' % (kind, child_id),
+                        reason='provisioning failed')
+                if child_status != ACTIVE:
+                    return False
+            return True
         try:
             return utils.poll_until(
                 lambda: self.get_load_balancer(lb_id), done,
@@ -223,11 +250,11 @@ def _ensure_listener(client, lb, name, port):
     LOG.info("Load balancer %s: adding the listener on port %s.", name,
              port)
     listener = client.create_listener(lb['id'], listener_name, port)
-    client.wait_active(lb['id'])
+    client.wait_active(lb['id'], listener=listener['id'])
     pool = client.create_pool(listener['id'], listener_name)
-    client.wait_active(lb['id'])
-    client.create_health_monitor(pool['id'], listener_name)
-    client.wait_active(lb['id'])
+    client.wait_active(lb['id'], pool=pool['id'])
+    monitor = client.create_health_monitor(pool['id'], listener_name)
+    client.wait_active(lb['id'], health_monitor=monitor['id'])
     return pool['id']
 
 
@@ -243,7 +270,7 @@ def _ensure_members(client, lb, name, pool_id, members):
              'protocol_port': m['protocol_port'],
              'subnet_id': m['subnet_id'], 'admin_state_up': True}
             for m in members])
-        client.wait_active(lb['id'])
+        client.wait_active(lb['id'], pool=pool_id)
 
 
 def ensure_load_balancer(client, name, vip_subnet_id, members, port,
@@ -284,11 +311,11 @@ def ensure_load_balancer(client, name, vip_subnet_id, members, port,
                                          description)
         client.wait_active(lb['id'])
         listener = client.create_listener(lb['id'], name, port)
-        client.wait_active(lb['id'])
+        client.wait_active(lb['id'], listener=listener['id'])
         pool = client.create_pool(listener['id'], name)
-        client.wait_active(lb['id'])
-        client.create_health_monitor(pool['id'], name)
-        client.wait_active(lb['id'])
+        client.wait_active(lb['id'], pool=pool['id'])
+        monitor = client.create_health_monitor(pool['id'], name)
+        client.wait_active(lb['id'], health_monitor=monitor['id'])
         pool_id = pool['id']
 
     _ensure_members(client, lb, name, pool_id, members)

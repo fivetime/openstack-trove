@@ -1,0 +1,12 @@
+---
+fixes:
+  - |
+    A cluster's load balancer is made one object at a time, each after
+    Octavia reports the balancer ACTIVE again. The balancer saying so
+    does not mean the listener, pool or health monitor just made is:
+    the OVN provider reports the balancer ACTIVE on its own account (a
+    member's health changed) while the pool is still PENDING_CREATE,
+    and Octavia refused the health monitor on it as immutable (409),
+    which failed the cluster. Trove now waits for the object it just
+    made (and for the pool after replacing its members) as well as for
+    the balancer.

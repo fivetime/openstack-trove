@@ -19,18 +19,26 @@ from trove.tests.unittests import trove_testtools
 
 class FakeOctavia(object):
     """Octavia's REST API, as far as Trove uses it: one load balancer at a
-    time, ACTIVE as soon as it is looked at.
+    time, ACTIVE as soon as it is looked at. A listener, pool or health
+    monitor is made PENDING_CREATE and goes ACTIVE with the balancer,
+    the children before it as Octavia writes a provider's status; with
+    ``balancer_first`` the balancer goes ACTIVE on its own and a child
+    only once it is looked at itself (the OVN provider reports the
+    balancer ACTIVE on a member's health change). A request on a child
+    that is not ACTIVE is refused as immutable, as Octavia does.
     """
 
     def __init__(self):
         self.lbs = {}
         self.listeners = {}
         self.pools = {}
+        self.monitors = {}
         self.members = {}
         self.calls = []
         self.next_id = 0
         # Statuses the next GETs of a load balancer answer with.
         self.statuses = []
+        self.balancer_first = False
 
     def _id(self, kind):
         self.next_id += 1
@@ -73,31 +81,75 @@ class FakeOctavia(object):
                 lb['provisioning_status'] = self.statuses.pop(0)
             else:
                 lb['provisioning_status'] = 'ACTIVE'
+            if lb['provisioning_status'] == 'ACTIVE' and \
+                    not self.balancer_first:
+                self._children_active()
             return self._response(200, {'loadbalancer': lb})
         if method == 'POST' and path == '/listeners':
             listener = dict(body['listener'], id=self._id('li'),
-                            default_pool_id=None)
+                            default_pool_id=None,
+                            provisioning_status='PENDING_CREATE')
             self.listeners[listener['id']] = listener
             self.lbs[listener['loadbalancer_id']]['listeners'].append(
                 {'id': listener['id']})
             return self._response(201, {'listener': listener})
         if parts[0] == 'listeners' and len(parts) == 2:
-            return self._response(200, {'listener': self.listeners[parts[1]]})
+            return self._response(200, {'listener': self._looked_at(
+                self.listeners[parts[1]])})
         if method == 'POST' and path == '/pools':
-            pool = dict(body['pool'], id=self._id('pool'))
+            refused = self._immutable('Listener',
+                                      self.listeners[body['pool'][
+                                          'listener_id']])
+            if refused:
+                return refused
+            pool = dict(body['pool'], id=self._id('pool'),
+                        provisioning_status='PENDING_CREATE')
             self.pools[pool['id']] = pool
             self.listeners[pool['listener_id']]['default_pool_id'] = pool['id']
             self.members[pool['id']] = []
             return self._response(201, {'pool': pool})
+        if parts[0] == 'pools' and len(parts) == 2:
+            return self._response(200, {'pool': self._looked_at(
+                self.pools[parts[1]])})
         if method == 'POST' and path == '/healthmonitors':
-            return self._response(201, {'healthmonitor': dict(
-                body['healthmonitor'], id=self._id('hm'))})
+            refused = self._immutable(
+                'Pool', self.pools[body['healthmonitor']['pool_id']])
+            if refused:
+                return refused
+            monitor = dict(body['healthmonitor'], id=self._id('hm'),
+                           provisioning_status='PENDING_CREATE')
+            self.monitors[monitor['id']] = monitor
+            return self._response(201, {'healthmonitor': monitor})
+        if parts[0] == 'healthmonitors' and len(parts) == 2:
+            return self._response(200, {'healthmonitor': self._looked_at(
+                self.monitors[parts[1]])})
         if parts[0] == 'pools' and parts[-1] == 'members':
             if method == 'GET':
                 return self._response(200, {'members': self.members[parts[1]]})
+            refused = self._immutable('Pool', self.pools[parts[1]])
+            if refused:
+                return refused
             self.members[parts[1]] = body['members']
+            self.pools[parts[1]]['provisioning_status'] = 'PENDING_UPDATE'
             return self._response(202)
         raise AssertionError('unexpected %s %s' % (method, path))
+
+    def _children_active(self):
+        for child in list(self.listeners.values()) + list(
+                self.pools.values()) + list(self.monitors.values()):
+            child['provisioning_status'] = 'ACTIVE'
+
+    @staticmethod
+    def _looked_at(child):
+        child['provisioning_status'] = 'ACTIVE'
+        return child
+
+    def _immutable(self, kind, child):
+        if child.get('provisioning_status', 'ACTIVE') == 'ACTIVE':
+            return None
+        return self._response(409, {
+            'faultstring': '%s %s is immutable and cannot be updated.'
+                           % (kind, child['id'])})
 
     def active_lb(self, name, port=3306, members=()):
         """A load balancer as Octavia would hold it after a create."""
@@ -109,8 +161,8 @@ class FakeOctavia(object):
                     'default_pool_id': self._id('pool')}
         self.listeners[listener['id']] = listener
         lb['listeners'].append({'id': listener['id']})
-        self.pools[listener['default_pool_id']] = {'id': listener[
-            'default_pool_id']}
+        self.pools[listener['default_pool_id']] = {
+            'id': listener['default_pool_id'], 'provisioning_status': 'ACTIVE'}
         self.members[listener['default_pool_id']] = list(members)
         return lb
 
@@ -201,6 +253,43 @@ class TestLoadBalancer(trove_testtools.TestCase):
             listeners=[(5433, reads)])
         self.assertEqual([], [c for c in self.octavia.calls
                               if c[0] in ('POST', 'PUT', 'DELETE')])
+
+    def test_a_child_still_pending_when_the_balancer_says_active(self):
+        # The OVN provider: the balancer ACTIVE on its own account while
+        # the pool just made is PENDING_CREATE; the health monitor on it
+        # (and the members into it) wait for the pool itself.
+        self.octavia.balancer_first = True
+        reads = [_member('10.0.0.2', port=5434)]
+        lb = loadbalancer.ensure_load_balancer(
+            self.client, 'trove-cluster-c1', 'sub-1', self.members, 5432,
+            listeners=[(5433, reads)])
+        self.assertEqual('ACTIVE', lb['provisioning_status'])
+        self.assertEqual(2, len(self.octavia.monitors))
+        calls = [' '.join(c) for c in self.octavia.calls]
+        # Each child is looked at before the next request touches it.
+        for child in ('li-2', 'pool-3', 'li-5', 'pool-6'):
+            kind = 'listeners' if child.startswith('li') else 'pools'
+            looked = calls.index('GET /%s/%s' % (kind, child))
+            touched = next(i for i, c in enumerate(calls)
+                           if i > looked and c.startswith(('POST', 'PUT')))
+            self.assertLess(looked, touched)
+        self.assertEqual(
+            ['POST /loadbalancers', 'POST /listeners', 'POST /pools',
+             'POST /healthmonitors', 'PUT /pools/pool-3/members',
+             'POST /listeners', 'POST /pools', 'POST /healthmonitors',
+             'PUT /pools/pool-6/members'],
+            [c for c in calls if c.startswith(('POST', 'PUT'))])
+
+    def test_a_child_that_fails(self):
+        self.octavia.balancer_first = True
+        self.octavia._looked_at = lambda child: dict(
+            child, provisioning_status='ERROR')
+        err = self.assertRaises(
+            loadbalancer.LoadBalancerError,
+            loadbalancer.ensure_load_balancer,
+            self.client, 'trove-cluster-c1', 'sub-1', self.members, 3306)
+        self.assertIn('listener li-2', str(err))
+        self.assertIn('provisioning failed', str(err))
 
     def test_the_read_listener_is_added_to_a_balancer_that_lacks_it(self):
         self.octavia.active_lb('trove-cluster-c1', port=5432,
