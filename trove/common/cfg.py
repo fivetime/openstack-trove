@@ -262,6 +262,12 @@ common_opts = [
     cfg.IntOpt('trove_conductor_workers',
                help='Number of workers for the Conductor service. The default '
                'will be the number of CPUs available.'),
+    cfg.IntOpt('conductor_heartbeat_flush_interval', default=5, min=0,
+               help='Seconds between the batches in which the conductor '
+                    'writes the time of the heartbeats that repeat a '
+                    'guest\'s status (one statement per status instead '
+                    'of four per heartbeat). 0 writes every heartbeat '
+                    'as it comes.'),
     cfg.BoolOpt('use_nova_server_config_drive', default=False,
                 help='Use config drive for file injection when booting '
                 'instance.'),

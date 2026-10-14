@@ -21,6 +21,7 @@ from trove.common import cfg
 from trove.common import exception as trove_exception
 from trove.common.rpc import version as rpc_version
 from trove.common.serializable_notification import SerializableNotification
+from trove.conductor import heartbeats
 from trove.conductor.models import LastSeen
 from trove.extensions.common import models as common_models
 from trove.instance import models as inst_models
@@ -37,6 +38,7 @@ class Manager(periodic_task.PeriodicTasks):
 
     def __init__(self):
         super(Manager, self).__init__(CONF)
+        self.keepalives = heartbeats.Keepalives(self._heartbeat_in_full)
 
     def _message_too_old(self, instance_id, method_name, sent):
         fields = {
@@ -85,10 +87,25 @@ class Manager(periodic_task.PeriodicTasks):
         LOG.debug("Instance ID: %(instance)s, Payload: %(payload)s",
                   {"instance": str(instance_id),
                    "payload": str(payload)})
-        status = inst_models.InstanceServiceStatus.find_by(
-            instance_id=instance_id)
+        description = payload.get('service_status')
+        # A repeat of the status written last: its time is written in
+        # the next batch (trove.conductor.heartbeats).
+        if self.keepalives.accept(instance_id, description, sent):
+            return
+        self._heartbeat_in_full(instance_id, description, sent)
 
-        if self._message_too_old(instance_id, 'heartbeat', sent):
+    def _heartbeat_in_full(self, instance_id, description, sent):
+        try:
+            status = inst_models.InstanceServiceStatus.find_by(
+                instance_id=instance_id)
+        except trove_exception.ModelNotFoundError:
+            self.keepalives.forget(instance_id)
+            raise
+
+        # Later heartbeats of the instance may have been batched: the
+        # database's last seen does not know them.
+        if (self.keepalives.seen_later(instance_id, sent) or
+                self._message_too_old(instance_id, 'heartbeat', sent)):
             return
 
         if status.get_status() == svc_status.ServiceStatuses.RESTART_REQUIRED:
@@ -96,12 +113,11 @@ class Manager(periodic_task.PeriodicTasks):
                       "skip heartbeat", instance_id)
             return
 
-        if payload.get('service_status') is not None:
+        if description is not None:
             status.set_status(
-                svc_status.ServiceStatus.from_description(
-                    payload['service_status'])
-            )
+                svc_status.ServiceStatus.from_description(description))
         status.save()
+        self.keepalives.confirmed(instance_id, status.status_id, sent)
 
     def cluster_event(self, context, instance_id, kind, sent=None,
                       cluster_id=None, payload=None):

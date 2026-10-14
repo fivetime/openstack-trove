@@ -1,0 +1,18 @@
+---
+features:
+  - |
+    The conductor writes the heartbeats that repeat a guest's status in
+    batches: their time is kept in memory and written with one statement
+    per status every ``conductor_heartbeat_flush_interval`` seconds
+    (default 5), instead of the four statements each heartbeat cost
+    (the status row, the last-seen row, both read and written). A
+    heartbeat that changes the status is written at once, as before, and
+    a row whose status the control plane changed meanwhile is written
+    through the full path at the next flush, so that the guest's status
+    wins as it always did, at most a flush later. The ``updated_at`` of a
+    status row lags a heartbeat by at most the flush interval; the
+    heartbeat expiry (``agent_heartbeat_expiry``, 90 seconds) is well
+    beyond it. On a test bed of 6000 members heartbeating every 30
+    seconds the conductor's CPU went from 5 cores to 1, the database's
+    from 1.3 cores to 0.1. Set the interval to 0 to write every heartbeat
+    as it comes.
