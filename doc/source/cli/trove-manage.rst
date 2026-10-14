@@ -29,7 +29,7 @@ trove-manage usage
                        [--syslog-log-facility SYSLOG_LOG_FACILITY] [--use-syslog]
                        [--verbose] [--version] [--watch-log-file]
 
-                       {db_sync,db_upgrade,db_downgrade,datastore_update,
+                       {db_sync,db_upgrade,db_downgrade,db_purge,datastore_update,
                        datastore_version_update,db_recreate,
                        db_load_datastore_config_parameters,
                        datastore_version_flavor_add,
@@ -301,6 +301,36 @@ into the database.
 
 ``-h, --help``
   show this help message and exit
+
+trove-manage db_purge
+~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: console
+
+   usage: trove-manage db_purge [-h] [--age_in_days AGE_IN_DAYS] [--dry_run]
+
+Remove the rows of what was deleted more than a number of days ago.
+Trove deletes softly: the row of a deleted instance, cluster, backup,
+configuration group, module, security group or datastore version
+metadata stays with ``deleted`` set, and nothing removed it before.
+The command removes those rows, and with an instance the rows only its
+id ties to it (its service status, the conductor's last-seen marks,
+its root history, its faults and its modules), children before
+parents. A row something live still refers to (the primary of a
+replica, the parent of a live backup, a configuration group an
+instance or cluster uses) is kept until that is gone.
+
+**optional arguments:**
+
+``-h, --help``
+  show this help message and exit
+
+``--age_in_days AGE_IN_DAYS``
+  Remove what was deleted more than this many days ago (default 30;
+  0 removes everything deleted).
+
+``--dry_run``
+  Only count the rows that would be removed.
 
 trove-manage db_recreate
 ~~~~~~~~~~~~~~~~~~~~~~~~

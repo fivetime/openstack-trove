@@ -29,6 +29,7 @@ from trove.common import utils
 from trove.configuration import models as config_models
 from trove.datastore import models as datastore_models
 from trove.db import get_db_api
+from trove.db import purge
 from trove.instance.models import DBInstance
 
 
@@ -60,6 +61,22 @@ class Commands(object):
 
     def db_downgrade(self, version, repo_path=None):
         raise SystemExit(_("Database downgrade is no longer supported."))
+
+    def db_purge(self, age_in_days=30, dry_run=False):
+        """Remove the rows of what was deleted more than age_in_days
+        days ago: instances with what only their id ties to them (the
+        service status, the conductor's last-seen marks, the root
+        history, faults, modules), clusters, backups, configuration
+        groups, modules, security groups, datastore version metadata.
+        """
+        self.db_api.configure_db()
+        counts = purge.purge_deleted(int(age_in_days), dry_run=dry_run)
+        verb = "Would remove" if dry_run else "Removed"
+        for table, n in counts.items():
+            if n:
+                print("%s %d row(s) from %s." % (verb, n, table))
+        print("%s %d row(s) of what was deleted more than %d day(s) ago."
+              % (verb, sum(counts.values()), int(age_in_days)))
 
     def execute(self):
         exec_method = getattr(self, CONF.action.name)
@@ -310,6 +327,21 @@ def main():
             '--version', help='Target version. Defaults to the '
             'latest version.')
         parser.add_argument('--repo_path', help=repo_path_help)
+
+        parser = subparser.add_parser(
+            'db_purge', description='Remove the rows of what was deleted '
+            'more than a number of days ago: instances with their service '
+            'status, last-seen marks, root history, faults and modules; '
+            'clusters; backups; configuration groups; modules; security '
+            'groups; datastore version metadata. A row something live '
+            'still refers to is kept.')
+        parser.add_argument(
+            '--age_in_days', type=int, default=30,
+            help='Remove what was deleted more than this many days ago '
+                 '(default 30; 0 removes everything deleted).')
+        parser.add_argument(
+            '--dry_run', action='store_true',
+            help='Only count the rows that would be removed.')
 
         parser = subparser.add_parser(
             'datastore_update', description='Add or update a datastore. '

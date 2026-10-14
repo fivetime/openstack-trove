@@ -76,3 +76,21 @@ class TestNovaTagsUpgradeTask(trove_testtools.TestCase):
             # never loaded.
             self.commands.set_nova_tags(force=True)
         self.nova.servers.set_tags.assert_not_called()
+
+
+class TestDbPurge(trove_testtools.TestCase):
+
+    def test_prints_what_went(self):
+        with mock.patch.object(manage, 'get_db_api'):
+            commands = manage.Commands()
+        counts = {'instances': 3, 'service_statuses': 3, 'clusters': 0}
+        with mock.patch.object(manage.purge, 'purge_deleted',
+                               return_value=counts) as purge_deleted, \
+                mock.patch('builtins.print') as printed:
+            commands.db_purge(age_in_days='7', dry_run=True)
+        purge_deleted.assert_called_once_with(7, dry_run=True)
+        lines = [call.args[0] for call in printed.call_args_list]
+        self.assertEqual(['Would remove 3 row(s) from instances.',
+                          'Would remove 3 row(s) from service_statuses.',
+                          'Would remove 6 row(s) of what was deleted more '
+                          'than 7 day(s) ago.'], lines)

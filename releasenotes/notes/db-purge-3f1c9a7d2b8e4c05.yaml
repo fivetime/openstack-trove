@@ -1,0 +1,17 @@
+---
+features:
+  - |
+    ``trove-manage db_purge --age_in_days N`` removes the rows of what was
+    deleted more than N days ago (default 30): instances together with
+    the rows only their id ties to them (the service status, the
+    conductor's last-seen marks, the root history, faults, modules),
+    clusters, backups, configuration groups with their parameters,
+    modules, security groups and datastore version metadata. Children go
+    before parents and a row something live still refers to (the
+    primary of a replica, the parent of a live backup, a configuration
+    group an instance uses) is kept until that is gone. ``--dry_run``
+    only counts. Deletion is soft in Trove and nothing removed the rows
+    before: at a steady churn the ``instances``, ``service_statuses``
+    and ``conductor_lastseen`` tables grew without bound, and the
+    ``db_purge`` command the openstack-helm chart's daily job runs did
+    not exist.
