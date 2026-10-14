@@ -93,6 +93,13 @@ class Purge(object):
         return sa.and_(model.deleted == sa.true(),
                        model.deleted_at < self.cutoff)
 
+    def _not_of_an_old_instance(self, column):
+        """Rows of the instances the instance step removes are not
+        counted again by a later step (a dry run removes nothing).
+        """
+        return column.notin_(sa.select(DBInstance.id).where(
+            self._old(DBInstance)).scalar_subquery())
+
     def _count(self, table, n):
         self.counts[table] = self.counts.get(table, 0) + n
 
@@ -192,7 +199,9 @@ class Purge(object):
         """The modules removed from instances long ago, and the deleted
         modules no instance module row refers to.
         """
-        self._remove(DBInstanceModule, self._old(DBInstanceModule))
+        self._remove(DBInstanceModule, self._old(DBInstanceModule),
+                     self._not_of_an_old_instance(
+                         DBInstanceModule.instance_id))
         for ids in self._parents(
                 DBModule,
                 DBModule.id.notin_(_referenced(DBInstanceModule.module_id))):
@@ -200,7 +209,9 @@ class Purge(object):
 
     def security_groups(self):
         self._remove(SecurityGroupInstanceAssociation,
-                     self._old(SecurityGroupInstanceAssociation))
+                     self._old(SecurityGroupInstanceAssociation),
+                     self._not_of_an_old_instance(
+                         SecurityGroupInstanceAssociation.instance_id))
         self._remove(SecurityGroupRule, self._old(SecurityGroupRule))
         for ids in self._parents(
                 SecurityGroup,

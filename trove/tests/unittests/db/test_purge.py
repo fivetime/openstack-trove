@@ -128,10 +128,16 @@ class PurgeTest(trove_testtools.TestCase):
 
     def test_a_dry_run_counts_and_keeps(self):
         old = self._instance(deleted_days_ago=OLD)
+        # A module removed from it: counted once, with the instance.
+        removed = self._make(DBInstanceModule, instance_id=old.id,
+                             module_id=utils.generate_uuid(), md5='0' * 32)
+        _mark_deleted(DBInstanceModule, removed.id, OLD)
         counts = self._purge(dry_run=True)
         self.assertEqual(1, counts['instances'])
         self.assertEqual(2, counts['conductor_lastseen'])
+        self.assertEqual(1, counts['instance_modules'])
         self.assertEqual((1, 1, 2, 1, 1), self._instance_rows(old.id))
+        self.assertEqual(1, _rows(DBInstanceModule, id=removed.id))
 
     def test_age_zero_removes_everything_deleted(self):
         young = self._instance(deleted_days_ago=YOUNG)
