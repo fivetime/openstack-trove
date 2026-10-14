@@ -27,8 +27,16 @@ class GuestAPIDeleteQueueTest(trove_testtools.TestCase):
         guest.delete_queue()
 
         target = delete_server_queues.call_args.args[0]
-        # The topic _create_guest_queue and the guest agent listen on, and
-        # the guest agent's own server queue.
+        # The topic of a guest of an older image: its queue is the server
+        # queue of the shared topic too, so this removes what either kind
+        # of guest left, and leaves the shared topic's queue alone.
         self.assertEqual('guestagent.instance-id', target.topic)
         self.assertEqual('instance-id', target.server)
         self.assertEqual(3, delete_server_queues.call_args.kwargs['retry'])
+
+    @mock.patch.object(api.API, 'get_client')
+    def test_the_guest_is_a_server_of_the_shared_topic(self, get_client):
+        guest = api.API(mock.Mock(), 'instance-id')
+        self.assertEqual('guestagent', guest.target.topic)
+        self.assertEqual('instance-id', guest.target.server)
+        get_client.assert_called_once_with(guest.target, mock.ANY)

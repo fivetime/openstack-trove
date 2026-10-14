@@ -29,6 +29,13 @@ from trove import rpc
 CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
 
+# The topic every guest agent listens on, each as the server named after
+# its instance: a message to an instance goes to guestagent.<id>, its
+# server queue. One queue per guest on the broker (the topic's own queue
+# and fanout are shared by all of them), instead of the three of a topic
+# per instance, and the two shared ones carry nothing.
+GUEST_TOPIC = 'guestagent'
+
 
 class API(object):
     """API for interacting with the guest manager.
@@ -76,7 +83,7 @@ class API(object):
 
         version_cap = self.VERSION_ALIASES.get(
             CONF.upgrade_levels.guestagent, CONF.upgrade_levels.guestagent)
-        self.target = messaging.Target(topic=self._get_routing_key(),
+        self.target = messaging.Target(topic=GUEST_TOPIC, server=self.id,
                                        version=version_cap)
 
         self.client = self.get_client(self.target, version_cap)
@@ -122,8 +129,11 @@ class API(object):
             raise exception.GuestError(original_message=str(e))
 
     def _get_routing_key(self):
-        """Create the routing key based on the container id."""
-        return "guestagent.%s" % self.id
+        """The topic the guest agents of older images listen on, one per
+        instance: the same string the shared topic's server queue of this
+        instance is named after.
+        """
+        return "%s.%s" % (GUEST_TOPIC, self.id)
 
     def change_passwords(self, users):
         """Make an asynchronous call to change the passwords of one or more
@@ -355,10 +365,15 @@ class API(object):
     def delete_queue(self):
         """Delete the queues of this instance's guest agent.
 
-        The guest agent consumes from the topic named after the instance and
-        from its own server queue, which _create_guest_queue declares ahead
-        of it. Once the instance is deleted nothing consumes from them again,
-        and RabbitMQ would keep them, with anything left in them, forever.
+        The guest agent consumes from guestagent.<id>, its server queue on
+        the shared topic (_create_guest_queue declares it ahead of it); a
+        guest of an older image listened on a topic of that name instead,
+        with a server queue guestagent.<id>.<id> and a fanout stream
+        guestagent.<id>_fanout of its own. Once the instance is deleted
+        nothing consumes from any of them again, and RabbitMQ would keep
+        them, with anything left in them, forever. Asking for the queues of
+        the old topic removes all of them (a missing one is no error); the
+        shared topic's queue and fanout stream are not touched.
         """
         target = messaging.Target(topic=self._get_routing_key(),
                                   server=self.id)
@@ -374,8 +389,7 @@ class API(object):
         """
         from trove.instance.models import DBInstance
         server = None
-        target = messaging.Target(topic=self._get_routing_key(),
-                                  server=self.id,
+        target = messaging.Target(topic=GUEST_TOPIC, server=self.id,
                                   version=self.API_BASE_VERSION)
         try:
             instance = DBInstance.get_by(id=self.id)

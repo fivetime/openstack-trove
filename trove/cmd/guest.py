@@ -112,9 +112,11 @@ def main():
     rpc.init(CONF)
 
     from trove.common.rpc import service as rpc_service
+    # The shared guest topic, this guest as the server named after its
+    # instance: the control plane addresses guestagent.<id>.
     server = rpc_service.RpcService(
         key=CONF.instance_rpc_encr_key,
-        topic="guestagent.%s" % CONF.guest_id,
+        topic=guest_api.GUEST_TOPIC,
         manager=manager, host=CONF.guest_id,
         rpc_api_version=guest_api.API.API_LATEST_VERSION)
 

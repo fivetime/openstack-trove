@@ -1,0 +1,14 @@
+---
+upgrade:
+  - |
+    The guest agents now listen on one shared RPC topic, ``guestagent``,
+    each as the server named after its instance, and the control plane
+    addresses an instance as that server (routing key ``guestagent.<id>``,
+    as before). A guest keeps one queue of its own on the broker instead of
+    three: the topic's queue and fanout queue are shared by all guests and
+    carry nothing. The two sides are compatible either way during an
+    upgrade: a guest of an older image binds the same routing key, and an
+    older control plane publishes it. Deleting an instance removes its
+    server queue and, for a guest of an older image, its old topic queue,
+    server queue and fanout stream. Guest images must be rebuilt for the
+    guests themselves to declare the shared topic.
