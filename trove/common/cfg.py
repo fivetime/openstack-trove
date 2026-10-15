@@ -527,10 +527,15 @@ common_opts = [
                      'accepts_new. The default partition is the broker of '
                      '[DEFAULT] transport_url with the guest agent config '
                      'file as it is. Empty: one broker, as before.'),
-    cfg.IntOpt('default_partition_max_instances', default=2500, min=0,
+    cfg.IntOpt('default_partition_max_instances', default=None, min=0,
                help='Most instances (cluster members and replicas included) '
-                    'placed on the default guest message partition. Only '
-                    'used when guest_message_partitions is set.'),
+                    'placed on the default guest message partition; unset '
+                    'is no limit, 0 takes no new instance. How many guest '
+                    'agents one broker carries depends on the broker '
+                    '(nodes, storage, queue type) and on how long a node '
+                    'restart may take, so it is the operator\'s to measure '
+                    'and set. Only used when guest_message_partitions is '
+                    'set.'),
     cfg.ListOpt('default_partition_availability_zones', default=[],
                 help='Availability zones the default guest message partition '
                      'serves; empty serves any zone no other partition is '

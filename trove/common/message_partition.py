@@ -52,8 +52,10 @@ partition_opts = [
     cfg.ListOpt('availability_zones', default=[],
                 help='Availability zones this partition serves; empty '
                      'serves any zone no other partition is named for.'),
-    cfg.IntOpt('max_instances', default=2500, min=0,
-               help='Most instances placed on this partition.'),
+    cfg.IntOpt('max_instances', default=None, min=0,
+               help='Most instances placed on this partition; unset is no '
+                    'limit, 0 takes no new instance. A deployment sizes it '
+                    'from what its broker carries.'),
     cfg.BoolOpt('accepts_new', default=True,
                 help='Whether new instances may be placed on this partition '
                      '(False drains it).'),
@@ -125,7 +127,9 @@ def choose(availability_zone=None):
 
     The candidates are the partitions named for the zone or, when none is,
     those that serve any zone; among those that accept new instances and are
-    not full, the least used one (as a share of its maximum) wins. Raises
+    not full, the least used one wins: as a share of its maximum when every
+    one of them has a maximum, by instance count otherwise (a maximum then
+    only caps). Raises
     GuestMessagePartitionsFull when none can take the instance. Without
     configured partitions every instance stays on the default one and nothing
     is counted.
@@ -138,16 +142,23 @@ def choose(availability_zone=None):
              availability_zone in p.availability_zones]
     candidates = named or [p for p in partitions if not p.availability_zones]
     report = []
-    best = None
+    eligible = []
     for p in candidates:
         used = usage(p.name)
-        report.append('%s %d/%d%s' % (_label(p.name), used, p.max_instances,
+        limit = 'unlimited' if p.max_instances is None else p.max_instances
+        report.append('%s %d/%s%s' % (_label(p.name), used, limit,
                                       '' if p.accepts_new else ' draining'))
-        if not p.accepts_new or used >= p.max_instances:
+        if not p.accepts_new:
             continue
-        share = float(used) / p.max_instances
-        if best is None or share < best[0]:
-            best = (share, p)
+        if p.max_instances is not None and used >= p.max_instances:
+            continue
+        eligible.append((used, p))
+    best = None
+    by_share = all(p.max_instances is not None for _, p in eligible)
+    for used, p in eligible:
+        key = float(used) / p.max_instances if by_share else used
+        if best is None or key < best[0]:
+            best = (key, p)
     if best is None:
         raise exception.GuestMessagePartitionsFull(
             zone=availability_zone or 'any',

@@ -7,14 +7,18 @@ features:
     transport_url``); each has a group ``[guest_message_partition_<name>]``
     with ``transport_url`` (how the control plane reaches the broker),
     ``guest_transport_url`` (written into the guest agent config of the
-    instances on it), ``availability_zones``, ``max_instances`` (default
-    2500) and ``accepts_new``. The default partition has
+    instances on it), ``availability_zones``, ``max_instances`` and
+    ``accepts_new``. The default partition has
     ``default_partition_max_instances``,
     ``default_partition_availability_zones`` and
-    ``default_partition_accepts_new``. A new instance, a cluster member or
-    a replica included, is placed on the least used partition (as a share
-    of its maximum) among those named for its availability zone or, when
-    none is, those that serve any zone, and keeps it: its guest agent
+    ``default_partition_accepts_new``. The maximums are unset (no limit) by
+    default: how many guest agents a broker carries depends on the broker
+    and on how long a node restart may take, so each deployment measures
+    and sets its own. A new instance, a cluster member or a replica
+    included, is placed on the least used partition among those named for
+    its availability zone or, when none is, those that serve any zone (as a
+    share of its maximum when all of them have one, by instance count
+    otherwise), and keeps it: its guest agent
     config names that broker, the control plane reaches the guest and
     declares and deletes its queues there, and trove-conductor listens on
     every partition. When no partition can take an instance the request

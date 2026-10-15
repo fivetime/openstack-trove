@@ -44,7 +44,7 @@ class MessagePartitionTestBase(trove_testtools.TestCase):
         CONF.set_override(name, value, group=group)
         self.addCleanup(CONF.clear_override, name, group=group)
 
-    def configure(self, partitions, default_max=2500, default_zones=(),
+    def configure(self, partitions, default_max=100, default_zones=(),
                   default_accepts=True):
         """Configure partitions through the real options.
 
@@ -96,6 +96,17 @@ class TestPartitionConfig(MessagePartitionTestBase):
         self.assertEqual(['az2'], p.availability_zones)
         self.assertTrue(p.accepts_new)
 
+    def test_no_maximum_by_default(self):
+        self.override('guest_message_partitions', ['p5'])
+        message_partition._register('p5')
+        group = message_partition.GROUP_PREFIX + 'p5'
+        self.override('transport_url', 'rabbit://u:p@p5:5672/trove', group)
+        self.override('guest_transport_url', 'rabbit://u:p@lb5:5672/trove',
+                      group)
+        self.assertIsNone(CONF.default_partition_max_instances)
+        self.assertIsNone(message_partition.get(None).max_instances)
+        self.assertIsNone(message_partition.get('p5').max_instances)
+
     def test_get_unconfigured(self):
         self.configure({'p2': {}})
         self.assertRaises(exception.TroveError, message_partition.get, 'p3')
@@ -125,6 +136,27 @@ class TestChoose(MessagePartitionTestBase):
         # default 3/10 = 30 %, p2 40/100 = 40 %
         self.assertIsNone(self.choose({None: 3, 'p2': 40}))
 
+    def test_unlimited_partitions_by_count(self):
+        self.configure({'p2': {}, 'p3': {}}, default_max=None)
+        self.assertEqual('p3', self.choose({None: 7, 'p2': 5, 'p3': 4}))
+        self.assertIsNone(self.choose({None: 3, 'p2': 5, 'p3': 4}))
+
+    def test_mixed_limits_by_count_with_caps(self):
+        # p2 is capped and full; the rest are compared by count.
+        self.configure({'p2': {'max_instances': 3}, 'p3': {}},
+                       default_max=None)
+        self.assertEqual('p3', self.choose({None: 9, 'p2': 3, 'p3': 8}))
+        # p2 not full and the emptiest: it wins on count, not on share.
+        self.assertEqual('p2', self.choose({None: 9, 'p2': 2, 'p3': 8}))
+
+    def test_report_names_unlimited(self):
+        self.configure({'p2': {'max_instances': 0}}, default_max=None,
+                       default_accepts=False)
+        e = self.assertRaises(exception.GuestMessagePartitionsFull,
+                              self.choose, {None: 4, 'p2': 0})
+        self.assertIn('default 4/unlimited draining', str(e))
+        self.assertIn('p2 0/0', str(e))
+
     def test_full_partition_skipped(self):
         self.configure({'p2': {'max_instances': 4}}, default_max=10)
         self.assertIsNone(self.choose({None: 9, 'p2': 4}))
@@ -142,7 +174,7 @@ class TestChoose(MessagePartitionTestBase):
 
     def test_draining_partition_skipped(self):
         self.configure({'p2': {'accepts_new': False}})
-        self.assertIsNone(self.choose({None: 2000, 'p2': 0}))
+        self.assertIsNone(self.choose({None: 50, 'p2': 0}))
 
     def test_draining_default_skipped(self):
         self.configure({'p2': {}}, default_accepts=False)
