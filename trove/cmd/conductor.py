@@ -28,12 +28,24 @@ def main(conf):
 
     notification.DBaaSAPINotification.register_notify_callback(
         inst_models.persist_instance_fault)
+    from trove.common import message_partition
+    from trove import rpc
+
     topic = conf.conductor_queue
-    server = rpc_service.RpcService(
-        key=None, manager=conf.conductor_manager, topic=topic,
-        rpc_api_version=conductor_api.API.API_LATEST_VERSION,
-        secure_serializer=sz.ConductorHostSerializer)
+
+    def conductor(transport=None):
+        return rpc_service.RpcService(
+            key=None, manager=conf.conductor_manager, topic=topic,
+            rpc_api_version=conductor_api.API.API_LATEST_VERSION,
+            secure_serializer=sz.ConductorHostSerializer,
+            transport=transport)
+
     workers = conf.trove_conductor_workers or processutils.get_worker_count()
-    launcher = openstack_service.launch(conf, server, workers=workers,
+    launcher = openstack_service.launch(conf, conductor(), workers=workers,
                                         restart_method='mutate')
+    # Guest agents send to the conductor through the broker of their guest
+    # message partition: listen on every partition too.
+    for name in message_partition.names():
+        launcher.launch_service(conductor(rpc.get_transport(name)),
+                                workers=workers)
     launcher.wait()

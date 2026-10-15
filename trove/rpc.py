@@ -44,6 +44,9 @@ LOG = logging.getLogger(__name__)
 TRANSPORT = None
 NOTIFICATION_TRANSPORT = None
 NOTIFIER = None
+# The RPC transports of the guest message partitions other than the default
+# one (trove.common.message_partition), by partition name, made on first use.
+PARTITION_TRANSPORTS = {}
 
 ALLOWED_EXMODS = [
     trove.common.exception.__name__,
@@ -75,7 +78,31 @@ def cleanup():
     assert NOTIFIER is not None
     TRANSPORT.cleanup()
     NOTIFICATION_TRANSPORT.cleanup()
+    for transport in PARTITION_TRANSPORTS.values():
+        transport.cleanup()
+    PARTITION_TRANSPORTS.clear()
     TRANSPORT = NOTIFICATION_TRANSPORT = NOTIFIER = None
+
+
+def get_transport(partition=None):
+    """The RPC transport of a guest message partition.
+
+    None is the default partition: the transport of [DEFAULT] transport_url,
+    which the control plane also uses for its own RPC. Any other name is a
+    partition of [DEFAULT] guest_message_partitions, whose broker the control
+    plane reaches through the partition's transport_url.
+    """
+    assert TRANSPORT is not None
+    if partition is None:
+        return TRANSPORT
+    transport = PARTITION_TRANSPORTS.get(partition)
+    if transport is None:
+        from trove.common import message_partition
+        url = message_partition.get(partition).transport_url
+        transport = messaging.get_rpc_transport(
+            CONF, url=url, allowed_remote_exmods=get_allowed_exmods())
+        PARTITION_TRANSPORTS[partition] = transport
+    return transport
 
 
 def set_defaults(control_exchange):
@@ -99,7 +126,7 @@ def get_transport_url(url_str=None):
 
 
 def get_client(target, key, version_cap=None, serializer=None,
-               secure_serializer=ssz.SecureSerializer):
+               secure_serializer=ssz.SecureSerializer, transport=None):
     assert TRANSPORT is not None
     # BUG(1650518): Cleanup in the Pike release
     # uncomment this (following) line in the pike release
@@ -107,12 +134,12 @@ def get_client(target, key, version_cap=None, serializer=None,
     serializer = secure_serializer(
         sz.TroveRequestContextSerializer(serializer), key)
     return messaging.get_rpc_client(
-        TRANSPORT, target, version_cap=version_cap,
+        transport or TRANSPORT, target, version_cap=version_cap,
         serializer=serializer)
 
 
 def get_server(target, endpoints, key, serializer=None,
-               secure_serializer=ssz.SecureSerializer):
+               secure_serializer=ssz.SecureSerializer, transport=None):
     assert TRANSPORT is not None
 
     # Thread module is not monkeypatched if remote debugging is enabled.
@@ -130,7 +157,7 @@ def get_server(target, endpoints, key, serializer=None,
         sz.TroveRequestContextSerializer(serializer), key)
 
     return messaging.get_rpc_server(
-        TRANSPORT,
+        transport or TRANSPORT,
         target,
         endpoints,
         executor=executor,
@@ -138,7 +165,7 @@ def get_server(target, endpoints, key, serializer=None,
         access_policy=dispatcher.DefaultRPCAccessPolicy)
 
 
-def delete_server_queues(target, retry=None):
+def delete_server_queues(target, retry=None, transport=None):
     """Delete the queues the RPC servers of a target consume from.
 
     For a topic that is not used again. Does nothing with an oslo.messaging
@@ -150,7 +177,7 @@ def delete_server_queues(target, retry=None):
         LOG.debug("oslo.messaging has no delete_rpc_server_queues, not "
                   "deleting the queues of %s", target)
         return
-    delete(TRANSPORT, target, retry=retry)
+    delete(transport or TRANSPORT, target, retry=retry)
 
 
 def get_notifier(service=None, host=None, publisher_id=None):

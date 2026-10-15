@@ -39,6 +39,7 @@ from trove.common import constants
 from trove.common import crypto_utils as cu
 from trove.common import exception
 from trove.common.i18n import _
+from trove.common import message_partition as msg_partition
 from trove.common import neutron
 from trove.common import notification
 from trove.common import server_group as srv_grp
@@ -1097,8 +1098,12 @@ class BaseInstance(SimpleInstance):
 
         if os.path.isfile(CONF.get('guest_config')):
             with open(CONF.get('guest_config'), "r") as f:
+                # On a guest message partition other than the default
+                # one, the guest's transport_url is that partition's.
                 files[os.path.join(injected_config_location,
-                                   "trove-guestagent.conf")] = f.read()
+                                   "trove-guestagent.conf")] = (
+                    msg_partition.guest_config(
+                        f.read(), self.db_info.message_partition))
 
         # For trove guest agent service init in dev mode
         # Before Nova version 2.57, userdata is not supported when doing
@@ -1503,6 +1508,10 @@ class Instance(BuiltInstance):
             root_passwords = []
             root_password = None
             for instance_index in range(0, instance_count):
+                # The guest message partition (broker) of the guest agent,
+                # chosen per instance so that replicas made together count
+                # each other.
+                partition = msg_partition.choose(availability_zone)
                 db_info = DBInstance.create(
                     name=name, flavor_id=flavor_id,
                     tenant_id=context.project_id,
@@ -1513,7 +1522,8 @@ class Instance(BuiltInstance):
                     slave_of_id=slave_of_id, cluster_id=cluster_id,
                     shard_id=shard_id, type=instance_type,
                     region_id=region_name, access=access,
-                    ssl_mode=ssl_mode, ssl_ref=ssl_ref)
+                    ssl_mode=ssl_mode, ssl_ref=ssl_ref,
+                    message_partition=partition)
                 instance_id = db_info.id
                 instance_name = name
                 LOG.debug(f"Creating new instance {instance_id}")
@@ -2109,7 +2119,7 @@ class DBInstance(dbmodels.DatabaseModelBase):
                     'deleted', 'deleted_at', 'datastore_version_id',
                     'configuration_id', 'slave_of_id', 'cluster_id',
                     'shard_id', 'type', 'region_id', 'encrypted_key', 'access',
-                    'ssl_mode', 'ssl_ref']
+                    'ssl_mode', 'ssl_ref', 'message_partition']
     _table_name = 'instances'
 
     def __init__(self, task_status, **kwargs):
@@ -2219,6 +2229,20 @@ _instance_encryption_key = instance_encryption_key_cache(
 
 def get_instance_encryption_key(instance_id):
     return _instance_encryption_key[instance_id]
+
+
+def _get_instance_message_partition(instance_id):
+    return DBInstance.find_by(id=instance_id).message_partition
+
+
+# An instance keeps the guest message partition it was created on.
+_instance_message_partition = instance_encryption_key_cache(
+    func=_get_instance_message_partition, lru_cache_size=200)
+
+
+def get_instance_message_partition(instance_id):
+    """The guest message partition of an instance; None is the default."""
+    return _instance_message_partition[instance_id]
 
 
 def module_instance_count(context, module_id, include_clustered=False):

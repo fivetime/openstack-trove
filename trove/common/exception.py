@@ -246,6 +246,12 @@ class QuotaLimitTooSmall(TroveError):
                 " - must be at least '-1'.")
 
 
+class GuestMessagePartitionsFull(TroveError):
+
+    message = _("No guest message partition can take a new instance in "
+                "availability zone %(zone)s: %(usage)s.")
+
+
 class QuotaExceeded(TroveError):
 
     message = _("Quota exceeded for resources: %(overs)s.")

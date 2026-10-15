@@ -1,0 +1,27 @@
+---
+features:
+  - |
+    Guest agents can be spread over several RabbitMQ brokers, the guest
+    message partitions. ``[DEFAULT] guest_message_partitions`` names the
+    partitions besides the default one (the broker of ``[DEFAULT]
+    transport_url``); each has a group ``[guest_message_partition_<name>]``
+    with ``transport_url`` (how the control plane reaches the broker),
+    ``guest_transport_url`` (written into the guest agent config of the
+    instances on it), ``availability_zones``, ``max_instances`` (default
+    2500) and ``accepts_new``. The default partition has
+    ``default_partition_max_instances``,
+    ``default_partition_availability_zones`` and
+    ``default_partition_accepts_new``. A new instance, a cluster member or
+    a replica included, is placed on the least used partition (as a share
+    of its maximum) among those named for its availability zone or, when
+    none is, those that serve any zone, and keeps it: its guest agent
+    config names that broker, the control plane reaches the guest and
+    declares and deletes its queues there, and trove-conductor listens on
+    every partition. When no partition can take an instance the request
+    fails with 409 before anything is made. The mgmt instance view shows
+    ``message_partition``. Guest images need no change.
+upgrade:
+  - |
+    A database migration adds ``instances.message_partition``; existing
+    instances stay on the default partition. Without
+    ``guest_message_partitions`` nothing changes and nothing is counted.

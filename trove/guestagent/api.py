@@ -23,6 +23,7 @@ from oslo_messaging.rpc.client import RemoteError
 
 from trove.common import cfg
 from trove.common import exception
+from trove.common import message_partition
 from trove.common.notification import NotificationCastWrapper
 from trove import rpc
 
@@ -88,13 +89,34 @@ class API(object):
 
         self.client = self.get_client(self.target, version_cap)
 
+    @property
+    def transport(self):
+        """The RPC transport of the guest's message partition.
+
+        The guest agent of an instance on a guest message partition talks to
+        that partition's broker only (its injected config names it); the
+        default partition is the control plane's own transport.
+        """
+        if not hasattr(self, '_transport'):
+            # None: the process's own transport. Without partitions
+            # configured nothing is looked up.
+            self._transport = None
+            if message_partition.enabled():
+                from trove.instance.models import (
+                    get_instance_message_partition)
+                partition = get_instance_message_partition(self.id)
+                if partition is not None:
+                    self._transport = rpc.get_transport(partition)
+        return self._transport
+
     def get_client(self, target, version_cap, serializer=None):
         from trove.instance.models import get_instance_encryption_key
 
         instance_key = get_instance_encryption_key(self.id)
         return rpc.get_client(target, key=instance_key,
                               version_cap=version_cap,
-                              serializer=serializer)
+                              serializer=serializer,
+                              transport=self.transport)
 
     def _call(self, method_name, timeout_sec, version, **kwargs):
         LOG.debug("Calling %(name)s with timeout %(timeout)s",
@@ -379,7 +401,7 @@ class API(object):
                                   server=self.id)
         # A few retries rather than forever: deleting the instance must not
         # hang on the message bus, and a failure here is only logged.
-        rpc.delete_server_queues(target, retry=3)
+        rpc.delete_server_queues(target, retry=3, transport=self.transport)
 
     def _create_guest_queue(self):
         """Call to construct, start and immediately stop rpc server in order
@@ -394,7 +416,8 @@ class API(object):
         try:
             instance = DBInstance.get_by(id=self.id)
             instance_key = instance.key if instance else None
-            server = rpc.get_server(target, [], key=instance_key)
+            server = rpc.get_server(target, [], key=instance_key,
+                                    transport=self.transport)
             server.start()
         finally:
             if server is not None:

@@ -512,6 +512,32 @@ common_opts = [
                default='/etc/trove/trove-guestagent.conf',
                help='Path to the Guest Agent config file to be injected '
                     'during instance creation.'),
+    cfg.ListOpt('guest_message_partitions', default=[],
+                help='Names of the guest message partitions besides the '
+                     'default one. A partition is a RabbitMQ broker of its '
+                     'own for guest agents: new instances are placed on the '
+                     'least used partition that serves their availability '
+                     'zone and is not full, the control plane reaches each '
+                     'guest through its partition and trove-conductor '
+                     'listens on every partition. Each name has a group '
+                     '[guest_message_partition_<name>] with transport_url '
+                     '(how the control plane reaches the broker), '
+                     'guest_transport_url (written into the guest agent '
+                     'config), availability_zones, max_instances and '
+                     'accepts_new. The default partition is the broker of '
+                     '[DEFAULT] transport_url with the guest agent config '
+                     'file as it is. Empty: one broker, as before.'),
+    cfg.IntOpt('default_partition_max_instances', default=2500, min=0,
+               help='Most instances (cluster members and replicas included) '
+                    'placed on the default guest message partition. Only '
+                    'used when guest_message_partitions is set.'),
+    cfg.ListOpt('default_partition_availability_zones', default=[],
+                help='Availability zones the default guest message partition '
+                     'serves; empty serves any zone no other partition is '
+                     'named for.'),
+    cfg.BoolOpt('default_partition_accepts_new', default=True,
+                help='Whether new instances may be placed on the default '
+                     'guest message partition (False drains it).'),
     cfg.StrOpt('guest_info',
                default='guest_info.conf',
                help='The guest info filename found in the injected config '

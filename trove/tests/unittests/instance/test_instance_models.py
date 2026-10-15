@@ -372,6 +372,56 @@ class CreateInstanceTest(trove_testtools.TestCase):
             locality=self.locality)
         self.assertIsNotNone(instance)
 
+    @patch.object(task_api.API, 'get_client', Mock(return_value=Mock()))
+    @patch.object(task_api.API, 'create_instance')
+    @patch.object(models.msg_partition, 'choose', return_value='p2')
+    def test_instance_placed_on_a_message_partition(self, choose,
+                                                    create_instance):
+        # The partition is chosen for the instance's availability zone and
+        # stored with it.
+        self.backup.size = 0.2
+        self.backup.save()
+        models.run_with_quotas = Mock(
+            side_effect=lambda tenant, deltas, f: f())
+
+        instance = models.Instance.create(
+            self.context, self.name, self.flavor_id,
+            self.image_id, self.databases, self.users,
+            self.datastore, self.datastore_version,
+            self.volume_size, self.backup_id,
+            self.az, self.nics, self.configuration)
+        self.addCleanup(DBInstance.find_by(id=instance.id).delete)
+
+        choose.assert_called_once_with(self.az)
+        self.assertEqual(
+            'p2', DBInstance.find_by(id=instance.id).message_partition)
+        create_instance.assert_called_once()
+
+    @patch.object(task_api.API, 'get_client', Mock(return_value=Mock()))
+    @patch.object(task_api.API, 'create_instance')
+    @patch.object(models.msg_partition, 'choose',
+                  side_effect=exception.GuestMessagePartitionsFull(
+                      zone='az', usage='default 1/1'))
+    def test_no_instance_when_every_partition_is_full(self, choose,
+                                                      create_instance):
+        self.backup.size = 0.2
+        self.backup.save()
+        models.run_with_quotas = Mock(
+            side_effect=lambda tenant, deltas, f: f())
+        before = DBInstance.find_all(name=self.name, deleted=False).count()
+
+        self.assertRaises(
+            exception.GuestMessagePartitionsFull, models.Instance.create,
+            self.context, self.name, self.flavor_id,
+            self.image_id, self.databases, self.users,
+            self.datastore, self.datastore_version,
+            self.volume_size, self.backup_id,
+            self.az, self.nics, self.configuration)
+
+        self.assertEqual(
+            before, DBInstance.find_all(name=self.name, deleted=False).count())
+        create_instance.assert_not_called()
+
     def test_exception_on_configuration_datastore_version_mismatch(self):
         configuration = models.Configuration.create(
             "configuration",

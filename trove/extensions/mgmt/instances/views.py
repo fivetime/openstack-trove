@@ -54,6 +54,10 @@ class MgmtInstanceView(InstanceDetailView):
         result['instance']['deleted'] = bool(self.instance.deleted)
         result['instance']['deleted_at'] = self.instance.deleted_at
         result['instance']['task_description'] = self.instance.task_description
+        # The guest message partition (RabbitMQ broker) of the guest agent;
+        # None is the default one.
+        result['instance']['message_partition'] = getattr(
+            self.instance.db_info, 'message_partition', None)
         return result
 
 

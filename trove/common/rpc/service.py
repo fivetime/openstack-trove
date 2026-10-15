@@ -39,9 +39,12 @@ LOG = logging.getLogger(__name__)
 class RpcService(service.Service):
 
     def __init__(self, key, host=None, binary=None, topic=None, manager=None,
-                 rpc_api_version=None, secure_serializer=ssz.SecureSerializer):
+                 rpc_api_version=None, secure_serializer=ssz.SecureSerializer,
+                 transport=None):
         super(RpcService, self).__init__()
         self.key = key
+        # None: the process's transport ([DEFAULT] transport_url).
+        self.transport = transport
         self.host = host or CONF.host
         self.binary = binary or os.path.basename(inspect.stack()[-1][1])
         self.topic = topic or self.binary.rpartition('trove-')[2]
@@ -64,7 +67,8 @@ class RpcService(service.Service):
         endpoints = [self.manager_impl]
         self.rpcserver = rpc.get_server(
             target, endpoints, key=self.key,
-            secure_serializer=self.secure_serializer)
+            secure_serializer=self.secure_serializer,
+            transport=self.transport)
         self.rpcserver.start()
 
         # TODO(hub-cap): Currently the context is none... do we _need_ it here?

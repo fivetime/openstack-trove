@@ -223,6 +223,8 @@ class BaseFreshInstanceTasksTest(trove_testtools.TestCase):
             None, MagicMock(), None, None)
         self.freshinstancetasks.context = trove.common.context.TroveContext(
             user_id='test_user')
+        # On the default guest message partition.
+        self.freshinstancetasks.db_info.message_partition = None
 
     def tearDown(self):
         super(BaseFreshInstanceTasksTest, self).tearDown()
@@ -364,6 +366,40 @@ class FreshInstanceTasksTest(BaseFreshInstanceTasksTest):
         deamon_json = json.loads(files.get('/etc/docker/daemon.json'))
         self.assertIn('127.0.0.1:4000', deamon_json.get('insecure-registries'))
         self.assertIn('127.0.0.1:5000', deamon_json.get('insecure-registries'))
+
+    @patch.object(DBInstance, 'get_by')
+    def test_create_instance_guestconfig_on_partition(self, patch_get_by):
+        # An instance on a guest message partition gets the partition's
+        # broker as its guest agent's transport_url.
+        from trove.common import message_partition
+        cfg.CONF.set_override('network_isolation', False, group='network')
+        self.addCleanup(cfg.CONF.clear_override, 'network_isolation',
+                        group='network')
+        with open(self.guestconfig, 'w') as f:
+            f.write("[DEFAULT]\n"
+                    "transport_url = rabbit://trove:pw@default-lb/trove\n"
+                    "debug = True\n")
+        cfg.CONF.set_override('guest_config', self.guestconfig)
+        cfg.CONF.set_override('guest_info', 'guest_info.conf')
+        cfg.CONF.set_override('injected_config_location', '/etc/trove/conf.d')
+        cfg.CONF.set_override('guest_message_partitions', ['p2'])
+        self.addCleanup(cfg.CONF.clear_override, 'guest_message_partitions')
+        message_partition._register('p2')
+        group = message_partition.GROUP_PREFIX + 'p2'
+        for name, value in [
+                ('transport_url', 'rabbit://trove:pw@p2-0:5672/trove'),
+                ('guest_transport_url', 'rabbit://trove:pw@p2-lb:5672/trove')]:
+            cfg.CONF.set_override(name, value, group=group)
+            self.addCleanup(cfg.CONF.clear_override, name, group=group)
+        self.freshinstancetasks.db_info.message_partition = 'p2'
+
+        files = self.freshinstancetasks.get_injected_files("test", 'test')
+
+        conf = files['/etc/trove/conf.d/trove-guestagent.conf']
+        self.assertIn('transport_url = rabbit://trove:pw@p2-lb:5672/trove',
+                      conf)
+        self.assertNotIn('default-lb', conf)
+        self.assertIn('debug = True', conf)
 
     @patch.object(DBInstance, 'get_by')
     def test_create_instance_guestconfig_compat(self, patch_get_by):

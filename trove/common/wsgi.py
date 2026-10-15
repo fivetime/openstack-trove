@@ -352,6 +352,7 @@ class Controller(object):
         webob.exc.HTTPConflict: [
             exception.BackupNotCompleteError,
             exception.RestoreBackupIntegrityError,
+            exception.GuestMessagePartitionsFull,
         ],
         webob.exc.HTTPRequestEntityTooLarge: [
             exception.OverLimit,
