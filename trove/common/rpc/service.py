@@ -71,6 +71,10 @@ class RpcService(service.Service):
             transport=self.transport)
         self.rpcserver.start()
 
+        started = getattr(self.manager_impl, 'service_started', None)
+        if started is not None:
+            started()
+
         # TODO(hub-cap): Currently the context is none... do we _need_ it here?
         report_interval = CONF.report_interval
         if report_interval > 0:
@@ -81,6 +85,12 @@ class RpcService(service.Service):
             pulse.wait()
 
     def stop(self):
+        stopping = getattr(self.manager_impl, 'service_stopping', None)
+        if stopping is not None:
+            try:
+                stopping()
+            except Exception:
+                LOG.exception("Failed to stop %s cleanly.", self.topic)
         # Try to shut the connection down, but if we get any sort of
         # errors, go ahead and ignore them.. as we're shutting down anyway
         try:

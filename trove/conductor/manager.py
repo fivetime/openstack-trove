@@ -41,6 +41,7 @@ class Manager(periodic_task.PeriodicTasks):
         super(Manager, self).__init__(CONF)
         self.keepalives = heartbeats.Keepalives(self._heartbeat_in_full)
         self.cluster_events = cluster_events.ClusterEventGate()
+        self.cluster_route = cluster_events.ClusterEventRoute()
 
     def _message_too_old(self, instance_id, method_name, sent):
         fields = {
@@ -145,11 +146,14 @@ class Manager(periodic_task.PeriodicTasks):
                       "the same as forwarded moments ago, dropped.",
                       kind, instance_id, cluster_id)
             return
-        LOG.info("Cluster event %s from instance %s (cluster %s): %s.",
+        servers = self.cluster_route.servers(cluster_id, kind)
+        LOG.info("Cluster event %s from instance %s (cluster %s): %s; to %s.",
                  kind, instance_id, cluster_id,
-                 (payload or {}).get('reason') or 'forwarded')
+                 (payload or {}).get('reason') or 'forwarded',
+                 ', '.join(servers) if servers else 'every task manager')
         task_api.API(context).cluster_event(cluster_id, instance_id, kind,
-                                            payload=payload, sent=sent)
+                                            payload=payload, sent=sent,
+                                            servers=servers)
 
     def update_backup(self, context, instance_id, backup_id,
                       sent=None, **backup_fields):

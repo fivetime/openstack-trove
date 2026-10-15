@@ -69,3 +69,56 @@ class ClusterEventGate(object):
         for cluster_id in [c for c, (_, at) in self._last.items()
                            if now - at >= window]:
             del self._last[cluster_id]
+
+
+class ClusterEventRoute(object):
+    """Which task managers get a cluster event.
+
+    With cluster_recovery_slots, the task manager replicas are members of
+    the recovery group under their slots' names, which are also their RPC
+    server names: an event goes to the cluster_recovery_coverage replicas
+    that watch its cluster (the rendezvous hash every replica computes for
+    itself), not to every replica. Every task manager still gets:
+
+    * a write lease request: it is answered, and a stale membership must
+      not send it to a replica that is gone;
+    * everything, while slots are off, no coordination backend is
+      configured, the membership cannot be read or is empty, or a member is
+      not a slot (an older task manager during an upgrade).
+
+    An event sent to a slot just given up waits in the slot's queue for the
+    next holder; the replicas that took over learn of the cluster from the
+    next event, their own scan or the members' repeated reports, as when an
+    event is lost today.
+    """
+
+    def __init__(self, coordinator=None):
+        self._coordinator = coordinator
+        self._started = False
+
+    @property
+    def coordinator(self):
+        if self._coordinator is None:
+            from trove.common import coordination
+            self._coordinator = coordination.Coordinator(observer=True)
+        if not self._started:
+            self._started = True
+            self._coordinator.start()
+        return self._coordinator
+
+    def servers(self, cluster_id, kind):
+        """The task manager servers to send to; None for every one."""
+        if not CONF.cluster_recovery_slots or kind in ALWAYS:
+            return None
+        if not CONF.coordination.backend_url:
+            return None
+        from trove.common import coordination
+        try:
+            members = self.coordinator.members()
+        except Exception:
+            return None
+        if not members or not all(coordination.is_slot(m) for m in members):
+            return None
+        return [m.decode() if isinstance(m, bytes) else m
+                for m in coordination.coverers(
+                    cluster_id, members, CONF.cluster_recovery_coverage)]

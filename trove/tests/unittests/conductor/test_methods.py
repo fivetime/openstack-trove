@@ -12,6 +12,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from unittest.mock import Mock
 from unittest.mock import patch
 
 from oslo_utils import timeutils
@@ -86,7 +87,8 @@ class ConductorMethodTests(trove_testtools.TestCase):
         self.cond_mgr.cluster_event(None, self.instance_id, 'abnormal',
                                     sent=10.0, payload=payload)
         task_api.API.return_value.cluster_event.assert_called_once_with(
-            'c1', self.instance_id, 'abnormal', payload=payload, sent=10.0)
+            'c1', self.instance_id, 'abnormal', payload=payload, sent=10.0,
+            servers=None)
         # An older report is discarded; a cluster id given is trusted.
         self.cond_mgr.cluster_event(None, self.instance_id, 'normal',
                                     sent=9.0, payload={})
@@ -107,6 +109,17 @@ class ConductorMethodTests(trove_testtools.TestCase):
         self.cond_mgr.cluster_event(None, 'm1', 'normal', sent=12.0,
                                     cluster_id='c7', payload={})
         self.assertEqual(2, task_api.API.return_value.cluster_event.call_count)
+
+    @patch('trove.conductor.manager.task_api')
+    def test_cluster_event_routed(self, task_api):
+        self.cond_mgr.cluster_route = Mock()
+        self.cond_mgr.cluster_route.servers.return_value = ['recovery-1']
+        self.cond_mgr.cluster_event(None, 'm1', 'abnormal', sent=10.0,
+                                    cluster_id='c8', payload={})
+        self.cond_mgr.cluster_route.servers.assert_called_once_with(
+            'c8', 'abnormal')
+        self.assertEqual(['recovery-1'], task_api.API.return_value
+                         .cluster_event.call_args.kwargs['servers'])
 
     @patch('trove.conductor.manager.task_api')
     def test_cluster_event_of_no_cluster_is_dropped(self, task_api):

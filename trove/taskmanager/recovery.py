@@ -35,6 +35,7 @@ import threading
 import time
 
 from oslo_log import log as logging
+import oslo_messaging as messaging
 from oslo_service import loopingcall
 from oslo_utils import timeutils
 from sqlalchemy import func
@@ -50,9 +51,16 @@ from trove.common.strategies.cluster import strategy
 from trove.datastore import models as datastore_models
 from trove.instance.models import DBInstance
 from trove.instance.models import InstanceServiceStatus
+from trove import rpc
 
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
+# How long the RPC server of a slot may take to start before the slot is
+# given up (its queue may be one the broker cannot declare any more).
+SLOT_SERVE_TIMEOUT = 60
+# How often a replica without a slot in service looks at the membership
+# (and so tries for a slot).
+SLOT_POKE = 10
 
 _hub = None
 _hub_lock = threading.Lock()
@@ -121,9 +129,18 @@ class RecoveryHub(object):
         self._lock = threading.Lock()
         self._pool = None
         self._ticker = None
+        # The RPC server of the slot held (cluster_recovery_slots), the
+        # slot whose server is starting and since when, and a counter that
+        # tells a server started for a slot given up meanwhile.
+        self._slot_server = None
+        self._slot_serving = None
+        self._slot_generation = 0
+        self._slot_poked = 0
 
     def start(self, context):
         self.context = context
+        self.coordinator.on_slot_held = self._serve_slot
+        self.coordinator.on_slot_lost = self._stop_slot
         self.coordinator.start()
         self._pool = futures.ThreadPoolExecutor(
             max_workers=CONF.cluster_recovery_workers)
@@ -143,8 +160,78 @@ class RecoveryHub(object):
         if self._pool is not None:
             self._pool.shutdown(wait=False)
             self._pool = None
+        self._stop_slot()
         self.coordinator.stop()
         self.started = False
+
+    # The slot (cluster_recovery_slots): trove-conductor sends this replica
+    # the events of the clusters it covers through the slot's server. The
+    # server starts in the background (declaring its queue can hang on a
+    # broker that cannot declare that queue any more); the replica joins
+    # the group once it is up, and gives the slot up when it is not up in
+    # SLOT_SERVE_TIMEOUT seconds.
+
+    def _serve_slot(self, slot):
+        self._stop_slot()
+        with self._lock:
+            self._slot_generation += 1
+            generation = self._slot_generation
+            self._slot_serving = (slot, time.monotonic())
+        threading.Thread(target=self._start_slot_server,
+                         args=(slot, generation), daemon=True).start()
+
+    def _start_slot_server(self, slot, generation):
+        from trove.taskmanager import api as task_api
+        key = (CONF.taskmanager_rpc_encr_key
+               if CONF.enable_secure_rpc_messaging else None)
+        target = messaging.Target(topic=CONF.taskmanager_queue, server=slot,
+                                  version=task_api.API.API_LATEST_VERSION)
+        try:
+            server = rpc.get_server(target, [SlotEndpoint(self)], key=key)
+            server.start()
+        except Exception:
+            LOG.exception("Cannot serve slot %s.", slot)
+            return
+        with self._lock:
+            current = generation == self._slot_generation
+            if current:
+                self._slot_server = server
+                self._slot_serving = None
+        if not current:
+            # Given up meanwhile: another replica may hold the slot now.
+            self._stop_server(server)
+            return
+        LOG.info("Taking the cluster events of slot %s.", slot)
+        self.coordinator.slot_served()
+
+    def _check_slot(self, now):
+        with self._lock:
+            serving = self._slot_serving
+            late = (serving is not None and
+                    now - serving[1] > SLOT_SERVE_TIMEOUT)
+            if late:
+                self._slot_generation += 1
+                self._slot_serving = None
+        if late:
+            LOG.error("The RPC server of slot %s did not start in %d "
+                      "seconds.", serving[0], SLOT_SERVE_TIMEOUT)
+            self.coordinator.give_up_slot()
+
+    def _stop_slot(self):
+        with self._lock:
+            self._slot_generation += 1
+            self._slot_serving = None
+            server, self._slot_server = self._slot_server, None
+        if server is not None:
+            self._stop_server(server)
+
+    @staticmethod
+    def _stop_server(server):
+        try:
+            server.stop()
+            server.wait()
+        except Exception:
+            LOG.exception("Failed to stop the server of the slot.")
 
     # What asks for a look
 
@@ -208,6 +295,14 @@ class RecoveryHub(object):
     def _tick(self):
         try:
             now = time.monotonic()
+            self._check_slot(now)
+            # Without a slot in service, ask for the membership now and
+            # then: that is where a slot is tried for (no event comes to a
+            # replica that watches nothing).
+            if (not self.coordinator.watching and
+                    now - self._slot_poked >= SLOT_POKE):
+                self._slot_poked = now
+                self.coordinator.members()
             with self._lock:
                 ready = [(cluster_id, reason)
                          for cluster_id, (due, reason) in self.pending.items()
@@ -269,3 +364,21 @@ class RecoveryHub(object):
             make = getattr(strat, 'cluster_recovery', None)
             self.recoveries[manager] = make(manager) if make else None
         return self.recoveries[manager]
+
+
+class SlotEndpoint(object):
+    """What trove-conductor sends a slot: the events of the clusters the
+    replica holding it covers.
+    """
+
+    def __init__(self, hub):
+        self.hub = hub
+
+    @property
+    def target(self):
+        from trove.taskmanager import api as task_api
+        return messaging.Target(version=task_api.API.API_LATEST_VERSION)
+
+    def cluster_event(self, context, cluster_id, instance_id, kind,
+                      payload=None, sent=None):
+        self.hub.on_event(cluster_id, instance_id, kind, payload)

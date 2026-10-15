@@ -343,6 +343,35 @@ class TestManager(trove_testtools.TestCase):
             self.assertTrue(exit_error_type)
 
 
+class TestRecoveryHubWithTheService(trove_testtools.TestCase):
+    """With cluster_recovery_slots the hub starts with the service, to hold
+    a slot before the first event, and stops with it.
+    """
+
+    @patch('trove.taskmanager.manager.recovery')
+    def test_starts_with_slots(self, recovery):
+        self.patch_conf_property('cluster_recovery_slots', 4)
+        manager = Manager()
+        manager.service_started()
+        recovery.hub.assert_called_once_with(manager.admin_context)
+
+    @patch('trove.taskmanager.manager.recovery')
+    def test_lazy_without_slots(self, recovery):
+        self.patch_conf_property('cluster_recovery_slots', 0)
+        Manager().service_started()
+        recovery.hub.assert_not_called()
+
+    @patch('trove.taskmanager.manager.recovery')
+    def test_stops_with_the_service(self, recovery):
+        recovery.hub.return_value.started = True
+        Manager().service_stopping()
+        recovery.hub.return_value.stop.assert_called_once_with()
+        recovery.hub.return_value.stop.reset_mock()
+        recovery.hub.return_value.started = False
+        Manager().service_stopping()
+        recovery.hub.return_value.stop.assert_not_called()
+
+
 class TestTaskManagerService(trove_testtools.TestCase):
     def test_app_factory(self):
         test_service = service.app_factory(Mock())

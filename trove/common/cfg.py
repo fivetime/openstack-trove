@@ -320,6 +320,17 @@ common_opts = [
                     'act, and the cluster\'s recovery task keeps them from '
                     'acting twice. With that many replicas or fewer, every '
                     'replica watches every cluster.'),
+    cfg.IntOpt('cluster_recovery_slots', default=0, min=0,
+               help='Named slots the task manager replicas hold on the '
+                    '[coordination] backend, one each: a replica is a '
+                    'member of the recovery group under its slot\'s name '
+                    'and serves that name over RPC, so trove-conductor '
+                    'sends each cluster event only to the '
+                    'cluster_recovery_coverage replicas that watch the '
+                    'cluster instead of to every replica. At most this '
+                    'many replicas take part in recovery; one beyond waits '
+                    'for a free slot. 0: every event goes to every task '
+                    'manager, as before.'),
     cfg.IntOpt('cluster_event_forward_interval', default=30, min=0,
                help='Seconds during which trove-conductor forwards one '
                     'report of a kind per cluster to the task managers: '

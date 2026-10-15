@@ -78,6 +78,17 @@ class ApiTest(trove_testtools.TestCase):
         self._verify_cast('cluster_event', cluster_id='c1', instance_id='i1',
                           kind='abnormal', payload={'reason': 'x'}, sent=3.0)
 
+    def test_cluster_event_to_the_watching_replicas(self):
+        self.api.cluster_event('c1', 'i1', 'abnormal', payload={}, sent=3.0,
+                               servers=['recovery-0', 'recovery-2'])
+        self.assertEqual(
+            [mock.call(version=self.api.API_BASE_VERSION,
+                       server='recovery-0'),
+             mock.call(version=self.api.API_BASE_VERSION,
+                       server='recovery-2')],
+            self.api.client.prepare.call_args_list)
+        self.assertEqual(2, self.call_context.cast.call_count)
+
     def test_detach_replica(self):
         self.api.detach_replica('some-instance-id')
 

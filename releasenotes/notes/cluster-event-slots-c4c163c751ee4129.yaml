@@ -1,0 +1,23 @@
+---
+features:
+  - |
+    ``[DEFAULT] cluster_recovery_slots`` (default 0, as before) lets
+    trove-conductor send each cluster event only to the task manager
+    replicas that watch the cluster instead of to every replica. With
+    slots, a task manager holds the lock of one slot on the
+    ``[coordination]`` backend, is a member of the recovery group under the
+    slot's name (so the clusters it covers stay with the slot when its pod
+    is replaced) and takes the events of the clusters it covers on the RPC
+    server named after the slot; the conductor reads the group's members
+    and computes the same rendezvous hash. A write lease request still goes
+    to every task manager, and so does every event while the membership
+    cannot be read or a member is not a slot (an older task manager during
+    an upgrade). At most that many replicas take part in recovery; one
+    beyond waits for a free slot. Without slots the recovery hub still
+    starts on its first use; with them it starts with the service, and it
+    now leaves the group when the service stops.
+fixes:
+  - |
+    A task manager or conductor that cannot reach the ``[coordination]``
+    backend tries to connect again at most once per membership timeout
+    instead of at every look at its membership.

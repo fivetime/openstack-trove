@@ -99,19 +99,27 @@ class API(object):
         raise ValueError(_("Could not transform %s") % obj_ref)
 
     def cluster_event(self, cluster_id, instance_id, kind, payload=None,
-                      sent=None):
+                      sent=None, servers=None):
         """A cluster member's report of its cluster state, from the
-        conductor: to every task manager replica (fanout), so that the
-        ones that watch the cluster look at it. Fire and forget, no
-        notification.
+        conductor: to the given task manager servers (the slots of the
+        replicas that watch the cluster), or to every replica (fanout)
+        without them. Fire and forget, no notification.
         """
-        LOG.debug("Casting cluster_event %s of cluster %s to every task "
-                  "manager", kind, cluster_id)
-        cctxt = self.client.prepare(version=self.API_BASE_VERSION,
-                                    fanout=True)
-        cctxt.cast(self.context, "cluster_event", cluster_id=cluster_id,
-                   instance_id=instance_id, kind=kind, payload=payload or {},
-                   sent=sent)
+        kwargs = dict(cluster_id=cluster_id, instance_id=instance_id,
+                      kind=kind, payload=payload or {}, sent=sent)
+        if not servers:
+            LOG.debug("Casting cluster_event %s of cluster %s to every task "
+                      "manager", kind, cluster_id)
+            cctxt = self.client.prepare(version=self.API_BASE_VERSION,
+                                        fanout=True)
+            cctxt.cast(self.context, "cluster_event", **kwargs)
+            return
+        for server in servers:
+            LOG.debug("Casting cluster_event %s of cluster %s to %s", kind,
+                      cluster_id, server)
+            cctxt = self.client.prepare(version=self.API_BASE_VERSION,
+                                        server=server)
+            cctxt.cast(self.context, "cluster_event", **kwargs)
 
     def _delete_heartbeat(self, instance_id):
         agent_heart_beat = agent_models.AgentHeartBeat()

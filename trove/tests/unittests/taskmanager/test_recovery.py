@@ -49,6 +49,71 @@ class HubTest(trove_testtools.TestCase):
                           side_effect=lambda: self.now).start()
         self.addCleanup(mock.patch.stopall)
 
+    @mock.patch.object(recovery.rpc, 'get_server')
+    def test_a_held_slot_is_served_then_joined(self, get_server):
+        self.patch_conf_property('taskmanager_queue', 'taskmanager')
+        with mock.patch.object(recovery.threading, 'Thread') as thread:
+            self.hub._serve_slot('recovery-1')
+            target_fn = thread.call_args.kwargs['target']
+            args = thread.call_args.kwargs['args']
+        target_fn(*args)
+        target = get_server.call_args.args[0]
+        self.assertEqual('taskmanager', target.topic)
+        self.assertEqual('recovery-1', target.server)
+        get_server.return_value.start.assert_called_once_with()
+        self.coordinator.slot_served.assert_called_once_with()
+        endpoint = get_server.call_args.args[1][0]
+        endpoint.cluster_event('ctx', 'c1', 'i1', 'abnormal',
+                               payload={'reason': 'r'}, sent=1.0)
+        self.assertIn('c1', self.hub.pending)
+        # A lost slot, or the hub stopped: the server stops.
+        server = get_server.return_value
+        self.hub._stop_slot()
+        server.stop.assert_called_once_with()
+        self.assertIsNone(self.hub._slot_server)
+        self.hub.stop()
+        self.coordinator.stop.assert_called_once_with()
+
+    @mock.patch.object(recovery.rpc, 'get_server')
+    def test_a_slot_whose_server_does_not_start_is_given_up(self,
+                                                            get_server):
+        with mock.patch.object(recovery.threading, 'Thread') as thread:
+            self.hub._serve_slot('recovery-2')
+            target_fn = thread.call_args.kwargs['target']
+            args = thread.call_args.kwargs['args']
+        # Not up after the timeout: given up.
+        self.hub._check_slot(self.now + 1)
+        self.coordinator.give_up_slot.assert_not_called()
+        self.hub._check_slot(self.now + recovery.SLOT_SERVE_TIMEOUT + 1)
+        self.coordinator.give_up_slot.assert_called_once_with()
+        # Its server comes up late: stopped at once, no member.
+        target_fn(*args)
+        get_server.return_value.stop.assert_called_once_with()
+        self.coordinator.slot_served.assert_not_called()
+        self.assertIsNone(self.hub._slot_server)
+
+    def test_without_a_slot_the_membership_is_asked_now_and_then(self):
+        self.hub._pool = mock.Mock()
+        self.coordinator.watching = False
+        self.hub._tick()
+        self.hub._tick()
+        self.assertEqual(1, self.coordinator.members.call_count)
+        self.now += recovery.SLOT_POKE
+        self.hub._tick()
+        self.assertEqual(2, self.coordinator.members.call_count)
+        self.coordinator.watching = True
+        self.now += recovery.SLOT_POKE
+        self.hub._tick()
+        self.assertEqual(2, self.coordinator.members.call_count)
+
+    def test_the_hub_wires_the_slot_callbacks(self):
+        self.hub.start('ctx')
+        self.addCleanup(self.hub.stop)
+        self.assertEqual(self.hub._serve_slot,
+                         self.coordinator.on_slot_held)
+        self.assertEqual(self.hub._stop_slot,
+                         self.coordinator.on_slot_lost)
+
     def test_an_event_asks_for_a_look_at_a_covered_cluster(self):
         self.hub.on_event('c1', 'i1', 'abnormal', {'reason': 'detached'})
         self.hub.on_event('elsewhere', 'i9', 'abnormal')

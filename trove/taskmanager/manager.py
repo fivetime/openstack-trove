@@ -518,6 +518,21 @@ class Manager(periodic_task.PeriodicTasks):
             mgmtmodels.publish_exist_events(self.exists_transformer,
                                             self.admin_context)
 
+    def service_started(self):
+        """With cluster_recovery_slots the recovery hub starts with the
+        service, to hold a slot before the first event: trove-conductor
+        sends events only to the replicas that hold one.
+        """
+        if CONF.cluster_recovery_slots:
+            recovery.hub(self.admin_context)
+
+    def service_stopping(self):
+        """Leave the recovery group and give the slot up, so that the
+        other replicas take over the clusters at once.
+        """
+        if recovery.hub().started:
+            recovery.hub().stop()
+
     def cluster_event(self, context, cluster_id, instance_id, kind,
                       payload=None, sent=None):
         """A cluster member's report of its cluster state, from the

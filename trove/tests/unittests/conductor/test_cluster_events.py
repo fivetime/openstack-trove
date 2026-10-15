@@ -12,7 +12,10 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from unittest import mock
+
 from trove.common import cfg
+from trove.common import coordination
 from trove.conductor import cluster_events
 from trove.tests.unittests import trove_testtools
 
@@ -76,3 +79,49 @@ class ClusterEventGateTest(trove_testtools.TestCase):
         self.clock.now += 31
         self.gate.admit('fresh', 'abnormal')
         self.assertEqual(['fresh'], list(self.gate._last))
+
+
+class ClusterEventRouteTest(trove_testtools.TestCase):
+
+    def setUp(self):
+        super(ClusterEventRouteTest, self).setUp()
+        self.patch_conf_property('cluster_recovery_slots', 4)
+        self.patch_conf_property('cluster_recovery_coverage', 2)
+        self.patch_conf_property('backend_url', 'etcd3+http://e:2379',
+                                 section='coordination')
+        self.observer = mock.Mock()
+        self.observer.members.return_value = [
+            b'recovery-0', b'recovery-1', b'recovery-2', b'recovery-3']
+        self.route = cluster_events.ClusterEventRoute(self.observer)
+
+    def test_to_the_two_that_watch_the_cluster(self):
+        servers = self.route.servers('c1', 'abnormal')
+        self.assertEqual(
+            [m.decode() for m in coordination.coverers(
+                'c1', self.observer.members.return_value, 2)], servers)
+        self.assertEqual(2, len(servers))
+        self.observer.start.assert_called_once_with()
+
+    def test_a_lease_request_goes_to_every_one(self):
+        self.assertIsNone(self.route.servers('c1', 'lease_request'))
+
+    def test_every_one_without_slots(self):
+        self.patch_conf_property('cluster_recovery_slots', 0)
+        self.assertIsNone(self.route.servers('c1', 'abnormal'))
+        self.observer.members.assert_not_called()
+
+    def test_every_one_without_a_backend(self):
+        self.patch_conf_property('backend_url', None, section='coordination')
+        self.assertIsNone(self.route.servers('c1', 'abnormal'))
+
+    def test_every_one_without_a_membership(self):
+        self.observer.members.return_value = []
+        self.assertIsNone(self.route.servers('c1', 'abnormal'))
+        self.observer.members.side_effect = Exception('backend')
+        self.assertIsNone(self.route.servers('c1', 'abnormal'))
+
+    def test_every_one_during_an_upgrade(self):
+        # An older task manager is a member as host:pid; it has no slot
+        # queue, so it must get every event.
+        self.observer.members.return_value = [b'recovery-0', b'tm-a:7']
+        self.assertIsNone(self.route.servers('c1', 'abnormal'))

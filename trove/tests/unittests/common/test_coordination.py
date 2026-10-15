@@ -14,6 +14,7 @@
 membership.
 """
 
+import time
 from unittest import mock
 
 from trove.common import coordination
@@ -140,9 +141,12 @@ class CoordinatorTest(trove_testtools.TestCase):
         self.assertFalse(coordinator.connected)
         self.assertEqual([b'tm-a'], coordinator.members())
         self.assertEqual({'c1'}, coordinator.covered(['c1']))
-        # It answers: joined, the membership read.
+        # It answers (and a membership timeout has passed since the last
+        # try: connecting is not tried at every event): joined, the
+        # membership read.
         self.tooz.start.side_effect = None
         coordinator._fetched_at = None
+        coordinator._connect_tried_at = None
         self.assertEqual([b'tm-a', b'tm-b', b'tm-c'], coordinator.members())
         # It stops answering: the last membership stands.
         self.tooz.get_members.return_value.get.side_effect = Exception('gone')
@@ -156,3 +160,199 @@ class CoordinatorTest(trove_testtools.TestCase):
         self.tooz.leave_group.assert_called_once_with(b'g')
         self.tooz.stop.assert_called_once_with()
         self.assertFalse(coordinator.connected)
+
+    def test_connecting_is_not_tried_at_every_call(self):
+        self.tooz.start.side_effect = Exception('refused')
+        coordinator = self._coordinator('etcd3+http://e:2379')
+        coordinator.members()
+        tries = self.backend.call_count
+        for _ in range(5):
+            coordinator._fetched_at = None
+            coordinator.members()
+        self.assertEqual(tries, self.backend.call_count)
+        later = coordinator._connect_tried_at + 31
+        with mock.patch.object(coordination.time, 'monotonic',
+                               return_value=later):
+            coordinator.members()
+        self.assertEqual(tries + 1, self.backend.call_count)
+
+
+class SlotTest(trove_testtools.TestCase):
+    """cluster_recovery_slots: a replica holds a slot's lock and is a
+    member under the slot's name.
+    """
+
+    def setUp(self):
+        super(SlotTest, self).setUp()
+        self.patch_conf_property('cluster_recovery_coverage', 2)
+        self.patch_conf_property('cluster_recovery_slots', 3)
+        self.patch_conf_property('backend_url', 'etcd3+http://e:2379',
+                                 section='coordination')
+        self.backend = mock.patch('tooz.coordination.get_coordinator').start()
+        self.tooz = self.backend.return_value
+        self.members = {b'recovery-0', b'recovery-1', b'recovery-2'}
+        self.tooz.get_members.return_value.get.side_effect = (
+            lambda: set(self.members))
+        self.locks = {}
+        self.free = {0: False, 1: True, 2: True}
+
+        def get_lock(name):
+            index = int(name.rsplit(b'-', 1)[1])
+            lock = self.locks.setdefault(index, mock.Mock())
+            lock.acquire.side_effect = lambda blocking: self.free[index]
+            lock.heartbeat.return_value = True
+            return lock
+        self.tooz.get_lock.side_effect = get_lock
+        self.addCleanup(mock.patch.stopall)
+
+    def _coordinator(self):
+        coordinator = coordination.Coordinator(b'g', b'tm-a')
+        coordinator.on_slot_held = mock.Mock()
+        coordinator.on_slot_lost = mock.Mock()
+        coordinator.start()
+        return coordinator
+
+    def test_holds_the_first_free_slot_and_joins_under_its_name(self):
+        coordinator = self._coordinator()
+        self.assertEqual('recovery-1', coordinator.slot)
+        self.assertEqual(b'recovery-1', coordinator.me)
+        coordinator.on_slot_held.assert_called_once_with('recovery-1')
+        # A member only once the slot's RPC server is up.
+        self.assertEqual([mock.call('etcd3+http://e:2379', b'tm-a')],
+                         self.backend.call_args_list)
+        self.tooz.join_group_create.assert_not_called()
+        self.assertEqual(set(), coordinator.covered(['c1']))
+        coordinator.slot_served()
+        self.assertEqual(
+            [mock.call('etcd3+http://e:2379', b'tm-a'),
+             mock.call('etcd3+http://e:2379', b'recovery-1')],
+            self.backend.call_args_list)
+        self.tooz.join_group_create.assert_called_once_with(b'g')
+        keys = ['cluster-%d' % n for n in range(60)]
+        for key in keys:
+            self.assertEqual(
+                key in coordinator.covered(keys),
+                coordination.covers(b'recovery-1', key,
+                                    sorted(self.members), 2))
+
+    def test_every_slot_held(self):
+        self.free = {0: False, 1: False, 2: False}
+        coordinator = self._coordinator()
+        self.assertIsNone(coordinator.slot)
+        self.assertFalse(coordinator.watching)
+        self.tooz.join_group_create.assert_not_called()
+        self.assertEqual(set(), coordinator.covered(['c1', 'c2']))
+        self.assertFalse(coordinator.covers('c1'))
+        # A slot frees; tried again only after SLOT_RETRY.
+        self.free[2] = True
+        coordinator.members()
+        self.assertIsNone(coordinator.slot)
+        later = coordinator._tried_slot_at + coordination.SLOT_RETRY
+        with mock.patch.object(coordination.time, 'monotonic',
+                               return_value=later):
+            coordinator.members()
+        self.assertEqual('recovery-2', coordinator.slot)
+        coordinator.slot_served()
+        self.tooz.join_group_create.assert_called_once_with(b'g')
+
+    def test_a_lapsed_slot_is_given_up_and_taken_again(self):
+        coordinator = self._coordinator()
+        coordinator.slot_served()
+        self.locks[1].heartbeat.return_value = False
+        self.free[1] = False
+        coordinator._fetched_at = None
+        self.assertEqual([], coordinator.members())
+        coordinator.on_slot_lost.assert_called_once_with()
+        self.tooz.leave_group.assert_called_once_with(b'g')
+        self.assertIsNone(coordinator.slot)
+        self.assertEqual(set(), coordinator.covered(['c1']))
+        later = coordinator._tried_slot_at + coordination.SLOT_RETRY
+        self.free[2] = True
+        with mock.patch.object(coordination.time, 'monotonic',
+                               return_value=later):
+            coordinator.members()
+        self.assertEqual('recovery-2', coordinator.slot)
+
+    def test_a_slot_that_cannot_be_served_is_parked(self):
+        coordinator = self._coordinator()
+        self.assertEqual('recovery-1', coordinator.slot)
+        coordinator.give_up_slot()
+        # Its lock stays held: no other replica tries it meanwhile.
+        self.locks[1].release.assert_not_called()
+        self.assertIsNone(coordinator.slot)
+        # Tried again at once, slot 1 passed over even though it is free.
+        coordinator.members()
+        self.assertEqual('recovery-2', coordinator.slot)
+        # After the quarantine, slot 1 is released and a candidate again.
+        coordinator.give_up_slot()
+        self.free[2] = False
+        later = time.monotonic() + coordination.SLOT_QUARANTINE + 1
+        with mock.patch.object(coordination.time, 'monotonic',
+                               return_value=later):
+            coordinator.members()
+        self.locks[1].release.assert_called_once_with()
+        self.locks[2].release.assert_called_once_with()
+        self.assertEqual('recovery-1', coordinator.slot)
+        # Stopping releases everything held.
+        coordinator.stop()
+        self.assertEqual(2, self.locks[1].release.call_count)
+
+    def test_stop_gives_the_slot_up(self):
+        coordinator = self._coordinator()
+        coordinator.slot_served()
+        coordinator.stop()
+        self.tooz.leave_group.assert_called_once_with(b'g')
+        self.locks[1].release.assert_called_once_with()
+        self.assertIsNone(coordinator.slot)
+
+    def test_slot_names(self):
+        self.assertEqual('recovery-7', coordination.slot_name(7))
+        self.assertTrue(coordination.is_slot(b'recovery-7'))
+        self.assertTrue(coordination.is_slot('recovery-10'))
+        self.assertFalse(coordination.is_slot(b'tm-a:12'))
+        self.assertFalse(coordination.is_slot('recovery-'))
+        self.assertFalse(coordination.is_slot('recovery-x'))
+
+
+class ObserverTest(trove_testtools.TestCase):
+    """The conductor reads the membership without joining."""
+
+    def setUp(self):
+        super(ObserverTest, self).setUp()
+        self.patch_conf_property('cluster_recovery_slots', 3)
+        self.backend = mock.patch('tooz.coordination.get_coordinator').start()
+        self.tooz = self.backend.return_value
+        self.tooz.get_members.return_value.get.return_value = {
+            b'recovery-0', b'recovery-1'}
+        self.addCleanup(mock.patch.stopall)
+
+    def test_observer(self):
+        self.patch_conf_property('backend_url', 'etcd3+http://e:2379',
+                                 section='coordination')
+        observer = coordination.Coordinator(b'g', b'cd-a', observer=True)
+        observer.start()
+        self.backend.assert_called_once_with('etcd3+http://e:2379',
+                                             b'observer:cd-a')
+        self.tooz.join_group_create.assert_not_called()
+        self.tooz.get_lock.assert_not_called()
+        self.assertEqual([b'recovery-0', b'recovery-1'], observer.members())
+        self.assertEqual(
+            coordination.coverers('c1', [b'recovery-0', b'recovery-1'], 2),
+            observer.coverers_of('c1'))
+
+    def test_observer_without_a_backend_sees_no_one(self):
+        self.patch_conf_property('backend_url', None, section='coordination')
+        observer = coordination.Coordinator(b'g', b'cd-a', observer=True)
+        observer.start()
+        self.assertEqual([], observer.members())
+
+    def test_observer_of_a_group_not_created(self):
+        from tooz import coordination as tooz_coordination
+        self.patch_conf_property('backend_url', 'etcd3+http://e:2379',
+                                 section='coordination')
+        self.tooz.get_members.return_value.get.side_effect = (
+            tooz_coordination.GroupNotCreated(b'g'))
+        observer = coordination.Coordinator(b'g', b'cd-a', observer=True)
+        observer.start()
+        self.assertEqual([], observer.members())
+        self.tooz.join_group_create.assert_not_called()
