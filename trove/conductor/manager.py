@@ -21,6 +21,7 @@ from trove.common import cfg
 from trove.common import exception as trove_exception
 from trove.common.rpc import version as rpc_version
 from trove.common.serializable_notification import SerializableNotification
+from trove.conductor import cluster_events
 from trove.conductor import heartbeats
 from trove.conductor.models import LastSeen
 from trove.extensions.common import models as common_models
@@ -39,6 +40,7 @@ class Manager(periodic_task.PeriodicTasks):
     def __init__(self):
         super(Manager, self).__init__(CONF)
         self.keepalives = heartbeats.Keepalives(self._heartbeat_in_full)
+        self.cluster_events = cluster_events.ClusterEventGate()
 
     def _message_too_old(self, instance_id, method_name, sent):
         fields = {
@@ -137,6 +139,11 @@ class Manager(periodic_task.PeriodicTasks):
         if not cluster_id:
             LOG.debug("Cluster event %s from instance %s, which is in no "
                       "cluster: dropped.", kind, instance_id)
+            return
+        if not self.cluster_events.admit(cluster_id, kind):
+            LOG.debug("Cluster event %s from instance %s (cluster %s): "
+                      "the same as forwarded moments ago, dropped.",
+                      kind, instance_id, cluster_id)
             return
         LOG.info("Cluster event %s from instance %s (cluster %s): %s.",
                  kind, instance_id, cluster_id,

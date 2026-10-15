@@ -16,6 +16,7 @@
 
 """Model classes that form the core of instances functionality."""
 import base64
+import collections
 import json
 import os.path
 import re
@@ -2177,38 +2178,42 @@ class DBInstance(dbmodels.DatabaseModelBase):
 
 
 class instance_encryption_key_cache(object):
+    """A least recently used cache of a per-instance value that never
+    changes once the instance exists: its RPC encryption key (made when the
+    instance is created, or none when secure RPC messaging was off then)
+    and its guest message partition.
 
-    def __init__(self, func, lru_cache_size=10):
-        self._table = {}
-        self._lru = []
+    None is cached like any value: an instance made without a key never
+    gets one later. The task manager builds a guest client, and so looks
+    the key up, for every member it asks about; with a cache smaller than
+    the members it looks at, every lookup went to the database (a quarter
+    of the task manager's time in a Galera recovery storm).
+    """
+
+    _MISSING = object()
+
+    def __init__(self, func, lru_cache_size=None):
+        self._table = collections.OrderedDict()
         self._lru_cache_size = lru_cache_size
         self._func = func
 
+    @property
+    def size(self):
+        return self._lru_cache_size or CONF.instance_cache_size
+
     def get(self, instance_id):
-        if instance_id in self._table:
-            if self._lru.index(instance_id) > 0:
-                self._lru.remove(instance_id)
-                self._lru.insert(0, instance_id)
-
-            return self._table[instance_id]
-        else:
-            val = self._func(instance_id)
-
-            # BUG(1650518): Cleanup in the Pike release
-            if val is None:
-                return val
-
-            # We need string anyway
-            if isinstance(val, bytes):
-                val = encodeutils.safe_decode(val)
-
-            if len(self._lru) == self._lru_cache_size:
-                tail = self._lru.pop()
-                del self._table[tail]
-
-            self._lru.insert(0, instance_id)
-            self._table[instance_id] = val
-            return self._table[instance_id]
+        val = self._table.get(instance_id, self._MISSING)
+        if val is not self._MISSING:
+            self._table.move_to_end(instance_id)
+            return val
+        val = self._func(instance_id)
+        # We need string anyway
+        if isinstance(val, bytes):
+            val = encodeutils.safe_decode(val)
+        self._table[instance_id] = val
+        while len(self._table) > self.size:
+            self._table.popitem(last=False)
+        return val
 
     def __getitem__(self, instance_id):
         return self.get(instance_id)
@@ -2237,7 +2242,7 @@ def _get_instance_message_partition(instance_id):
 
 # An instance keeps the guest message partition it was created on.
 _instance_message_partition = instance_encryption_key_cache(
-    func=_get_instance_message_partition, lru_cache_size=200)
+    func=_get_instance_message_partition)
 
 
 def get_instance_message_partition(instance_id):

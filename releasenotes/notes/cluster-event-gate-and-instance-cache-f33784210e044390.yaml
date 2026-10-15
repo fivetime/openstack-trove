@@ -1,0 +1,25 @@
+---
+features:
+  - |
+    trove-conductor forwards one cluster event of a kind per cluster within
+    ``cluster_event_forward_interval`` seconds (default 30; 0 forwards
+    every event): the same kind for the same cluster from any member is
+    dropped until then, since a task manager looks at every member on any
+    event. A different kind and a write lease request always pass. When
+    many clusters lose power at once their waiting members repeat their
+    events, every task manager receives each one, and the receiving was
+    most of a task manager's work.
+  - |
+    The RPC encryption key and the guest message partition of an instance
+    are cached for ``instance_cache_size`` instances (default 10000) in
+    every control plane process, and an instance without a key is cached
+    too: neither changes once the instance exists. The cache held ten
+    keys, so a task manager looking at many clusters asked the database
+    for every member's key each time.
+other:
+  - |
+    ``trove.tests.scale.fake_galera`` fakes Galera cluster members by the
+    thousand (recovery views, bootstrap, heartbeats, cluster events) for
+    scale tests of the task manager's Galera recovery, and counts what
+    must never happen: a bootstrap from a member behind another, a second
+    primary component, a member joining from ahead.

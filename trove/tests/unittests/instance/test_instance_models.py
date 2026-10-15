@@ -746,14 +746,43 @@ class TestInstanceKeyCaching(trove_testtools.TestCase):
         self.assertEqual(keycache[5], 123)
         self.assertEqual(keyfn.call_count, 7)
 
-    # BUG(1650518): Cleanup in the Pike release
-    def test_not_caching_none(self):
+    def test_caching_none(self):
+        # An instance made without a key (secure RPC messaging off then)
+        # never gets one later: no is an answer too.
         keyfn = Mock(return_value=None)
         keycache = instance_encryption_key_cache(keyfn, 5)
         self.assertIsNone(keycache[30])
         self.assertEqual(keyfn.call_count, 1)
         self.assertIsNone(keycache[30])
-        self.assertEqual(keyfn.call_count, 2)
+        self.assertEqual(keyfn.call_count, 1)
+
+    def test_least_recently_used_goes(self):
+        keyfn = Mock(side_effect=lambda i: i * 2)
+        keycache = instance_encryption_key_cache(keyfn, 3)
+        for i in (1, 2, 3):
+            keycache[i]
+        keycache[1]           # 2 is now the least recently used
+        keycache[4]           # evicts 2
+        self.assertEqual(4, keyfn.call_count)
+        keycache[1]
+        keycache[3]
+        self.assertEqual(4, keyfn.call_count)
+        self.assertEqual(4, keycache[2])
+        self.assertEqual(5, keyfn.call_count)
+
+    def test_bytes_kept_as_text(self):
+        keycache = instance_encryption_key_cache(Mock(return_value=b'k'), 2)
+        self.assertEqual('k', keycache['x'])
+
+    def test_size_from_the_configuration(self):
+        cfg.CONF.set_override('instance_cache_size', 2)
+        self.addCleanup(cfg.CONF.clear_override, 'instance_cache_size')
+        keyfn = Mock(side_effect=lambda i: i)
+        keycache = instance_encryption_key_cache(keyfn)
+        for i in (1, 2, 3, 1):
+            keycache[i]
+        # 1 was evicted by 3 and looked up again.
+        self.assertEqual(4, keyfn.call_count)
 
 
 class TestDetailInstance(trove_testtools.TestCase):

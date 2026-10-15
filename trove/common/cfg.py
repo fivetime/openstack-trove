@@ -320,6 +320,13 @@ common_opts = [
                     'act, and the cluster\'s recovery task keeps them from '
                     'acting twice. With that many replicas or fewer, every '
                     'replica watches every cluster.'),
+    cfg.IntOpt('cluster_event_forward_interval', default=30, min=0,
+               help='Seconds during which trove-conductor forwards one '
+                    'report of a kind per cluster to the task managers: '
+                    'the same kind for the same cluster from any member is '
+                    'dropped until then (a task manager looks at every '
+                    'member on any report). A different kind and a write '
+                    'lease request always pass. 0 forwards every report.'),
     cfg.IntOpt('cluster_event_coalesce', default=5, min=0,
                help='Seconds between two looks of the task manager at one '
                     'cluster: the reports of its members within that time '
@@ -612,6 +619,12 @@ common_opts = [
                help='Maximum size of a chunk saved in guest log container.'),
     cfg.IntOpt('guest_log_expiry', default=2592000,
                help='Expiry (in seconds) of objects in guest log container.'),
+    cfg.IntOpt('instance_cache_size', default=10000, min=1,
+               help='Instances whose RPC encryption key and guest message '
+                    'partition each control plane process keeps in memory '
+                    '(neither changes once the instance exists). A guest '
+                    'client is made for every instance the process talks '
+                    'to, and each needs both.'),
     cfg.BoolOpt('enable_secure_rpc_messaging', default=True,
                 help='Should RPC messaging traffic be secured by encryption.'),
     cfg.StrOpt('taskmanager_rpc_encr_key',

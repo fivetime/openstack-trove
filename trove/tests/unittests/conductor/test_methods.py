@@ -98,6 +98,17 @@ class ConductorMethodTests(trove_testtools.TestCase):
                          .args)
 
     @patch('trove.conductor.manager.task_api')
+    def test_repeated_cluster_event_forwarded_once(self, task_api):
+        # Three members waiting for a primary component: one look.
+        for member, sent in (('m1', 10.0), ('m2', 10.5), ('m3', 11.0)):
+            self.cond_mgr.cluster_event(None, member, 'abnormal', sent=sent,
+                                        cluster_id='c7', payload={})
+        self.assertEqual(1, task_api.API.return_value.cluster_event.call_count)
+        self.cond_mgr.cluster_event(None, 'm1', 'normal', sent=12.0,
+                                    cluster_id='c7', payload={})
+        self.assertEqual(2, task_api.API.return_value.cluster_event.call_count)
+
+    @patch('trove.conductor.manager.task_api')
     def test_cluster_event_of_no_cluster_is_dropped(self, task_api):
         self.cond_mgr.cluster_event(None, utils.generate_uuid(), 'abnormal',
                                     sent=10.0, payload={})
