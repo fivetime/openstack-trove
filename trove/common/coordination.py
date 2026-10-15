@@ -75,6 +75,14 @@ def slot_name(index):
     return '%s%d' % (SLOT_PREFIX, index)
 
 
+def slot_topic():
+    """The RPC topic of the slot servers. Not the task manager's own
+    topic: an RPC server consumes its topic's shared queue and fanout too,
+    and a slot server takes cluster events only.
+    """
+    return '%s-slots' % CONF.taskmanager_queue
+
+
 def is_slot(member):
     member = member.decode() if isinstance(member, bytes) else member
     rest = member[len(SLOT_PREFIX):]

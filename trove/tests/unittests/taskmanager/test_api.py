@@ -81,11 +81,13 @@ class ApiTest(trove_testtools.TestCase):
     def test_cluster_event_to_the_watching_replicas(self):
         self.api.cluster_event('c1', 'i1', 'abnormal', payload={}, sent=3.0,
                                servers=['recovery-0', 'recovery-2'])
+        # On the slots' own topic: a cast on the task manager's topic with
+        # a server would reach the server queue of the main RPC server.
         self.assertEqual(
             [mock.call(version=self.api.API_BASE_VERSION,
-                       server='recovery-0'),
+                       topic='taskmanager-slots', server='recovery-0'),
              mock.call(version=self.api.API_BASE_VERSION,
-                       server='recovery-2')],
+                       topic='taskmanager-slots', server='recovery-2')],
             self.api.client.prepare.call_args_list)
         self.assertEqual(2, self.call_context.cast.call_count)
 

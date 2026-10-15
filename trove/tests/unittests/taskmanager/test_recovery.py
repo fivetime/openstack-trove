@@ -58,8 +58,16 @@ class HubTest(trove_testtools.TestCase):
             args = thread.call_args.kwargs['args']
         target_fn(*args)
         target = get_server.call_args.args[0]
-        self.assertEqual('taskmanager', target.topic)
+        # Not the task manager's own topic: a server consumes its topic's
+        # shared queue and fanout too, and would take the task manager's
+        # casts (create_instance...) it has no method for. 2026-10-15 rev
+        # 108 had them on the same topic for two minutes.
+        self.assertEqual('taskmanager-slots', target.topic)
+        self.assertNotEqual(recovery.CONF.taskmanager_queue, target.topic)
         self.assertEqual('recovery-1', target.server)
+        self.assertEqual(['cluster_event'], [
+            m for m in dir(get_server.call_args.args[1][0])
+            if not m.startswith('_') and m not in ('hub', 'target')])
         get_server.return_value.start.assert_called_once_with()
         self.coordinator.slot_served.assert_called_once_with()
         endpoint = get_server.call_args.args[1][0]

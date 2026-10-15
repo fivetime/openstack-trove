@@ -184,7 +184,8 @@ class RecoveryHub(object):
         from trove.taskmanager import api as task_api
         key = (CONF.taskmanager_rpc_encr_key
                if CONF.enable_secure_rpc_messaging else None)
-        target = messaging.Target(topic=CONF.taskmanager_queue, server=slot,
+        target = messaging.Target(topic=coordination.slot_topic(),
+                                  server=slot,
                                   version=task_api.API.API_LATEST_VERSION)
         try:
             server = rpc.get_server(target, [SlotEndpoint(self)], key=key)

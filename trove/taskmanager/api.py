@@ -114,10 +114,12 @@ class API(object):
                                         fanout=True)
             cctxt.cast(self.context, "cluster_event", **kwargs)
             return
+        from trove.common import coordination
         for server in servers:
             LOG.debug("Casting cluster_event %s of cluster %s to %s", kind,
                       cluster_id, server)
             cctxt = self.client.prepare(version=self.API_BASE_VERSION,
+                                        topic=coordination.slot_topic(),
                                         server=server)
             cctxt.cast(self.context, "cluster_event", **kwargs)
 
