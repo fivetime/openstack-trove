@@ -401,7 +401,7 @@ class CreateInstanceTest(trove_testtools.TestCase):
     @patch.object(task_api.API, 'create_instance')
     @patch.object(models.msg_partition, 'choose',
                   side_effect=exception.GuestMessagePartitionsFull(
-                      zone='az', usage='default 1/1'))
+                      zone='az'))
     def test_no_instance_when_every_partition_is_full(self, choose,
                                                       create_instance):
         self.backup.size = 0.2

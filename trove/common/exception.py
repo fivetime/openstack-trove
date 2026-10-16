@@ -248,8 +248,11 @@ class QuotaLimitTooSmall(TroveError):
 
 class GuestMessagePartitionsFull(TroveError):
 
-    message = _("No guest message partition can take a new instance in "
-                "availability zone %(zone)s: %(usage)s.")
+    # The tenant sees this message: it does not name the partitions nor
+    # count the instances of the whole cloud; the log of trove-api does.
+    message = _("No new database instance can be created in availability "
+                "zone %(zone)s at the moment. Please try again later or "
+                "contact the cloud administrator.")
 
 
 class QuotaExceeded(TroveError):

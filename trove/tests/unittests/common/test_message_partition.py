@@ -149,13 +149,20 @@ class TestChoose(MessagePartitionTestBase):
         # p2 not full and the emptiest: it wins on count, not on share.
         self.assertEqual('p2', self.choose({None: 9, 'p2': 2, 'p3': 8}))
 
+    def _full(self, *args):
+        """The error and the usage logged for the operator."""
+        with mock.patch.object(message_partition.LOG, 'warning') as warning:
+            e = self.assertRaises(exception.GuestMessagePartitionsFull,
+                                  self.choose, *args)
+        warning.assert_called_once()
+        return e, warning.call_args[0][1]['usage']
+
     def test_report_names_unlimited(self):
         self.configure({'p2': {'max_instances': 0}}, default_max=None,
                        default_accepts=False)
-        e = self.assertRaises(exception.GuestMessagePartitionsFull,
-                              self.choose, {None: 4, 'p2': 0})
-        self.assertIn('default 4/unlimited draining', str(e))
-        self.assertIn('p2 0/0', str(e))
+        e, logged = self._full({None: 4, 'p2': 0})
+        self.assertIn('default 4/unlimited draining', logged)
+        self.assertIn('p2 0/0', logged)
 
     def test_full_partition_skipped(self):
         self.configure({'p2': {'max_instances': 4}}, default_max=10)
@@ -163,10 +170,19 @@ class TestChoose(MessagePartitionTestBase):
 
     def test_all_full(self):
         self.configure({'p2': {'max_instances': 4}}, default_max=10)
-        e = self.assertRaises(exception.GuestMessagePartitionsFull,
-                              self.choose, {None: 10, 'p2': 4})
-        self.assertIn('default 10/10', str(e))
-        self.assertIn('p2 4/4', str(e))
+        e, logged = self._full({None: 10, 'p2': 4})
+        self.assertIn('default 10/10', logged)
+        self.assertIn('p2 4/4', logged)
+
+    def test_full_tells_the_tenant_nothing_of_the_partitions(self):
+        # The message reaches the tenant (HTTP 409): no partition name, no
+        # instance count of the cloud, no maximum.
+        self.configure({'p2': {'max_instances': 4}}, default_max=10)
+        e, _ = self._full({None: 10, 'p2': 4}, 'az2')
+        message = str(e)
+        self.assertIn('az2', message)
+        for leak in ('p2', 'default', '10', '4', 'partition', 'RabbitMQ'):
+            self.assertNotIn(leak, message)
 
     def test_zero_max_takes_nothing(self):
         self.configure({'p2': {}}, default_max=0)
@@ -190,8 +206,7 @@ class TestChoose(MessagePartitionTestBase):
         # A zone with partitions of its own does not spill elsewhere.
         self.configure({'p2': {'availability_zones': ['az2'],
                                'max_instances': 1}})
-        self.assertRaises(exception.GuestMessagePartitionsFull,
-                          self.choose, {None: 0, 'p2': 1}, 'az2')
+        self._full({None: 0, 'p2': 1}, 'az2')
 
     def test_zone_without_partition_uses_unzoned(self):
         self.configure({'p2': {'availability_zones': ['az2']},

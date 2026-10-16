@@ -160,9 +160,12 @@ def choose(availability_zone=None):
         if best is None or key < best[0]:
             best = (key, p)
     if best is None:
+        LOG.warning("No guest message partition can take a new instance in "
+                    "zone %(zone)s: %(usage)s.",
+                    {'zone': availability_zone or 'any',
+                     'usage': ', '.join(report) or 'no partition serves it'})
         raise exception.GuestMessagePartitionsFull(
-            zone=availability_zone or 'any',
-            usage=', '.join(report) or 'no partition serves it')
+            zone=availability_zone or 'any')
     LOG.info("Guest message partition for a new instance in zone %(zone)s: "
              "%(name)s (%(usage)s).",
              {'zone': availability_zone or 'any',

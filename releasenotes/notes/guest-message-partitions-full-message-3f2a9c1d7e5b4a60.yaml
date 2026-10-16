@@ -1,0 +1,8 @@
+---
+fixes:
+  - |
+    When no guest message partition could take a new instance, the HTTP 409
+    returned to the tenant named every partition with the instances placed on
+    it and its maximum, the usage of the whole cloud. The tenant now reads
+    only that no new instance can be created in the availability zone at the
+    moment; trove-api logs the usage of the partitions as a warning.
