@@ -307,8 +307,9 @@ class TestMongoDBAppLifecycle(MongoDBGuestTestCase):
         healthcheck = app._healthcheck(27019)
         self.assertEqual('CMD-SHELL', healthcheck['test'][0])
         command = healthcheck['test'][1]
-        self.assertIn('mongodb://%2Fvar%2Frun%2Fmongodb%2Fmongodb-27019.sock',
-                      command)
+        self.assertIn(
+            'mongodb://%2Fvar%2Flib%2Fmongodb-socket%2Fmongodb-27019.sock',
+            command)
         self.assertIn('ping', command)
         # A server that is not the one being checked never answers here.
         self.assertNotIn('localhost', command)
@@ -335,6 +336,29 @@ class TestMongoDBAppLifecycle(MongoDBGuestTestCase):
         self.assertEqual({'27017/tcp': 27017, '27019/tcp': 27019},
                          kwargs['ports'])
         self.assertIn('27017.sock', kwargs['healthcheck']['test'][1])
+
+    @mock.patch.object(mongodb_service, 'docker_util')
+    @mock.patch.object(mongodb_service, 'operating_system')
+    def test_mounted_directories_outlive_a_reboot(self, mock_os,
+                                                  mock_docker):
+        # Docker restarts the container after a reboot, before the guest
+        # agent makes the directories: one under /run would be missing,
+        # made by Docker for root, and the server could not create its
+        # socket in it.
+        app = _app(_render())
+        app.apply_initial_guestagent_configuration(None)
+        app.status.wait_for_status.return_value = True
+
+        app.start_db(ds_version='8.2')
+
+        volumes = mock_docker.start_container.call_args[1]['volumes']
+        for host in list(volumes) + list(app._backup_volumes()):
+            self.assertFalse(
+                host.startswith(('/run/', '/var/run/')),
+                '%s is empty after a reboot' % host)
+        config = app.configuration_manager.config
+        self.assertIn(config['net']['unixDomainSocket']['pathPrefix'],
+                      volumes)
 
     @mock.patch.object(mongodb_service, 'docker_util')
     @mock.patch.object(mongodb_service, 'operating_system')
@@ -472,12 +496,13 @@ class TestMongoDBAppLifecycle(MongoDBGuestTestCase):
                 'bind': mongodb_service.SOCKET_DIR, 'mode': 'rw'}},
             app._backup_volumes())
         self.assertEqual(
-            '--db-host=/var/run/mongodb/mongodb-27017.sock '
+            '--db-host=/var/lib/mongodb-socket/mongodb-27017.sock '
             '--db-user=os_admin --db-password=pw',
             app._backup_params())
         # The temporary server a backup is restored into has no users.
-        self.assertEqual('--db-host=/var/run/mongodb/mongodb-27017.sock',
-                         app._backup_params(authenticate=False))
+        self.assertEqual(
+            '--db-host=/var/lib/mongodb-socket/mongodb-27017.sock',
+            app._backup_params(authenticate=False))
 
 
 class TestMongoDBAdmin(MongoDBGuestTestCase):
@@ -500,7 +525,7 @@ class TestMongoDBAdmin(MongoDBGuestTestCase):
         kwargs = mock_client.call_args[1]
         # A bare socket path is refused: "URI must begin with mongodb://".
         self.assertEqual(
-            'mongodb://%2Fvar%2Frun%2Fmongodb%2Fmongodb-27017.sock',
+            'mongodb://%2Fvar%2Flib%2Fmongodb-socket%2Fmongodb-27017.sock',
             kwargs['host'])
         self.assertEqual('os_admin', kwargs['username'])
         self.assertEqual('admin', kwargs['authSource'])

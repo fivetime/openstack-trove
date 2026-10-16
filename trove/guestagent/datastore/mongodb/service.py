@@ -42,7 +42,12 @@ KEY_FILE = f'{CONFIG_DIR}/keyfile'
 # Mounted into every container. The guest agent, the health check and the
 # backup container all talk to the server over the socket in here: the
 # server itself only accepts connections from the network.
-SOCKET_DIR = '/var/run/mongodb'
+# Not under /run, which is empty after a reboot: Docker restarts the
+# container before the guest agent runs and makes the missing directory
+# for it, owned by root, where the server cannot create its socket and
+# exits, again and again. Next to the socket directories of the other
+# datastores.
+SOCKET_DIR = '/var/lib/mongodb-socket'
 
 ADMIN_USER = 'os_admin'
 ADMIN_ROLES = [{'role': 'root', 'db': 'admin'}]

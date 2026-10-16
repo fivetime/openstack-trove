@@ -1,0 +1,13 @@
+---
+fixes:
+  - |
+    A ``mongodb`` instance, or every member of a ``mongodb`` cluster,
+    comes back after its server reboots. The socket directory the server
+    shares with the guest agent was ``/var/run/mongodb``, which is empty
+    after a reboot: Docker restarted the container before the guest agent
+    ran and made the missing directory for root, the server could not
+    create its socket there and exited, again and again, so the instance
+    stayed ``SHUTDOWN`` and a cluster's query routers refused connections.
+    The directory is now ``/var/lib/mongodb-socket``, as the other
+    datastores keep theirs under ``/var/lib``. Existing instances keep the
+    guest agent of their image; new instances get the fix.
