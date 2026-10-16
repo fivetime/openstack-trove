@@ -10,7 +10,9 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import grp
 import os
+import pwd
 import shutil
 import tempfile
 from unittest import mock
@@ -319,6 +321,10 @@ class TestRedisAppendOnlyFile(trove_testtools.TestCase):
     the append only file on: with appendonly yes Redis, Valkey and KeyDB
     load that file and nothing else (seen on redis:7.2, valkey:9 and
     keydb:6.3.3 with a directory holding only dump.rdb: 0 keys).
+
+    The configuration is the guest agent's own manager, codec and override
+    directory on real files (a rendered template), not a stub: a stub of
+    get_configuration_property hid that it lost its default.
     """
 
     def setUp(self):
@@ -327,24 +333,38 @@ class TestRedisAppendOnlyFile(trove_testtools.TestCase):
                                     return_value=None)
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.datadir = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, self.datadir)
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root)
+        self.datadir = os.path.join(root, 'data')
+        os.mkdir(self.datadir)
+        conf_dir = os.path.join(root, 'etc')
+        os.mkdir(conf_dir)
+        for name, value in (
+                ('CONFIG_FILE', os.path.join(conf_dir, 'redis.conf')),
+                ('CNF_INCLUDE_DIR', os.path.join(conf_dir, 'conf.d')),
+                ('database_service_uid', pwd.getpwuid(os.getuid()).pw_name),
+                ('database_service_gid', grp.getgrgid(os.getgid()).gr_name)):
+            p = mock.patch.object(common_service.RedisApp, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        # Files the test user owns: no sudo.
+        manager_cls = common_service.configuration.ConfigurationManager
+        p = mock.patch.object(manager_cls, '__init__', autospec=True,
+                              side_effect=self._manager_init)
+        p.start()
+        self.addCleanup(p.stop)
         self.app = common_service.RedisApp()
+        self.app._configuration_manager = None
         self.app.datadir = self.datadir
         self.app.adm = mock.MagicMock()
         self.app.docker_client = mock.MagicMock()
-        self.config = {'appendonly': True}
-        self.manager = mock.MagicMock()
-        for name, kwargs in (
-                ('configuration_manager',
-                 {'new_callable': mock.PropertyMock,
-                  'return_value': self.manager}),
-                ('get_configuration_property',
-                 {'side_effect': lambda name, default=None:
-                  self.config.get(name, default)})):
-            p = mock.patch.object(common_service.RedisApp, name, **kwargs)
-            p.start()
-            self.addCleanup(p.stop)
+        version = mock.Mock(datastore_name='redis', manager='redis',
+                            version='7.2')
+        version.name = '7.2'
+        self.manager = self.app.configuration_manager
+        self.manager.reset_configuration(template.SingleInstanceConfigTemplate(
+            version, {'ram': 2048, 'vcpus': 2},
+            'c2a8a4a5-7a8e-4a0c-9d5e-0b4c5d1f2a3b').render())
         # The real check, as the guest agent's user: a directory is not a
         # file (Redis 7 and Valkey keep a directory, KeyDB one file).
         real_exists = common_service.operating_system.exists
@@ -358,13 +378,22 @@ class TestRedisAppendOnlyFile(trove_testtools.TestCase):
         p.start()
         self.addCleanup(p.stop)
 
+    _real_init = common_service.configuration.ConfigurationManager.__init__
+
+    def _manager_init(self_, manager, base_config_path, owner, group, codec,
+                      requires_root=False, override_strategy=None):
+        TestRedisAppendOnlyFile._real_init(
+            manager, base_config_path, owner, group, codec,
+            requires_root=False, override_strategy=override_strategy)
+
     def _touch(self, name):
         open(os.path.join(self.datadir, name), 'w').close()
 
     def _overridden(self):
-        return mock.call({'appendonly': 'no'},
-                         change_id=common_service.AOF_CHANGE_ID) in (
-            self.manager.apply_system_override.call_args_list)
+        # The override is there and the server would start with the file off.
+        return (self.manager.has_system_override(
+            common_service.AOF_CHANGE_ID) and
+            self.app.get_configuration_property('appendonly') is False)
 
     def _info(self, *answers):
         base = {'aof_enabled': 1, 'aof_rewrite_in_progress': 0,
@@ -383,19 +412,25 @@ class TestRedisAppendOnlyFile(trove_testtools.TestCase):
     def test_finish_writes_the_file_then_drops_the_override(self):
         self._info({'aof_rewrite_in_progress': 1}, {})
 
+        self._touch('dump.rdb')
+        self.assertTrue(self.app.prepare_aof(running=False))
+
         self.app.finish_aof()
 
         self.app.adm.connection.config_set.assert_called_once_with(
             'appendonly', 'yes')
-        self.manager.remove_system_override.assert_called_once_with(
-            change_id=common_service.AOF_CHANGE_ID)
+        self.assertFalse(self._overridden())
+        self.assertIs(True, self.app.get_configuration_property('appendonly'))
 
     def test_finish_failure_keeps_the_file_off(self):
         self._info({'aof_last_bgrewrite_status': 'err'})
 
+        self._touch('dump.rdb')
+        self.assertTrue(self.app.prepare_aof(running=False))
+
         self.app.finish_aof()
 
-        self.manager.remove_system_override.assert_not_called()
+        self.assertTrue(self._overridden())
 
     def test_directory_of_redis_7_counts(self):
         self._touch('dump.rdb')
@@ -411,32 +446,42 @@ class TestRedisAppendOnlyFile(trove_testtools.TestCase):
         self.assertFalse(self.app.prepare_aof(running=False))
         self.assertFalse(self._overridden())
 
+    def test_defaults_when_the_names_are_not_configured(self):
+        # The template names neither file: the defaults must hold.
+        self.assertEqual('dump.rdb', self.app.get_configuration_property(
+            'dbfilename', 'dump.rdb'))
+        self.assertIsNone(self.app.get_configuration_property('dbfilename'))
+
     def test_configured_names(self):
-        self.config.update({'dbfilename': 'data.rdb',
-                            'appenddirname': '"aofs"'})
+        self.manager.apply_user_override({'dbfilename': 'data.rdb',
+                                          'appenddirname': 'aofs'})
         self._touch('data.rdb')
 
         self.assertTrue(self.app.prepare_aof(running=False))
         os.mkdir(os.path.join(self.datadir, 'aofs'))
-        self.manager.reset_mock()
         self.assertFalse(self.app.prepare_aof(running=False))
 
     def test_nothing_without_the_file_or_without_data(self):
         self._touch('dump.rdb')
-        self.config['appendonly'] = False
+        self.manager.apply_user_override({'appendonly': 'no'})
         self.assertFalse(self.app.prepare_aof(running=False))
+        self.assertFalse(self.manager.has_system_override(
+            common_service.AOF_CHANGE_ID))
 
         os.remove(os.path.join(self.datadir, 'dump.rdb'))
-        self.config['appendonly'] = True
+        self.manager.remove_user_override()
         self.assertFalse(self.app.prepare_aof(running=False))
         self.assertFalse(self._overridden())
 
     def test_leftover_override_is_dropped_first(self):
         # A start that could not write the file left it off; the next one
-        # tries again.
+        # tries again (and with no data left, drops it).
+        self.manager.apply_system_override(
+            {'appendonly': 'no'}, change_id=common_service.AOF_CHANGE_ID)
         self.assertFalse(self.app.prepare_aof(running=False))
-        self.manager.remove_system_override.assert_called_once_with(
-            change_id=common_service.AOF_CHANGE_ID)
+        self.assertFalse(self.manager.has_system_override(
+            common_service.AOF_CHANGE_ID))
+        self.assertIs(True, self.app.get_configuration_property('appendonly'))
 
     def test_running_server_writes_the_file_before_restart(self):
         self._touch('dump.rdb')
@@ -479,12 +524,14 @@ class TestRedisAppendOnlyFile(trove_testtools.TestCase):
         self.app.status = mock.Mock()
         self.app.status.wait_for_status.side_effect = (
             lambda *a: calls.append('healthy') or True)
-        self.manager.apply_system_override.side_effect = (
-            lambda *a, **k: calls.append('file off'))
+        real_apply = self.manager.apply_system_override
+        real_remove = self.manager.remove_system_override
+        self.manager.apply_system_override = (
+            lambda *a, **k: calls.append('file off') or real_apply(*a, **k))
+        self.manager.remove_system_override = (
+            lambda **k: calls.append('override gone') or real_remove(**k))
         self.app.adm.connection.config_set.side_effect = (
             lambda *a: calls.append('file on'))
-        self.manager.remove_system_override.side_effect = (
-            lambda **k: calls.append('override gone'))
         conf = mock.Mock(network_isolation=False, state_change_wait_time=5)
         conf.get.return_value = mock.Mock(docker_image='redis')
         with mock.patch.object(common_service, 'CONF', conf), \
@@ -504,3 +551,4 @@ class TestRedisAppendOnlyFile(trove_testtools.TestCase):
             self.app.start_db(ds_version='7.2')
         self.assertEqual(['override gone', 'file off', 'container',
                           'healthy', 'file on', 'override gone'], calls)
+        self.assertFalse(self._overridden())

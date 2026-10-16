@@ -261,8 +261,9 @@ class RedisApp(service.BaseDbApp):
         Returns a single value for single-argument properties or
         a list otherwise.
         """
+        # By keyword: the second parameter of get_value is the section.
         return utils.unpack_singleton(
-            self.configuration_manager.get_value(name, default))
+            self.configuration_manager.get_value(name, default=default))
 
     def get_config_command_name(self):
         """Get current name of the 'CONFIG' command.
