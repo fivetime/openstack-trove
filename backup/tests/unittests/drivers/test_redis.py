@@ -10,6 +10,10 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import os
+import shutil
+import subprocess
+import tempfile
 import unittest
 
 from oslo_config import cfg
@@ -51,3 +55,26 @@ class TestRedisBackup(unittest.TestCase):
         runner.pre_backup()
 
         self.assertTrue(runner._gzip)
+
+    def test_append_only_file_left_out(self):
+        # Run the command as the runner does (split, no shell): only the
+        # RDB file of the SAVE and the rest of the data directory go in.
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        for name in ('dump.rdb', 'appendonly.aof', 'appendonly.aof.1',
+                     'temp-rewriteaof-7.aof', 'conf.d/users.acl',
+                     'appendonlydir/appendonly.aof.1.base.rdb'):
+            os.makedirs(os.path.dirname(os.path.join(d, name)),
+                        exist_ok=True)
+            open(os.path.join(d, name), 'w').close()
+        runner = self.runner_cls(restore_location=d)
+
+        out = subprocess.run(runner.command.split(), shell=False,
+                             capture_output=True, check=True).stdout
+        names = subprocess.run(['tar', '-t'], input=out,
+                               capture_output=True,
+                               check=True).stdout.decode().split()
+        files = sorted(n.split(d.lstrip('/') + '/', 1)[-1] for n in names
+                       if not n.endswith('/'))
+
+        self.assertEqual(['conf.d/users.acl', 'dump.rdb'], files)

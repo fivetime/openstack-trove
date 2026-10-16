@@ -10,6 +10,9 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import os
+import shutil
+import tempfile
 from unittest import mock
 
 from oslo_utils import importutils
@@ -137,6 +140,17 @@ class TestRedisConfigTemplate(trove_testtools.TestCase):
         self.assertIn('include %s/index.conf' % app_cls.CNF_INCLUDE_DIR,
                       rendered)
         self.assertIn('port 6379', rendered)
+
+    def test_append_only_file_on(self):
+        # On by default and before the include, so that a configuration
+        # group can still turn it off.
+        for manager in ('redis', 'valkey', 'keydb'):
+            lines = self._render(manager).splitlines()
+            self.assertIn('appendonly yes', lines, manager)
+            self.assertIn('appendfsync everysec', lines, manager)
+            include = [i for i, line in enumerate(lines)
+                       if line.startswith('include ')][0]
+            self.assertLess(lines.index('appendonly yes'), include, manager)
 
     def test_family_members_do_not_share_paths(self):
         # Each member keeps its files under its own name; a template
@@ -298,3 +312,195 @@ class TestRedisClusterApp(trove_testtools.TestCase):
         with mock.patch.object(common_service.time, 'sleep'):
             self.app.wait_for_cluster(3)
         self.assertEqual(3, self.app.adm.cluster_info.call_count)
+
+
+class TestRedisAppendOnlyFile(trove_testtools.TestCase):
+    """The data of an RDB-only data directory when the configuration turns
+    the append only file on: with appendonly yes Redis, Valkey and KeyDB
+    load that file and nothing else (seen on redis:7.2, valkey:9 and
+    keydb:6.3.3 with a directory holding only dump.rdb: 0 keys).
+    """
+
+    def setUp(self):
+        super(TestRedisAppendOnlyFile, self).setUp()
+        patcher = mock.patch.object(common_service.RedisApp, '__init__',
+                                    return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.datadir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.datadir)
+        self.app = common_service.RedisApp()
+        self.app.datadir = self.datadir
+        self.app.adm = mock.MagicMock()
+        self.app.docker_client = mock.MagicMock()
+        self.config = {'appendonly': True}
+        self.manager = mock.MagicMock()
+        for name, kwargs in (
+                ('configuration_manager',
+                 {'new_callable': mock.PropertyMock,
+                  'return_value': self.manager}),
+                ('get_configuration_property',
+                 {'side_effect': lambda name, default=None:
+                  self.config.get(name, default)})):
+            p = mock.patch.object(common_service.RedisApp, name, **kwargs)
+            p.start()
+            self.addCleanup(p.stop)
+        # The real check, as the guest agent's user: a directory is not a
+        # file (Redis 7 and Valkey keep a directory, KeyDB one file).
+        real_exists = common_service.operating_system.exists
+        p = mock.patch.object(
+            common_service.operating_system, 'exists',
+            side_effect=lambda path, is_directory=False, as_root=False:
+            real_exists(path, is_directory))
+        p.start()
+        self.addCleanup(p.stop)
+        p = mock.patch.object(common_service.time, 'sleep')
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _touch(self, name):
+        open(os.path.join(self.datadir, name), 'w').close()
+
+    def _overridden(self):
+        return mock.call({'appendonly': 'no'},
+                         change_id=common_service.AOF_CHANGE_ID) in (
+            self.manager.apply_system_override.call_args_list)
+
+    def _info(self, *answers):
+        base = {'aof_enabled': 1, 'aof_rewrite_in_progress': 0,
+                'aof_rewrite_scheduled': 0,
+                'aof_last_bgrewrite_status': 'ok'}
+        self.app.adm.connection.info.side_effect = [
+            dict(base, **a) for a in answers]
+
+    def test_stopped_rdb_only_starts_with_the_file_off(self):
+        self._touch('dump.rdb')
+
+        self.assertTrue(self.app.prepare_aof(running=False))
+        self.assertTrue(self._overridden())
+        self.app.adm.connection.config_set.assert_not_called()
+
+    def test_finish_writes_the_file_then_drops_the_override(self):
+        self._info({'aof_rewrite_in_progress': 1}, {})
+
+        self.app.finish_aof()
+
+        self.app.adm.connection.config_set.assert_called_once_with(
+            'appendonly', 'yes')
+        self.manager.remove_system_override.assert_called_once_with(
+            change_id=common_service.AOF_CHANGE_ID)
+
+    def test_finish_failure_keeps_the_file_off(self):
+        self._info({'aof_last_bgrewrite_status': 'err'})
+
+        self.app.finish_aof()
+
+        self.manager.remove_system_override.assert_not_called()
+
+    def test_directory_of_redis_7_counts(self):
+        self._touch('dump.rdb')
+        os.mkdir(os.path.join(self.datadir, 'appendonlydir'))
+
+        self.assertFalse(self.app.prepare_aof(running=False))
+        self.assertFalse(self._overridden())
+
+    def test_single_file_of_keydb_counts(self):
+        self._touch('dump.rdb')
+        self._touch('appendonly.aof')
+
+        self.assertFalse(self.app.prepare_aof(running=False))
+        self.assertFalse(self._overridden())
+
+    def test_configured_names(self):
+        self.config.update({'dbfilename': 'data.rdb',
+                            'appenddirname': '"aofs"'})
+        self._touch('data.rdb')
+
+        self.assertTrue(self.app.prepare_aof(running=False))
+        os.mkdir(os.path.join(self.datadir, 'aofs'))
+        self.manager.reset_mock()
+        self.assertFalse(self.app.prepare_aof(running=False))
+
+    def test_nothing_without_the_file_or_without_data(self):
+        self._touch('dump.rdb')
+        self.config['appendonly'] = False
+        self.assertFalse(self.app.prepare_aof(running=False))
+
+        os.remove(os.path.join(self.datadir, 'dump.rdb'))
+        self.config['appendonly'] = True
+        self.assertFalse(self.app.prepare_aof(running=False))
+        self.assertFalse(self._overridden())
+
+    def test_leftover_override_is_dropped_first(self):
+        # A start that could not write the file left it off; the next one
+        # tries again.
+        self.assertFalse(self.app.prepare_aof(running=False))
+        self.manager.remove_system_override.assert_called_once_with(
+            change_id=common_service.AOF_CHANGE_ID)
+
+    def test_running_server_writes_the_file_before_restart(self):
+        self._touch('dump.rdb')
+        self._info({})
+
+        self.assertFalse(self.app.prepare_aof(running=True))
+        self.app.adm.connection.config_set.assert_called_once_with(
+            'appendonly', 'yes')
+        self.assertFalse(self._overridden())
+
+    def test_running_server_failure_restarts_with_the_file_off(self):
+        self._touch('dump.rdb')
+        self.app.adm.connection.config_set.side_effect = Exception('down')
+
+        self.assertFalse(self.app.prepare_aof(running=True))
+        self.assertTrue(self._overridden())
+
+    def test_turn_on_times_out(self):
+        self.app.adm.connection.info.return_value = {
+            'aof_enabled': 1, 'aof_rewrite_in_progress': 1}
+        with mock.patch.object(common_service.time, 'monotonic',
+                               side_effect=[0, 1, 5]):
+            self.assertRaises(exception.TroveError, self.app.turn_on_aof,
+                              timeout=2)
+
+    def test_configuration_group_restart(self):
+        self._touch('dump.rdb')
+        self._info({})
+        with mock.patch.object(common_service.docker_util,
+                               'restart_container') as restart:
+            self.app.apply_overrides({'appendonly': 'yes'})
+        self.app.adm.connection.config_set.assert_called_once_with(
+            'appendonly', 'yes')
+        restart.assert_called_once()
+
+    def test_start_db_order(self):
+        self._touch('dump.rdb')
+        self._info({})
+        calls = []
+        self.app.status = mock.Mock()
+        self.app.status.wait_for_status.side_effect = (
+            lambda *a: calls.append('healthy') or True)
+        self.manager.apply_system_override.side_effect = (
+            lambda *a, **k: calls.append('file off'))
+        self.app.adm.connection.config_set.side_effect = (
+            lambda *a: calls.append('file on'))
+        self.manager.remove_system_override.side_effect = (
+            lambda **k: calls.append('override gone'))
+        conf = mock.Mock(network_isolation=False, state_change_wait_time=5)
+        conf.get.return_value = mock.Mock(docker_image='redis')
+        with mock.patch.object(common_service, 'CONF', conf), \
+                mock.patch.object(common_service.cfg,
+                                  'get_configuration_property',
+                                  return_value=[]), \
+                mock.patch.object(common_service.operating_system,
+                                  'ensure_directory'), \
+                mock.patch.object(common_service.docker_util,
+                                  'start_container',
+                                  side_effect=lambda *a, **k:
+                                  calls.append('container')), \
+                mock.patch.object(common_service.RedisApp,
+                                  'database_service_uid', 999), \
+                mock.patch.object(common_service.RedisApp,
+                                  'database_service_gid', 999):
+            self.app.start_db(ds_version='7.2')
+        self.assertEqual(['override gone', 'file off', 'container',
+                          'healthy', 'file on', 'override gone'], calls)

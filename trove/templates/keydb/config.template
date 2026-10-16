@@ -6,4 +6,10 @@ dir /var/lib/keydb
 
 {% set server_threads = (1 if flavor['vcpus'] < 2 else flavor['vcpus'] - 1) %}
 server-threads {{ server_threads|int }}
+# Every write reaches the append only file within a second, so that a
+# power loss keeps all but the last second; with the RDB snapshots alone
+# it could lose up to an hour. The guest agent writes the file from an
+# RDB-only data directory (a backup) before the server loads it.
+appendonly yes
+appendfsync everysec
 include /etc/keydb/conf.d/index.conf

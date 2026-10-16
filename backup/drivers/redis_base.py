@@ -27,7 +27,13 @@ class RedisBaseBackup(base.BaseRunner):
     """
 
     """Implementation of Backup and Restore using tar command."""
-    cmd = 'tar -cO %(restore_location)s'
+    # The RDB file of the SAVE before the backup is the data: the append
+    # only file is left out (it changes while tar reads it, and a rewrite
+    # can replace its files halfway); the guest agent writes it again from
+    # the RDB file after a restore.
+    # (No quotes: the command is split on spaces and run without a shell.)
+    cmd = ('tar -cO --exclude=appendonlydir --exclude=appendonly.aof* '
+           '--exclude=temp-rewriteaof-* %(restore_location)s')
     restore_cmd = 'tar xf - -C /'
 
     def __init__(self, *args, **kwargs):

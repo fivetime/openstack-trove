@@ -1,0 +1,19 @@
+---
+upgrade:
+  - |
+    New Redis, Valkey and KeyDB instances keep an append only file
+    (``appendonly yes``, ``appendfsync everysec``), so that a power loss
+    keeps every write but the last second instead of whatever the RDB
+    snapshots held. A configuration group can still turn it off. Existing
+    instances keep their configuration.
+fixes:
+  - |
+    Redis, Valkey and KeyDB load only the append only file when it is on:
+    started on a data directory that holds an RDB file and no append only
+    file, they came up empty. That was the case for a backup restored with
+    the file on, and for an instance whose configuration group turned the
+    file on (the restart lost every key). The guest agent now writes the
+    file from the data first: a running server with ``CONFIG SET appendonly
+    yes`` before it is restarted, a stopped one by starting it with the file
+    off and turning it on once the data is loaded. Backups leave the append
+    only file out and keep the RDB file of the ``SAVE`` taken before them.

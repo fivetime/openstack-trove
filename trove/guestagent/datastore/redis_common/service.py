@@ -34,6 +34,9 @@ LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
 CNF_EXT = 'conf'
 CLUSTER_CHANGE_ID = 'cluster'
+# The system override that keeps the append only file off while the server
+# loads an RDB-only data directory (see RedisApp.prepare_aof).
+AOF_CHANGE_ID = 'aof-from-rdb'
 # How long a member may take to see the whole cluster agree.
 CLUSTER_WAIT_TIMEOUT = 300
 
@@ -127,6 +130,7 @@ class RedisApp(service.BaseDbApp):
             return self.set_masterauth(None)
 
     def reload(self):
+        self.prepare_aof(running=True)
         docker_util.restart_container(self.docker_client)
 
     def update_overrides(self, overrides):
@@ -136,7 +140,105 @@ class RedisApp(service.BaseDbApp):
 
     def apply_overrides(self, overrides):
         """Reload config."""
+        self.prepare_aof(running=True)
         docker_util.restart_container(self.docker_client)
+
+    # Append only file
+
+    def _aof_wanted(self):
+        value = self.get_configuration_property('appendonly', False)
+        return value is True or str(value).lower() == 'yes'
+
+    def _aof_on_disk(self):
+        # Redis 7 and Valkey keep a directory of files, KeyDB (Redis 6) one
+        # file; either name may be configured.
+        directory = self.get_configuration_property('appenddirname',
+                                                    'appendonlydir')
+        single = self.get_configuration_property('appendfilename',
+                                                 'appendonly.aof')
+        return (operating_system.exists(
+            os.path.join(self.datadir, str(directory).strip('"')),
+            is_directory=True, as_root=True) or
+            operating_system.exists(
+                os.path.join(self.datadir, str(single).strip('"')),
+                as_root=True))
+
+    def _rdb_on_disk(self):
+        name = self.get_configuration_property('dbfilename', 'dump.rdb')
+        return operating_system.exists(
+            os.path.join(self.datadir, str(name).strip('"')), as_root=True)
+
+    def prepare_aof(self, running):
+        """Keep the data of an RDB-only data directory when the
+        configuration turns the append only file on.
+
+        With appendonly yes the server loads the append only file and
+        nothing else: started on a directory that has only an RDB file (a
+        backup, an instance made before the file was on, a configuration
+        group that turns it on) it comes up empty. A running server writes
+        the file from memory (CONFIG SET appendonly yes) before it is
+        restarted; a stopped one is started with the file off first.
+
+        Returns whether start_db has to turn the file on once the server
+        runs (see finish_aof).
+        """
+        manager_ = self.configuration_manager
+        manager_.remove_system_override(change_id=AOF_CHANGE_ID)
+        if (not self._aof_wanted() or self._aof_on_disk() or
+                not self._rdb_on_disk()):
+            return False
+        if running:
+            try:
+                self.turn_on_aof()
+                return False
+            except Exception as err:
+                LOG.error("Could not write the append only file from "
+                          "memory (%s); it stays off so that the data "
+                          "is loaded from the RDB file.", err)
+        else:
+            LOG.warning("The data directory has an RDB file and no append "
+                        "only file: starting with the file off, then "
+                        "writing it from the loaded data.")
+        manager_.apply_system_override({'appendonly': 'no'},
+                                       change_id=AOF_CHANGE_ID)
+        return not running
+
+    def finish_aof(self):
+        """Turn the append only file on in a server started by
+        prepare_aof with it off; the override goes once the file is
+        written, so a later start loads it.
+        """
+        try:
+            self.turn_on_aof()
+        except Exception as err:
+            LOG.error("Could not turn the append only file on (%s); it "
+                      "stays off until the next start.", err)
+            return
+        self.configuration_manager.remove_system_override(
+            change_id=AOF_CHANGE_ID)
+
+    def turn_on_aof(self, timeout=None):
+        """CONFIG SET appendonly yes and wait until the server wrote the
+        file from its data.
+        """
+        timeout = timeout or CONF.state_change_wait_time
+        self.adm.connection.config_set('appendonly', 'yes')
+        deadline = time.monotonic() + timeout
+        while True:
+            info = self.adm.connection.info('persistence')
+            if (int(info.get('aof_enabled', 0)) == 1 and
+                    int(info.get('aof_rewrite_in_progress', 0)) == 0 and
+                    int(info.get('aof_rewrite_scheduled', 0)) == 0):
+                if info.get('aof_last_bgrewrite_status', 'ok') != 'ok':
+                    raise exception.TroveError(
+                        "the rewrite of the append only file failed")
+                LOG.info("The append only file is on.")
+                return
+            if time.monotonic() > deadline:
+                raise exception.TroveError(
+                    "the append only file was not written in %s seconds"
+                    % timeout)
+            time.sleep(1)
 
     def get_port(self):
         try:
@@ -182,6 +284,8 @@ class RedisApp(service.BaseDbApp):
 
         if not command:
             command = f'{self.SERVER_BINARY} {self.CONFIG_FILE}'
+
+        aof_after_start = self.prepare_aof(running=False)
 
         for folder in [f"/etc/{self.DATASTORE_NAME}",
                        self.SOCKET_PATH]:
@@ -240,10 +344,14 @@ class RedisApp(service.BaseDbApp):
         ):
             raise exception.TroveError("Failed to start database service")
 
+        if aof_after_start:
+            self.finish_aof()
+
     def restart(self):
         LOG.info("Restarting database")
 
         try:
+            self.prepare_aof(running=True)
             docker_util.restart_container(self.docker_client)
         except Exception:
             LOG.exception("Failed to restart database")
