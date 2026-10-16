@@ -305,15 +305,29 @@ class MongoDBApp(service.BaseDbApp):
                 group=self.database_service_gid, force=True,
                 as_root=True)
 
-    def start_db(self, update_db=False, ds_version=None, command=None,
-                 extra_volumes=None):
-        """Start and wait for the database service."""
+    def image(self, ds_version=None):
         docker_image = CONF.get(CONF.datastore_manager).docker_image
         # A query router is started by add_config_servers, long after
         # prepare, and has to be the version of the rest of the cluster.
         ds_version = ds_version or CONF.datastore_version
-        image = (f'{docker_image}:latest' if not ds_version else
-                 f'{docker_image}:{ds_version}')
+        return (f'{docker_image}:latest' if not ds_version else
+                f'{docker_image}:{ds_version}')
+
+    def pull_image(self, ds_version=None):
+        """Pull the image of the server ahead of the first start.
+
+        A query router starts in add_config_servers, a call the
+        taskmanager waits a few minutes for; a first pull and unpack of
+        the image can take longer than that.
+        """
+        image = self.image(ds_version)
+        LOG.info("Pulling the image %s.", image)
+        self.docker_client.images.pull(image)
+
+    def start_db(self, update_db=False, ds_version=None, command=None,
+                 extra_volumes=None):
+        """Start and wait for the database service."""
+        image = self.image(ds_version)
         if not command:
             binary = 'mongos' if self.is_query_router else 'mongod'
             command = f'{binary} --config {CONFIG_FILE}'

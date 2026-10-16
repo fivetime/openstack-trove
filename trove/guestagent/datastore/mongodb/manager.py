@@ -57,6 +57,8 @@ class Manager(manager.Manager):
             self._restore(context, backup_info, ds_version)
 
         if self.app.is_query_router:
+            # Started by add_config_servers, which has no time for a pull.
+            self.app.pull_image(ds_version=ds_version)
             return
 
         self.app.start_db(ds_version=ds_version)

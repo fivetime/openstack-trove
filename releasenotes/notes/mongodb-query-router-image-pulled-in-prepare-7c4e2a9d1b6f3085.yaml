@@ -1,0 +1,11 @@
+---
+fixes:
+  - |
+    A ``mongodb`` cluster no longer fails to build when the image of its
+    query router takes long to pull. The router is started by
+    ``add_config_servers``, a call the taskmanager waits a few minutes
+    for, and that was the first time the instance needed the image: a
+    pull and unpack of four and a half minutes timed the call out and
+    left every instance of the cluster in ``ERROR``. The query router now
+    pulls the image while it is prepared, as the other instances do when
+    they start.

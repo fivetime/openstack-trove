@@ -382,6 +382,26 @@ class TestMongoDBAppLifecycle(MongoDBGuestTestCase):
 
     @mock.patch.object(mongodb_service, 'docker_util')
     @mock.patch.object(mongodb_service, 'operating_system')
+    @mock.patch.object(mongodb_service.MongoDBApp, 'store_key')
+    def test_query_router_image_is_pulled_ahead(self, mock_key, mock_os,
+                                                mock_docker):
+        app = _app(_render())
+        app.apply_initial_guestagent_configuration(
+            {'instance_type': 'query_router', 'key': 'k'})
+
+        app.pull_image(ds_version='8.2')
+
+        app.docker_client.images.pull.assert_called_once_with('mongo:8.2')
+        # The image the router later starts from.
+        app.set_config_servers(['10.0.0.1'])
+        app.status.wait_for_status.return_value = True
+        self.patch_conf_property('datastore_version', '8.2')
+        app.start_db()
+        self.assertEqual('mongo:8.2',
+                         mock_docker.start_container.call_args[0][1])
+
+    @mock.patch.object(mongodb_service, 'docker_util')
+    @mock.patch.object(mongodb_service, 'operating_system')
     def test_temporary_db_has_no_access_control_and_no_network(
             self, mock_os, mock_docker):
         app = _app(_render())
@@ -697,9 +717,12 @@ class TestMongoDBManager(MongoDBGuestTestCase):
         manager = self._manager()
         manager.app.is_query_router = True
         self._prepare(manager,
-                      cluster_config={'instance_type': 'query_router'})
+                      cluster_config={'instance_type': 'query_router'},
+                      ds_version='8.2')
         manager.app.start_db.assert_not_called()
         manager.app.secure.assert_not_called()
+        # add_config_servers starts it, in a call with no time for a pull.
+        manager.app.pull_image.assert_called_once_with(ds_version='8.2')
 
     @mock.patch.object(mongodb_manager.Manager, 'perform_restore')
     def test_restore_runs_on_the_temporary_server(self, mock_restore):
