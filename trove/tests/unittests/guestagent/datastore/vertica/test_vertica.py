@@ -11,6 +11,7 @@
 #    under the License.
 
 import json
+import os
 import subprocess
 import tempfile
 from unittest import mock
@@ -35,6 +36,7 @@ from trove.guestagent.datastore.vertica import manager as vertica_manager
 from trove.guestagent.datastore.vertica import service as vertica_service
 from trove.guestagent.module import driver_manager
 from trove.guestagent.module.drivers import vertica_license_driver
+from trove.guestagent import volume
 from trove.tests.unittests import trove_testtools
 
 CONF = cfg.CONF
@@ -530,6 +532,34 @@ class TestVerticaApp(VerticaGuestTestCase):
                                app.execute, ['vsql'])
 
 
+class TestVerticaSyncWrites(VerticaGuestTestCase):
+
+    def setUp(self):
+        super(TestVerticaSyncWrites, self).setUp()
+        fd, self.fstab = tempfile.mkstemp()
+        os.close(fd)
+        self.addCleanup(os.remove, self.fstab)
+        patcher = mock.patch.object(volume, 'FSTAB', self.fstab)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    @mock.patch.object(volume.VolumeDevice, 'remount')
+    def test_the_data_volume_is_mounted_sync(self, mock_remount):
+        with open(self.fstab, 'w') as f:
+            f.write("/dev/vdb\t/var/lib/vertica\text4\tdefaults,noatime"
+                    "\t0\t0\n")
+        self._app().use_sync_writes()
+        mock_remount.assert_called_once_with('/var/lib/vertica',
+                                             'defaults,noatime,sync')
+
+    @mock.patch.object(volume.VolumeDevice, 'remount')
+    def test_without_an_fstab_entry_from_the_default_options(
+            self, mock_remount):
+        self._app().use_sync_writes()
+        mock_remount.assert_called_once_with(
+            '/var/lib/vertica', CONF.mount_options + ',sync')
+
+
 class TestVerticaAdmin(VerticaGuestTestCase):
 
     def _adm(self):
@@ -816,6 +846,24 @@ class TestVerticaManager(VerticaGuestTestCase):
             ds_version='25.4.0-0-minimal')
         manager.app.create_database.assert_not_called()
         manager.app.apply_settings.assert_not_called()
+
+    def test_a_member_with_sync_writes_mounts_sync_before_starting(self):
+        manager = self._manager()
+        order = mock.Mock()
+        for name in ('use_sync_writes', 'start_db'):
+            order.attach_mock(getattr(manager.app, name), name)
+        self._prepare(manager, cluster_config={'id': 'c1',
+                                               'instance_type': 'member',
+                                               'sync_writes': True})
+        self.assertEqual(['use_sync_writes', 'start_db'],
+                         [call[0] for call in order.mock_calls])
+
+    def test_a_member_without_sync_writes_keeps_its_mount(self):
+        manager = self._manager()
+        self._prepare(manager, cluster_config={'id': 'c1',
+                                               'instance_type': 'member'})
+        self._prepare(manager)
+        manager.app.use_sync_writes.assert_not_called()
 
     def test_cluster_calls_reach_the_app(self):
         manager = self._manager()

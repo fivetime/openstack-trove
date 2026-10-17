@@ -78,6 +78,9 @@ class Manager(manager.Manager):
         of a cluster stops at its agent: the taskmanager has the first
         member create the database on all of them.
         """
+        if cluster_config and cluster_config.get('sync_writes'):
+            self.app.use_sync_writes()
+
         LOG.info('Preparing database config files')
         self.app.configuration_manager.reset_configuration(config_contents)
         self.app.update_overrides(overrides)

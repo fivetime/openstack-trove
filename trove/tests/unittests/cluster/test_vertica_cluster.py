@@ -303,3 +303,52 @@ class ClusterTest(trove_testtools.TestCase):
         self.cluster.db_info.task_status = ClusterTasks.DELETING
         self.cluster.delete()
         mock_update_db.assert_called_with(task_status=ClusterTasks.DELETING)
+
+    # The sync_writes extended property, through the real create.
+
+    def _create(self, extended_properties):
+        with patch.object(inst_models.DBInstance, 'find_all'), \
+                patch.object(inst_models.Instance, 'create') as mock_ins, \
+                patch.object(DBCluster, 'create') as mock_db, \
+                patch.object(task_api, 'load'), \
+                patch.object(QUOTAS, 'check_quotas'), \
+                patch.object(clients, 'create_nova_client'):
+            self.cluster.create(Mock(), self.cluster_name, self.datastore,
+                                self.datastore_version, self.instances,
+                                extended_properties, None, None)
+        return mock_db, [c.kwargs['cluster_config']
+                         for c in mock_ins.call_args_list]
+
+    def test_every_member_gets_sync_writes(self):
+        for value in ('true', 'True', True, '1'):
+            _db, configs = self._create({'sync_writes': value})
+            self.assertEqual(3, len(configs))
+            for config in configs:
+                self.assertIs(True, config['sync_writes'])
+            self.assertEqual(['master', 'member', 'member'],
+                             [c['instance_type'] for c in configs])
+
+    def test_without_it_or_false_the_members_keep_the_default(self):
+        for props in ({}, None, {'sync_writes': 'false'}):
+            _db, configs = self._create(props)
+            for config in configs:
+                self.assertNotIn('sync_writes', config)
+
+    def test_an_unknown_property_is_refused_before_anything_is_made(self):
+        # A misspelled property must not leave the writes unsynced.
+        with patch.object(DBCluster, 'create') as mock_db:
+            error = self.assertRaises(
+                exception.BadRequest, self.cluster.create, Mock(),
+                self.cluster_name, self.datastore, self.datastore_version,
+                self.instances, {'sync_write': 'true'}, None, None)
+        self.assertIn('sync_write', str(error))
+        self.assertIn('sync_writes', str(error))
+        mock_db.assert_not_called()
+
+    def test_a_value_that_is_not_a_boolean_is_refused(self):
+        with patch.object(DBCluster, 'create') as mock_db:
+            self.assertRaises(
+                exception.BadRequest, self.cluster.create, Mock(),
+                self.cluster_name, self.datastore, self.datastore_version,
+                self.instances, {'sync_writes': 'yes please'}, None, None)
+        mock_db.assert_not_called()

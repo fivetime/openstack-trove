@@ -39,6 +39,7 @@ from trove.guestagent.common import operating_system
 from trove.guestagent.common.operating_system import FileMode
 from trove.guestagent.datastore import service
 from trove.guestagent.utils import docker as docker_util
+from trove.guestagent import volume
 from trove.instance import service_status
 
 LOG = logging.getLogger(__name__)
@@ -397,6 +398,20 @@ class VerticaApp(service.BaseDbApp):
                 folder, user=self.database_service_uid,
                 group=self.database_service_gid, force=True,
                 as_root=True)
+
+    def use_sync_writes(self):
+        """Mount the data volume with sync, now and from the next boot.
+        The server does not sync what it commits to disk; with sync every
+        write reaches the disk before it returns, so the members of a
+        cluster that all lose power at once keep their commits and start
+        again by themselves.
+        """
+        device = volume.VolumeDevice(
+            cfg.get_configuration_property('device_path'))
+        options = volume.with_option(
+            volume.fstab_options(self.mount_point) or CONF.mount_options,
+            'sync')
+        device.remount(self.mount_point, options)
 
     def database_exists(self):
         return operating_system.exists(

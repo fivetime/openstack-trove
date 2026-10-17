@@ -12,6 +12,7 @@
 # limitations under the License.
 
 from oslo_log import log as logging
+from oslo_utils import strutils
 
 from trove.cluster import models
 from trove.cluster.tasks import ClusterTasks
@@ -29,6 +30,34 @@ from trove.taskmanager import api as task_api
 
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
+
+# Vertica does not sync what it commits to disk: it relies on the other
+# nodes holding the data. Members that all lose power at once lose recent
+# commits, or come back unable to start. Mounted with sync, every write
+# reaches the disk before it returns, at a cost to write throughput.
+SYNC_WRITES = 'sync_writes'
+
+
+def cluster_properties(extended_properties):
+    """The member settings the extended properties of a new cluster
+    ask for. A property this datastore does not know is refused rather
+    than ignored: a misspelled one would leave the writes unsynced
+    without a word.
+    """
+    props = dict(extended_properties or {})
+    unknown = sorted(set(props) - {SYNC_WRITES})
+    if unknown:
+        raise exception.BadRequest(_(
+            "Unknown extended properties for a Vertica cluster: %(unknown)s."
+            " Known: %(known)s.") % {'unknown': ', '.join(unknown),
+                                     'known': SYNC_WRITES})
+    try:
+        sync = strutils.bool_from_string(props.get(SYNC_WRITES, False),
+                                         strict=True)
+    except ValueError:
+        raise exception.BadRequest(_(
+            "%s must be true or false.") % SYNC_WRITES)
+    return {SYNC_WRITES: True} if sync else {}
 
 
 class VerticaAPIStrategy(base.BaseAPIStrategy):
@@ -72,6 +101,7 @@ class VerticaCluster(models.Cluster):
                           instances, extended_properties, locality,
                           new_cluster=True, image_id=None):
         vertica_conf = CONF.get(datastore_version.manager)
+        properties = cluster_properties(extended_properties)
         num_instances = len(instances)
 
         existing = inst_models.DBInstance.find_all(cluster_id=db_info.id,
@@ -117,6 +147,7 @@ class VerticaCluster(models.Cluster):
                 member_config = {"id": db_info.id, "instance_type": "master"}
             else:
                 member_config = {"id": db_info.id, "instance_type": "member"}
+            member_config.update(properties)
             instance_name = "%s-member-%s" % (db_info.name,
                                               str(i + num_existing + 1))
             minstances.append(
@@ -140,6 +171,9 @@ class VerticaCluster(models.Cluster):
 
         if configuration:
             raise exception.ConfigurationNotSupported()
+
+        # Before anything is created.
+        cluster_properties(extended_properties)
 
         vertica_conf = CONF.get(datastore_version.manager)
         num_instances = len(instances)

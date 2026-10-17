@@ -28,9 +28,50 @@ from trove.common import utils
 from trove.guestagent.common import operating_system
 
 TMP_MOUNT_POINT = "/mnt/volume"
+FSTAB = "/etc/fstab"
 
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
+
+
+def _fstab_entry(line):
+    fields = line.split()
+    if len(fields) < 4 or fields[0].startswith('#'):
+        return None
+    return fields
+
+
+def fstab_options(mount_point):
+    """The mount options fstab has for the mount point, or None."""
+    try:
+        with open(FSTAB) as fstab:
+            lines = fstab.read().splitlines()
+    except OSError:
+        return None
+    options = None
+    for line in lines:
+        fields = _fstab_entry(line)
+        if fields and fields[1] == mount_point:
+            options = fields[3]
+    return options
+
+
+def fstab_with(content, line, mount_point):
+    """The fstab content with the line as the only entry for the mount
+    point.
+    """
+    kept = [old for old in content.splitlines()
+            if not (_fstab_entry(old) and _fstab_entry(old)[1] == mount_point)]
+    return '\n'.join(kept + [line]) + '\n'
+
+
+def with_option(options, option):
+    """The comma separated mount options with the option added, and its
+    opposite taken out (sync and async).
+    """
+    opposite = {'sync': 'async', 'async': 'sync'}.get(option)
+    kept = [o for o in options.split(',') if o and o not in (option, opposite)]
+    return ','.join(kept + [option])
 
 
 # We removed all translation for messages destinated to log file.
@@ -323,6 +364,23 @@ class VolumeDevice(object):
                      {'device': device_path, 'mount_point': mnt})
             self.unmount(mnt)
 
+    def remount(self, mount_point, options):
+        """Mount the file system at the mount point again, in place, with
+        the options, and keep them in fstab for the next boot.
+        """
+        LOG.info("Remounting %(mount_point)s with %(options)s.",
+                 {'mount_point': mount_point, 'options': options})
+        try:
+            utils.execute("mount", "-o", "remount,%s" % options, mount_point,
+                          run_as_root=True, root_helper="sudo")
+        except exception.ProcessExecutionError:
+            log_fmt = "Could not remount '%s'."
+            exc_fmt = _("Could not remount '%s'.")
+            log_and_raise(log_fmt, exc_fmt, mount_point)
+        entry = VolumeMountPoint(self.device_path, mount_point)
+        entry.mount_options = options
+        entry.write_to_fstab()
+
     def mount_points(self, device_path):
         """Returns a list of mount points on the specified device."""
         stdout, stderr = utils.execute(
@@ -352,7 +410,10 @@ class VolumeMountPoint(object):
         self.device_path = device_path
         self.mount_point = mount_point
         self.volume_fstype = CONF.volume_fstype
-        self.mount_options = CONF.mount_options
+        # What fstab says for a mount point mounted before, so that
+        # mounting it again, after a resize, keeps the options it had.
+        self.mount_options = (fstab_options(mount_point) or
+                              CONF.mount_options)
 
     def mount(self):
         if not operating_system.exists(self.mount_point, is_directory=True,
@@ -377,13 +438,14 @@ class VolumeMountPoint(object):
                       (self.device_path, self.mount_point, self.volume_fstype,
                        self.mount_options))
         LOG.debug("Writing new line to fstab:%s", fstab_line)
-        with open('/etc/fstab', "r") as fstab:
+        with open(FSTAB, "r") as fstab:
             fstab_content = fstab.read()
         with NamedTemporaryFile(mode='w', delete=False) as tempfstab:
-            tempfstab.write(fstab_content + fstab_line)
+            tempfstab.write(fstab_with(fstab_content, fstab_line,
+                                       self.mount_point))
         try:
             utils.execute("install", "-o", "root", "-g", "root",
-                          "-m", "644", tempfstab.name, "/etc/fstab",
+                          "-m", "644", tempfstab.name, FSTAB,
                           run_as_root=True, root_helper="sudo")
         except exception.ProcessExecutionError:
             log_fmt = "Could not add '%s' to fstab."

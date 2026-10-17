@@ -1,0 +1,26 @@
+---
+features:
+  - |
+    A ``vertica`` cluster can be created with the extended property
+    ``sync_writes=true``. Vertica does not sync what it commits to disk:
+    it relies on the other nodes holding the data, so members that all lose
+    power at once lose recent commits, or come back unable to start until
+    an administrator recovers the database to an earlier epoch, or cannot
+    be recovered at all once the ancient history mark has passed what
+    reached the disk. With ``sync_writes`` the guest agent mounts the data
+    volume of every member with ``sync``, now and from the next boot, so
+    every write reaches the disk before it returns: in tests the members
+    came back by themselves with every acknowledged commit. Writes are
+    slower, in those tests about 17 times for a bulk load and 21 times for
+    single row commits. The default is unchanged.
+  - |
+    A data volume mounted again, as a volume resize does, keeps the mount
+    options ``/etc/fstab`` has for its mount point instead of taking
+    ``mount_options`` again, and writing the fstab entry of a mount point
+    replaces the old ones instead of adding another line.
+upgrade:
+  - |
+    A ``vertica`` cluster created with an extended property other than
+    ``sync_writes`` is refused with a 400 instead of having the property
+    ignored: a misspelled one would leave the writes unsynced without a
+    word.

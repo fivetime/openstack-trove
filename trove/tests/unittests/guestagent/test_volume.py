@@ -12,6 +12,9 @@
 #    See the License for the specific language governing permissions and
 #    limitations under the License.
 
+import os
+import shutil
+import tempfile
 from unittest import mock
 
 import testtools
@@ -134,3 +137,100 @@ class FSExtTest(testtools.TestCase):
                 self.fs.check_format(self.device_path)
 
             self.assertEqual(2, mock_execute.call_count)
+
+
+class FstabTest(testtools.TestCase):
+    """The mount options of a data volume, through a real fstab file."""
+
+    def setUp(self):
+        super(FstabTest, self).setUp()
+        fd, self.fstab = tempfile.mkstemp()
+        os.close(fd)
+        self.addCleanup(os.remove, self.fstab)
+        patcher = mock.patch.object(volume, 'FSTAB', self.fstab)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _write(self, content):
+        with open(self.fstab, 'w') as f:
+            f.write(content)
+
+    def _read(self):
+        with open(self.fstab) as f:
+            return f.read()
+
+    def _install_copies(self):
+        # The guest agent installs the new fstab with sudo; here it copies.
+        def execute(*args, **kwargs):
+            if args[0] == 'install':
+                shutil.copyfile(args[-2], args[-1])
+            return '', ''
+        return mock.patch.object(volume.utils, 'execute',
+                                 side_effect=execute)
+
+    def test_options_of_the_mount_point(self):
+        self._write("# /var/lib/vertica none\n"
+                    "LABEL=root\t/\text4\tdefaults\t0\t1\n"
+                    "/dev/vdb\t/var/lib/vertica\text4\tdefaults,noatime"
+                    "\t0\t0\n")
+        self.assertEqual('defaults,noatime',
+                         volume.fstab_options('/var/lib/vertica'))
+        self.assertIsNone(volume.fstab_options('/var/lib/mysql'))
+
+    def test_last_entry_wins(self):
+        # What mount -a ends with.
+        self._write("/dev/vdb /var/lib/vertica ext4 defaults 0 0\n"
+                    "/dev/vdb /var/lib/vertica ext4 defaults,sync 0 0\n")
+        self.assertEqual('defaults,sync',
+                         volume.fstab_options('/var/lib/vertica'))
+
+    def test_no_fstab(self):
+        os.remove(self.fstab)
+        self.addCleanup(self._write, '')
+        self.assertIsNone(volume.fstab_options('/var/lib/vertica'))
+
+    def test_an_entry_replaces_the_old_ones_of_its_mount_point(self):
+        content = volume.fstab_with(
+            "LABEL=root / ext4 defaults 0 1\n"
+            "/dev/vdb /var/lib/vertica ext4 defaults,noatime 0 0\n"
+            "/dev/vdb /var/lib/vertica ext4 defaults 0 0",
+            "/dev/vdb\t/var/lib/vertica\text4\tdefaults,noatime,sync\t0\t0",
+            '/var/lib/vertica')
+        self.assertEqual(
+            "LABEL=root / ext4 defaults 0 1\n"
+            "/dev/vdb\t/var/lib/vertica\text4\tdefaults,noatime,sync\t0\t0\n",
+            content)
+
+    def test_with_option(self):
+        self.assertEqual('defaults,noatime,sync',
+                         volume.with_option('defaults,noatime', 'sync'))
+        self.assertEqual('defaults,noatime,sync',
+                         volume.with_option('defaults,async,noatime', 'sync'))
+        self.assertEqual('defaults,sync',
+                         volume.with_option('defaults,sync', 'sync'))
+
+    def test_a_mount_point_mounted_again_keeps_its_options(self):
+        # A resize unmounts the volume and mounts it again.
+        self._write("/dev/vdb /var/lib/vertica ext4 defaults,noatime,sync"
+                    " 0 0\n")
+        self.assertEqual('defaults,noatime,sync', volume.VolumeMountPoint(
+            '/dev/vdb', '/var/lib/vertica').mount_options)
+        self.assertEqual(volume.CONF.mount_options, volume.VolumeMountPoint(
+            '/dev/vdb', '/mnt/volume').mount_options)
+
+    def test_remount_in_place_and_for_the_next_boot(self):
+        self._write("LABEL=root / ext4 defaults 0 1\n"
+                    "/dev/vdb\t/var/lib/vertica\text4\tdefaults,noatime"
+                    "\t0\t0\n")
+        with self._install_copies() as mock_execute:
+            volume.VolumeDevice('/dev/vdb').remount(
+                '/var/lib/vertica', 'defaults,noatime,sync')
+        mock_execute.assert_any_call(
+            'mount', '-o', 'remount,defaults,noatime,sync',
+            '/var/lib/vertica', run_as_root=True, root_helper='sudo')
+        self.assertEqual(
+            "LABEL=root / ext4 defaults 0 1\n"
+            "/dev/vdb\t/var/lib/vertica\text4\tdefaults,noatime,sync\t0\t0\n",
+            self._read())
+        self.assertEqual('defaults,noatime,sync',
+                         volume.fstab_options('/var/lib/vertica'))
