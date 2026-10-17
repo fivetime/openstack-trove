@@ -12,6 +12,7 @@
 
 from oslo_log import log as logging
 from oslo_serialization import base64
+from oslo_service import periodic_task
 
 from trove.common import cfg
 from trove.common.notification import EndNotification
@@ -124,6 +125,17 @@ class Manager(manager.Manager):
         # The database exists on every member by now.
         self.app.apply_mount_options()
         super(Manager, self).cluster_complete(context)
+
+    @periodic_task.periodic_task
+    def keep_mount_options(self, context):
+        """The data volume mounted with sync while the database answers,
+        when the cluster asked for it, after a reboot or a restart too.
+        """
+        try:
+            self.app.apply_mount_options()
+        except Exception:
+            LOG.exception("Failed to apply the mount options of the data "
+                          "volume.")
 
     def stop_db(self, context):
         self.app.stop_db()

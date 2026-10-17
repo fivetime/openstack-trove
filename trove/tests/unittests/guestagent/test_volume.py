@@ -234,3 +234,27 @@ class FstabTest(testtools.TestCase):
             self._read())
         self.assertEqual('defaults,noatime,sync',
                          volume.fstab_options('/var/lib/vertica'))
+
+    def test_options_mounted_now(self):
+        mounts = os.path.join(os.path.dirname(self.fstab), 'mounts-%s' %
+                              os.path.basename(self.fstab))
+        with open(mounts, 'w') as f:
+            f.write("/dev/vda1 / ext4 rw,relatime 0 0\n"
+                    "/dev/vdb /var/lib/vertica ext4 rw,sync,noatime 0 0\n")
+        self.addCleanup(os.remove, mounts)
+        with mock.patch.object(volume, 'PROC_MOUNTS', mounts):
+            self.assertEqual('rw,sync,noatime',
+                             volume.mounted_options('/var/lib/vertica'))
+            self.assertIsNone(volume.mounted_options('/var/lib/mysql'))
+
+    def test_remount_for_now_only(self):
+        content = ("/dev/vdb\t/var/lib/vertica\text4\tdefaults,noatime"
+                   "\t0\t0\n")
+        self._write(content)
+        with self._install_copies() as mock_execute:
+            volume.VolumeDevice('/dev/vdb').remount(
+                '/var/lib/vertica', 'defaults,noatime,sync', keep=False)
+        mock_execute.assert_called_once_with(
+            'mount', '-o', 'remount,defaults,noatime,sync',
+            '/var/lib/vertica', run_as_root=True, root_helper='sudo')
+        self.assertEqual(content, self._read())

@@ -10,6 +10,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import collections
 import json
 import os
 import shutil
@@ -38,6 +39,7 @@ from trove.guestagent.datastore.vertica import service as vertica_service
 from trove.guestagent.module import driver_manager
 from trove.guestagent.module.drivers import vertica_license_driver
 from trove.guestagent import volume
+from trove.instance import service_status
 from trove.tests.unittests import trove_testtools
 
 CONF = cfg.CONF
@@ -534,60 +536,145 @@ class TestVerticaApp(VerticaGuestTestCase):
 
 
 class TestVerticaSyncWrites(VerticaGuestTestCase):
+    """The data volume of a member with sync writes, through real fstab
+    and mounts files.
+    """
 
     def setUp(self):
         super(TestVerticaSyncWrites, self).setUp()
-        fd, self.fstab = tempfile.mkstemp()
-        os.close(fd)
-        self.addCleanup(os.remove, self.fstab)
-        patcher = mock.patch.object(volume, 'FSTAB', self.fstab)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir)
+        self.fstab = os.path.join(self.dir, 'fstab')
+        self.mounts = os.path.join(self.dir, 'mounts')
+        for name, path in (('FSTAB', self.fstab),
+                           ('PROC_MOUNTS', self.mounts)):
+            patcher = mock.patch.object(volume, name, path)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self._write(self.fstab, "/dev/vdb\t/var/lib/vertica\text4\t"
+                                "defaults,noatime\t0\t0\n")
 
-    def _fstab(self, content):
-        with open(self.fstab, 'w') as f:
+    def _write(self, path, content):
+        with open(path, 'w') as f:
             f.write(content)
 
-    def _execute(self):
-        # The guest agent installs the new fstab with sudo; here it copies.
-        def execute(*args, **kwargs):
-            if args[0] == 'install':
-                shutil.copyfile(args[-2], args[-1])
-            return '', ''
-        return mock.patch.object(volume.utils, 'execute',
-                                 side_effect=execute)
+    def _mounted(self, options):
+        self._write(self.mounts, "/dev/vda1 / ext4 rw,relatime 0 0\n"
+                                 "/dev/vdb /var/lib/vertica ext4 %s 0 0\n"
+                                 % options)
 
-    def test_sync_is_kept_in_fstab_without_a_remount(self):
-        self._fstab("/dev/vdb\t/var/lib/vertica\text4\tdefaults,noatime"
-                    "\t0\t0\n")
-        with self._execute() as mock_execute:
-            self._app().plan_sync_writes()
-        self.assertEqual('defaults,noatime,sync',
-                         volume.fstab_options('/var/lib/vertica'))
-        self.assertEqual(['install'],
-                         [c[0][0] for c in mock_execute.call_args_list])
+    def _apply(self, wanted=True, status=None, running=True):
+        app = self._app()
+        app.status.get_actual_db_status.return_value = (
+            status or service_status.ServiceStatuses.HEALTHY)
+        with mock.patch.object(app, 'wants_sync_writes',
+                               return_value=wanted), \
+                mock.patch.object(app, 'database_is_running',
+                                  return_value=running), \
+                mock.patch.object(volume.VolumeDevice,
+                                  'remount') as mock_remount:
+            app.apply_mount_options()
+        return mock_remount
 
-    def test_without_an_fstab_entry_from_the_default_options(self):
-        with self._execute():
-            self._app().plan_sync_writes()
-        self.assertEqual(CONF.mount_options + ',sync',
-                         volume.fstab_options('/var/lib/vertica'))
+    @mock.patch.object(vertica_service.operating_system, 'write_file')
+    def test_sync_writes_are_asked_for_in_the_conf_dir(self, mock_write):
+        self._app().plan_sync_writes()
+        mock_write.assert_called_once_with(
+            '/etc/vertica-trove/sync_writes', 'true\n', as_root=True)
+        with open(self.fstab) as f:
+            self.assertNotIn('sync', f.read())
 
-    @mock.patch.object(volume.VolumeDevice, 'remount')
-    def test_the_volume_is_remounted_with_what_fstab_has(self, mock_remount):
-        self._fstab("/dev/vdb /var/lib/vertica ext4 defaults,noatime,sync"
-                    " 0 0\n")
-        self._app().apply_mount_options()
-        mock_remount.assert_called_once_with('/var/lib/vertica',
-                                             'defaults,noatime,sync')
+    def test_sync_once_the_database_answers(self):
+        self._mounted('rw,noatime')
+        self._apply().assert_called_once_with(
+            '/var/lib/vertica', 'defaults,noatime,sync', keep=False)
 
-    @mock.patch.object(volume.VolumeDevice, 'remount')
-    def test_no_remount_without_sync_in_fstab(self, mock_remount):
-        self._fstab("/dev/vdb /var/lib/vertica ext4 defaults,noatime 0 0\n")
-        self._app().apply_mount_options()
-        self._fstab("")
-        self._app().apply_mount_options()
-        mock_remount.assert_not_called()
+    def test_nothing_while_it_is_sync_and_runs(self):
+        self._mounted('rw,sync,noatime')
+        self._apply().assert_not_called()
+        self._apply(status=service_status.ServiceStatuses.RUNNING
+                    ).assert_not_called()
+
+    def test_not_before_the_database_answers(self):
+        # Created or starting: its catalog is read on the async volume.
+        self._mounted('rw,noatime')
+        self._apply(status=service_status.ServiceStatuses.RUNNING,
+                    running=False).assert_not_called()
+
+    def test_async_while_no_server_runs(self):
+        self._mounted('rw,sync,noatime')
+        self._apply(status=service_status.ServiceStatuses.SHUTDOWN,
+                    running=False).assert_called_once_with(
+            '/var/lib/vertica', 'defaults,noatime,async', keep=False)
+
+    def test_sync_left_in_fstab_by_an_earlier_build_is_taken_out(self):
+        self._write(self.fstab, "/dev/vdb /var/lib/vertica ext4 "
+                                "defaults,noatime,sync 0 0\n")
+        self._mounted('rw,sync,noatime')
+        self._apply(status=service_status.ServiceStatuses.SHUTDOWN,
+                    running=False).assert_called_once_with(
+            '/var/lib/vertica', 'defaults,noatime,async', keep=False)
+
+    def test_nothing_without_sync_writes(self):
+        self._mounted('rw,noatime')
+        self._apply(wanted=False).assert_not_called()
+
+
+class TestVerticaServerProcess(VerticaGuestTestCase):
+    """What counts as the server running, with the real shell text and a
+    ps that lists the given processes.
+    """
+
+    SERVER = ('/opt/vertica/bin/vertica -D /data/db_srvr/'
+              'v_db_srvr_node0001_catalog -C db_srvr -n v_db_srvr_node0001')
+    EDITOR = ('/opt/vertica/bin/vertica -D /data/db_srvr/'
+              'v_db_srvr_node0001_catalog -Ebatch -z')
+    OTHERS = ['/bin/bash /etc/vertica-trove/start.sh',
+              '/opt/vertica/bin/node_management_agent',
+              '/opt/vertica/spread/sbin/spread -c spread.conf']
+
+    def _bin(self, processes):
+        bindir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, bindir)
+        listing = os.path.join(bindir, 'listing')
+        with open(listing, 'w') as f:
+            f.write('COMMAND\n' + ''.join(p + '\n' for p in processes))
+        ps = os.path.join(bindir, 'ps')
+        with open(ps, 'w') as f:
+            f.write('#!/bin/sh\ncat %s\n' % listing)
+        os.chmod(ps, 0o755)
+        return dict(os.environ, PATH=bindir + ':' + os.environ['PATH'])
+
+    def _guest_says(self, processes):
+        env = self._bin(processes)
+
+        def exec_run(command, environment=None, demux=True):
+            r = subprocess.run(command, env=env, capture_output=True)
+            return r.returncode, (r.stdout, r.stderr)
+        app = self._app()
+        app.docker_client = mock.Mock()
+        app.docker_client.containers.get.return_value.exec_run = exec_run
+        return app.database_is_running()
+
+    def _script_says(self, processes):
+        # The running function of the start script as the guest writes it.
+        text = vertica_service.START_SCRIPT_CONTENT % collections.defaultdict(
+            str, nma_port=0)
+        start = text.index('running() {')
+        function = text[start:text.index('\n}\n', start) + 3]
+        r = subprocess.run(['/bin/bash', '-c', function + 'running'],
+                           env=self._bin(processes))
+        return r.returncode == 0
+
+    def test_the_server(self):
+        for says in (self._guest_says, self._script_says):
+            self.assertTrue(says(self.OTHERS + [self.SERVER]))
+            self.assertTrue(says(self.OTHERS + [self.EDITOR, self.SERVER]))
+
+    def test_catalog_editors_are_not_the_server(self):
+        for says in (self._guest_says, self._script_says):
+            self.assertFalse(says(self.OTHERS + [self.EDITOR] * 3))
+            self.assertFalse(says(self.OTHERS))
 
 
 class TestVerticaAdmin(VerticaGuestTestCase):
@@ -877,8 +964,8 @@ class TestVerticaManager(VerticaGuestTestCase):
         manager.app.create_database.assert_not_called()
         manager.app.apply_settings.assert_not_called()
 
-    def test_a_member_with_sync_writes_keeps_sync_in_fstab(self):
-        # Mounted with sync only once the database exists: created on
+    def test_a_member_with_sync_writes_asks_for_them(self):
+        # Mounted with sync only once the database answers: created on
         # volumes mounted with sync, it takes longer than vcluster waits.
         manager = self._manager()
         order = mock.Mock()
@@ -907,6 +994,16 @@ class TestVerticaManager(VerticaGuestTestCase):
         manager.cluster_complete(None)
         self.assertEqual(['apply_mount_options', 'end_install'],
                          [call[0] for call in order.mock_calls])
+
+    def test_the_mount_options_are_kept_periodically(self):
+        manager = self._manager()
+        self.assertIn('keep_mount_options',
+                      [name for name, _task in manager._periodic_tasks])
+        manager.keep_mount_options(None)
+        manager.app.apply_mount_options.assert_called_once_with()
+        # A failure is logged, the other periodic tasks still run.
+        manager.app.apply_mount_options.side_effect = exception.TroveError()
+        manager.keep_mount_options(None)
 
     def test_cluster_calls_reach_the_app(self):
         manager = self._manager()

@@ -29,6 +29,7 @@ from trove.guestagent.common import operating_system
 
 TMP_MOUNT_POINT = "/mnt/volume"
 FSTAB = "/etc/fstab"
+PROC_MOUNTS = "/proc/mounts"
 
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
@@ -46,6 +47,21 @@ def fstab_options(mount_point):
     try:
         with open(FSTAB) as fstab:
             lines = fstab.read().splitlines()
+    except OSError:
+        return None
+    options = None
+    for line in lines:
+        fields = _fstab_entry(line)
+        if fields and fields[1] == mount_point:
+            options = fields[3]
+    return options
+
+
+def mounted_options(mount_point):
+    """The options the mount point is mounted with now, or None."""
+    try:
+        with open(PROC_MOUNTS) as mounts:
+            lines = mounts.read().splitlines()
     except OSError:
         return None
     options = None
@@ -364,9 +380,10 @@ class VolumeDevice(object):
                      {'device': device_path, 'mount_point': mnt})
             self.unmount(mnt)
 
-    def remount(self, mount_point, options):
+    def remount(self, mount_point, options, keep=True):
         """Mount the file system at the mount point again, in place, with
-        the options, and keep them in fstab for the next boot.
+        the options, and keep them in fstab for the next boot unless told
+        otherwise.
         """
         LOG.info("Remounting %(mount_point)s with %(options)s.",
                  {'mount_point': mount_point, 'options': options})
@@ -377,7 +394,8 @@ class VolumeDevice(object):
             log_fmt = "Could not remount '%s'."
             exc_fmt = _("Could not remount '%s'.")
             log_and_raise(log_fmt, exc_fmt, mount_point)
-        self.keep_mount_options(mount_point, options)
+        if keep:
+            self.keep_mount_options(mount_point, options)
 
     def keep_mount_options(self, mount_point, options):
         """Write the options into fstab for the mount point, for the next

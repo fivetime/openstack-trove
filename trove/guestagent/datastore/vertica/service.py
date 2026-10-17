@@ -61,6 +61,9 @@ HOST_FILE = 'host'
 # What the container runs: the node management agent, and the database on
 # it.
 START_SCRIPT = 'start.sh'
+# Present when the data volume is to be mounted with sync while the
+# database runs (the cluster's sync_writes).
+SYNC_WRITES_FILE = 'sync_writes'
 # A license a module installed, for the creation of a database that needs
 # one.
 LICENSE_FILE = 'license.key'
@@ -119,7 +122,11 @@ nodes() {
 NODES=$(nodes)
 /opt/vertica/bin/node_management_agent &
 NMA=$!
-running() { ps -eo args | grep -q '^/opt/vertica/bin/vertica '; }
+# The server, not the catalog editors that read its catalog before it
+# starts.
+running() {
+    ps -eo args | grep '^/opt/vertica/bin/vertica ' | grep -qv -- ' -Ebatch'
+}
 stop() {
     if [ "$(nodes)" -gt 1 ]; then
         # SHUTDOWN() stops the whole database, on every node.
@@ -380,10 +387,13 @@ class VerticaApp(service.BaseDbApp):
             return False
 
     def database_is_running(self):
-        """Whether a server process runs in the container."""
+        """Whether a server process runs in the container, not one of
+        the catalog editors that read its catalog before it starts.
+        """
         try:
             self.execute(['sh', '-c', 'ps -eo args | '
-                          'grep -q "^/opt/vertica/bin/vertica "'])
+                          'grep "^/opt/vertica/bin/vertica " | '
+                          'grep -qv -- " -Ebatch"'])
             return True
         except exception.TroveError:
             return False
@@ -404,28 +414,45 @@ class VerticaApp(service.BaseDbApp):
             cfg.get_configuration_property('device_path'))
 
     def plan_sync_writes(self):
-        """Keep sync in fstab for the data volume. The server does not
-        sync what it commits to disk; with sync every write reaches the
-        disk before it returns, so the members of a cluster that all lose
-        power at once keep their commits and start again by themselves.
-
-        The volume is remounted with it once the database exists
-        (apply_mount_options): created on volumes mounted with sync, the
-        database of a cluster takes longer than vcluster waits for its
-        catalog.
+        """Ask for the data volume to be mounted with sync while the
+        database runs. The server does not sync what it commits to disk;
+        with sync every write reaches the disk before it returns, so the
+        members of a cluster that all lose power at once keep their
+        commits and start again by themselves.
         """
-        options = volume.with_option(
-            volume.fstab_options(self.mount_point) or CONF.mount_options,
-            'sync')
-        self._data_volume().keep_mount_options(self.mount_point, options)
+        operating_system.write_file(self._conf_path(SYNC_WRITES_FILE),
+                                    'true\n', as_root=True)
+
+    def wants_sync_writes(self):
+        return operating_system.exists(self._conf_path(SYNC_WRITES_FILE),
+                                       as_root=True)
 
     def apply_mount_options(self):
-        """Remount the data volume with the options fstab has for it, when
-        they ask for sync.
+        """With sync writes asked for, mount the data volume with sync
+        while the database answers, and without it while no server runs.
+
+        Not from fstab: before it starts, the server's catalog is read by
+        catalog editors that rewrite the data collector files in many
+        small writes, which take longer than vcluster waits on a volume
+        mounted with sync, so a database created or started there does
+        not come up. The writes between the start and the next check are
+        not synced.
         """
-        options = volume.fstab_options(self.mount_point)
-        if options and 'sync' in options.split(','):
-            self._data_volume().remount(self.mount_point, options)
+        if not self.wants_sync_writes():
+            return
+        base = (volume.fstab_options(self.mount_point) or
+                CONF.mount_options)
+        mounted = (volume.mounted_options(self.mount_point) or '').split(',')
+        if 'sync' not in mounted:
+            if (self.status.get_actual_db_status() ==
+                    service_status.ServiceStatuses.HEALTHY):
+                self._data_volume().remount(
+                    self.mount_point, volume.with_option(base, 'sync'),
+                    keep=False)
+        elif not self.database_is_running():
+            self._data_volume().remount(
+                self.mount_point, volume.with_option(base, 'async'),
+                keep=False)
 
     def database_exists(self):
         return operating_system.exists(
