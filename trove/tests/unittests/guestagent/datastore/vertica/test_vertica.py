@@ -460,6 +460,64 @@ class TestVerticaApp(VerticaGuestTestCase):
         self.assertIn('GRANT AUTHENTICATION "trove_local" TO "dbadmin"',
                       statements)
 
+    COMMUNAL = {'location': 's3://trove-vertica-c1/db',
+                'endpoint': '10.0.0.10:80', 'https': False,
+                'region': 'us-east-1', 'access': 'AK', 'secret': 'SK'}
+
+    def _create_db_args(self, **kwargs):
+        app = self._app()
+        with mock.patch.object(vertica_service.VerticaApp, 'vcluster') as \
+                vcluster, \
+                mock.patch.object(vertica_service.VerticaApp,
+                                  'agent_is_up', return_value=True), \
+                mock.patch.object(vertica_service.VerticaApp, 'has_license',
+                                  return_value=False), \
+                mock.patch.object(vertica_service.VerticaApp,
+                                  'admin_password',
+                                  new_callable=mock.PropertyMock,
+                                  return_value='pw'), \
+                mock.patch.object(vertica_service.VerticaAdmin, 'run'):
+            app.create_database(**kwargs)
+        return list(vcluster.call_args[0])
+
+    def test_an_eon_mode_database(self):
+        args = self._create_db_args(
+            hosts=['10.0.0.1', '10.0.0.2', '10.0.0.3'],
+            communal=self.COMMUNAL)
+        value = (lambda flag: args[args.index(flag) + 1])
+        self.assertEqual('s3://trove-vertica-c1/db',
+                         value('--communal-storage-location'))
+        self.assertEqual('/data', value('--depot-path'))
+        # One shard a node.
+        self.assertEqual('3', value('--shard-count'))
+        self.assertEqual('AWSAuth=AK:SK,AWSEndpoint=10.0.0.10:80,'
+                         'AWSEnableHttps=0,AWSRegion=us-east-1',
+                         value('--config-param'))
+        self.assertNotIn('--config-param-file', args)
+        https = dict(self.COMMUNAL, https=True)
+        args = self._create_db_args(hosts=['10.0.0.1'], communal=https)
+        self.assertIn('AWSEnableHttps=1', value('--config-param'))
+
+    def test_an_enterprise_mode_database_has_no_communal_storage(self):
+        args = self._create_db_args(hosts=['10.0.0.1'])
+        for flag in ('--communal-storage-location', '--depot-path',
+                     '--shard-count', '--config-param'):
+            self.assertNotIn(flag, args)
+
+    def test_the_s3_secret_stays_out_of_errors(self):
+        app = self._app()
+        container = mock.Mock()
+        container.exec_run.return_value = (1, (
+            b'', b'bad --config-param AWSAuth=AK:SK,AWSEndpoint=x '
+                 b'"AWSAuth": "AK:SK"'))
+        app.docker_client = mock.Mock()
+        app.docker_client.containers.get.return_value = container
+        error = self.assertRaises(exception.TroveError, app.vcluster,
+                                  'create_db')
+        self.assertNotIn('SK', str(error))
+        self.assertIn('AWSAuth=***', str(error))
+        self.assertIn('AWSEndpoint=x', str(error))
+
     def test_a_version_without_the_community_edition_needs_a_license(self):
         app = self._app()
         with mock.patch.object(
@@ -1005,13 +1063,20 @@ class TestVerticaManager(VerticaGuestTestCase):
         manager.app.apply_mount_options.side_effect = exception.TroveError()
         manager.keep_mount_options(None)
 
+    def test_the_communal_storage_reaches_the_app(self):
+        manager = self._manager()
+        manager.install_cluster(None, ['10.0.0.1'],
+                                communal={'location': 's3://b/db'})
+        manager.app.install_cluster.assert_called_once_with(
+            ['10.0.0.1'], communal={'location': 's3://b/db'})
+
     def test_cluster_calls_reach_the_app(self):
         manager = self._manager()
         manager.app.install_cluster.return_value = 'config'
         self.assertEqual('config', manager.install_cluster(
             None, ['10.0.0.1', '10.0.0.2', '10.0.0.3']))
         manager.app.install_cluster.assert_called_once_with(
-            ['10.0.0.1', '10.0.0.2', '10.0.0.3'])
+            ['10.0.0.1', '10.0.0.2', '10.0.0.3'], communal=None)
         manager.install_cluster_secrets(None, {'password': 'p'})
         manager.app.install_cluster_secrets.assert_called_once_with(
             {'password': 'p'})

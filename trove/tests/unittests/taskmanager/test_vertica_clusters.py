@@ -167,7 +167,7 @@ class VerticaClusterTasksTest(trove_testtools.TestCase):
         mock_ip.return_value = "10.0.0.2"
         self.clustertasks.create_cluster(Mock(), self.cluster_id)
         mock_guest.return_value.install_cluster.assert_called_with(
-            ['10.0.0.2'])
+            ['10.0.0.2'], communal=None)
         mock_reset_task.assert_called_with()
         mock_guest.return_value.cluster_complete.assert_called_with()
 

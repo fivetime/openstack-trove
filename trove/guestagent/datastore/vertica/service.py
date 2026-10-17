@@ -14,6 +14,7 @@ import datetime
 import ipaddress
 import json
 import os
+import re
 
 import docker
 
@@ -182,6 +183,28 @@ elif [ -f "$CFG" ]; then
 fi
 wait $NMA
 """
+
+
+def eon_args(communal, shards):
+    """The create_db arguments of an Eon Mode database. The S3 settings
+    go in --config-param: vcluster 25.4 ignores --config-param-file and
+    the database would go to AWS.
+    """
+    params = {
+        'AWSAuth': '%s:%s' % (communal['access'], communal['secret']),
+        'AWSEndpoint': communal['endpoint'],
+        'AWSEnableHttps': '1' if communal['https'] else '0',
+        'AWSRegion': communal['region'],
+    }
+    return ['--communal-storage-location', communal['location'],
+            '--depot-path', CONTAINER_DATA_DIR,
+            '--shard-count', str(shards),
+            '--config-param', ','.join('%s=%s' % kv for kv in params.items())]
+
+
+def redact(text):
+    """The text without the S3 secret of an Eon Mode database."""
+    return re.sub(r'(AWSAuth[=:"\s]+)[^,\s"]+', r'\1***', text)
 
 
 def quote_identifier(name):
@@ -369,7 +392,7 @@ class VerticaApp(service.BaseDbApp):
             raise exception.TroveError(
                 _("Command %(command)s failed with %(code)s: %(error)s")
                 % {'command': command[0], 'code': code,
-                   'error': (stderr or stdout).strip()[-500:]})
+                   'error': redact((stderr or stdout).strip()[-500:])})
         return stdout
 
     def vcluster(self, *args):
@@ -519,9 +542,11 @@ class VerticaApp(service.BaseDbApp):
         ):
             raise exception.TroveError("Failed to start database service")
 
-    def create_database(self, hosts=None):
+    def create_database(self, hosts=None, communal=None):
         """Create the database on the node, as the one node of it, or on
         the nodes of a cluster, whose agents trust the same authority.
+        With communal storage, in Eon Mode: the data in the bucket, one
+        shard a node, and the members' volumes as its depot.
 
         From 26.1 the server refuses the license of the Community Edition
         the image has: the database needs one installed with the instance.
@@ -535,6 +560,8 @@ class VerticaApp(service.BaseDbApp):
                 '--password-file', f'{CONTAINER_CONF_DIR}/{ADMIN_SECRET}']
         if self.has_license():
             args += ['--license', f'{CONTAINER_CONF_DIR}/{LICENSE_FILE}']
+        if communal:
+            args += eon_args(communal, len(hosts or [self.address]))
         LOG.info('Creating the database.')
         try:
             self.vcluster(*args)
@@ -584,12 +611,12 @@ class VerticaApp(service.BaseDbApp):
         utils.poll_until(self.agent_is_up, sleep_time=2,
                          time_out=CONF.state_change_wait_time)
 
-    def install_cluster(self, members):
+    def install_cluster(self, members, communal=None):
         """Create the database on all members, from this one, and return
         the configuration vcluster wrote, which the others need to start
-        and stop their node.
+        and stop their node: in Eon Mode it names the communal storage.
         """
-        self.create_database(hosts=members)
+        self.create_database(hosts=members, communal=communal)
         self.apply_settings()
         return operating_system.read_file(
             f'{self.mount_point}/vertica_cluster.yaml', as_root=True)

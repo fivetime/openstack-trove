@@ -115,6 +115,20 @@ common_opts = [
                help='Service endpoint type to use when searching catalog.'),
     cfg.BoolOpt('swift_api_insecure', default=False,
                 help="Allow to perform insecure SSL requests to swift."),
+    cfg.URIOpt('s3_endpoint_url',
+               help='URL of the S3 service that takes Keystone EC2 '
+                    'credentials, where datastores keep data in buckets of '
+                    'the tenant\'s project (the communal storage of Vertica '
+                    'Eon Mode clusters). Taken from the service catalog '
+                    '(s3_service_type) if not set.'),
+    cfg.StrOpt('s3_service_type', default='s3',
+               help='Service type of the S3 service in the service '
+                    'catalog.'),
+    cfg.StrOpt('s3_endpoint_type', default='public',
+               help='Interface of the S3 service endpoint in the service '
+                    'catalog.'),
+    cfg.StrOpt('s3_region', default='us-east-1',
+               help='Region S3 requests are signed for.'),
     cfg.URIOpt('glance_url', help='URL ending in ``AUTH_``.'),
     cfg.StrOpt('glance_service_type', default='image',
                help='Service type to use when searching catalog.'),
@@ -1831,6 +1845,22 @@ vertica_opts = [
              'your-registry/your-repo/db-backup-vertica:25.4.0-0-minimal '
              'is used for vertica datastore with version 25.4.0-0-minimal'
     ),
+    cfg.BoolOpt(
+        'eon_enabled', default=False,
+        help='Whether clusters can be created in Eon Mode (the extended '
+             'property storage_mode=eon). Their communal storage is a '
+             'bucket of the project of the cluster on the S3 service '
+             '(s3_endpoint_url or the service catalog), made with an EC2 '
+             'credential the task manager creates for the user who '
+             'creates the cluster, and removed with the cluster.'),
+    cfg.StrOpt(
+        'eon_communal_endpoint',
+        help='host:port of the S3 service as the database instances reach '
+             'it. The host and port of the S3 service URL if not set.'),
+    cfg.BoolOpt(
+        'eon_communal_https',
+        help='Whether the database instances reach the S3 service over '
+             'HTTPS. As the S3 service URL says if not set.'),
 ]
 
 # DB2

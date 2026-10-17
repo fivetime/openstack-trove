@@ -114,9 +114,12 @@ class Manager(manager.Manager):
     def install_cluster_secrets(self, context, secrets):
         self.app.install_cluster_secrets(secrets)
 
-    def install_cluster(self, context, members):
-        LOG.info("Creating the database on %s.", members)
-        return self.app.install_cluster(members)
+    def install_cluster(self, context, members, communal=None):
+        LOG.info("Creating the database on %(members)s%(eon)s.",
+                 {'members': members,
+                  'eon': ', in Eon Mode on %s' % communal['location']
+                  if communal else ''})
+        return self.app.install_cluster(members, communal=communal)
 
     def set_cluster_config(self, context, config):
         self.app.set_cluster_config(config)

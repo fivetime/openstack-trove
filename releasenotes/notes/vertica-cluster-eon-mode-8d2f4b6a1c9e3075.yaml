@@ -1,0 +1,34 @@
+---
+features:
+  - |
+    A ``vertica`` cluster can be created in Eon Mode with the extended
+    property ``storage_mode=eon`` where ``[vertica] eon_enabled`` is set.
+    Its communal storage is a bucket ``trove-vertica-<cluster id>`` of the
+    project of the cluster on an S3 service that takes Keystone EC2
+    credentials (Ceph RGW with ``rgw_s3_auth_use_keystone``, best with
+    ``rgw_keystone_implicit_tenants = true`` so that the project sees the
+    same buckets through Swift and S3; or Swift with ``s3api`` and
+    ``s3token``): the task manager creates an EC2 credential for the user
+    who creates the cluster, in its project, creates the bucket with it,
+    and empties and removes the bucket and then the credential when the
+    cluster is deleted. The data stays in the project's own object storage
+    and counts against its quota. The S3 service is found in the service
+    catalog (``[DEFAULT] s3_service_type``, default ``s3``, and
+    ``s3_endpoint_type``) unless ``[DEFAULT] s3_endpoint_url`` is set;
+    ``[vertica] eon_communal_endpoint`` and ``eon_communal_https`` say how
+    the database instances reach it when that is not the same address.
+    The handling of the project's buckets and EC2 credentials is in
+    ``trove.common.object_storage`` for other datastores to use. In tests, members that all lost power at
+    once came back by themselves and lost the commits of their last 10 to
+    15 seconds; with ``sync_writes=true`` as well, none.
+
+    ``cluster show`` of a Vertica cluster created from now on shows its
+    ``storage_mode``, ``sync_writes`` and, in Eon Mode, ``communal_bucket``
+    in ``extended_properties``. The bucket and the EC2 credential are the
+    project's: removing either breaks the database, and a credential stops
+    working when its user is deleted or leaves the project.
+upgrade:
+  - |
+    A new column ``properties`` of the ``clusters`` table keeps what a
+    cluster was created with; run the database migration. ``boto3`` is a
+    new requirement of the API and task manager services.

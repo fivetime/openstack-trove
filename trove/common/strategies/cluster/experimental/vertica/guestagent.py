@@ -53,11 +53,17 @@ class VerticaGuestAgentAPI(guest_api.API):
                           version=guest_api.API.API_BASE_VERSION,
                           secrets=secrets)
 
-    def install_cluster(self, members):
+    def install_cluster(self, members, communal=None):
+        """Create the database on the members, in Eon Mode on the
+        communal storage when there is one. Only then the argument goes
+        to the guest: older guest agents do not take it.
+        """
         LOG.debug("Creating the database on %s.", members)
+        kwargs = {'members': members}
+        if communal:
+            kwargs['communal'] = communal
         return self._call("install_cluster", CONF.cluster_usage_timeout,
-                          version=guest_api.API.API_BASE_VERSION,
-                          members=members)
+                          version=guest_api.API.API_BASE_VERSION, **kwargs)
 
     def set_cluster_config(self, config):
         LOG.debug("Setting the cluster configuration.")

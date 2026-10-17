@@ -13,6 +13,8 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import json
+
 from oslo_log import log as logging
 
 from neutronclient.common import exceptions as neutron_exceptions
@@ -60,7 +62,7 @@ def persisted_models():
 class DBCluster(dbmodels.DatabaseModelBase):
     _data_fields = ['created', 'updated', 'name', 'task_id',
                     'tenant_id', 'datastore_version_id', 'deleted',
-                    'deleted_at', 'configuration_id']
+                    'deleted_at', 'configuration_id', 'properties']
     _table_name = 'clusters'
 
     def __init__(self, task_status, **kwargs):
@@ -83,6 +85,16 @@ class DBCluster(dbmodels.DatabaseModelBase):
     @property
     def task_status(self):
         return ClusterTask.from_code(self.task_id)
+
+    def get_properties(self):
+        """What the cluster was created with that its datastore keeps."""
+        # Not set on a cluster made here rather than loaded.
+        properties = getattr(self, 'properties', None)
+        return json.loads(properties) if properties else {}
+
+    def save_properties(self, properties):
+        self.update(properties=json.dumps(properties, sort_keys=True)
+                    if properties else None)
 
     @task_status.setter
     def task_status(self, task_status):

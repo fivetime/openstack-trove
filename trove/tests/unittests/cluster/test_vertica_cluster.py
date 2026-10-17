@@ -20,6 +20,7 @@ from novaclient import exceptions as nova_exceptions
 from trove.cluster.models import Cluster
 from trove.cluster.models import ClusterTasks
 from trove.cluster.models import DBCluster
+from trove.common import cfg
 from trove.common import clients
 from trove.common import exception
 from trove.common.strategies.cluster.experimental.vertica import (
@@ -28,6 +29,8 @@ from trove.instance import models as inst_models
 from trove.quota.quota import QUOTAS
 from trove.taskmanager import api as task_api
 from trove.tests.unittests import trove_testtools
+
+CONF = cfg.CONF
 
 
 class FakeOptGroup(object):
@@ -306,18 +309,83 @@ class ClusterTest(trove_testtools.TestCase):
 
     # The sync_writes extended property, through the real create.
 
-    def _create(self, extended_properties):
+    def _create(self, extended_properties, context=None):
         with patch.object(inst_models.DBInstance, 'find_all'), \
                 patch.object(inst_models.Instance, 'create') as mock_ins, \
                 patch.object(DBCluster, 'create') as mock_db, \
                 patch.object(task_api, 'load'), \
                 patch.object(QUOTAS, 'check_quotas'), \
                 patch.object(clients, 'create_nova_client'):
-            self.cluster.create(Mock(), self.cluster_name, self.datastore,
-                                self.datastore_version, self.instances,
-                                extended_properties, None, None)
+            mock_db.return_value.id = 'cluster-1'
+            self.cluster.create(context or Mock(), self.cluster_name,
+                                self.datastore, self.datastore_version,
+                                self.instances, extended_properties,
+                                None, None)
         return mock_db, [c.kwargs['cluster_config']
                          for c in mock_ins.call_args_list]
+
+    def _eon_enabled(self):
+        CONF.set_override('eon_enabled', True, group='vertica')
+        self.addCleanup(CONF.clear_override, 'eon_enabled', group='vertica')
+
+    def test_the_properties_are_kept(self):
+        mock_db, _configs = self._create({})
+        mock_db.return_value.save_properties.assert_called_once_with(
+            {'storage_mode': 'enterprise', 'sync_writes': False})
+        mock_db, _configs = self._create({'sync_writes': 'true',
+                                          'storage_mode': 'Enterprise'})
+        mock_db.return_value.save_properties.assert_called_once_with(
+            {'storage_mode': 'enterprise', 'sync_writes': True})
+
+    def test_eon_is_refused_where_it_is_not_enabled(self):
+        with patch.object(DBCluster, 'create') as mock_db:
+            error = self.assertRaises(
+                exception.BadRequest, self.cluster.create, Mock(),
+                self.cluster_name, self.datastore, self.datastore_version,
+                self.instances, {'storage_mode': 'eon'}, None, None)
+        self.assertIn('Eon Mode is not available', str(error))
+        mock_db.assert_not_called()
+
+    def test_a_storage_mode_that_does_not_exist_is_refused(self):
+        self._eon_enabled()
+        with patch.object(DBCluster, 'create') as mock_db:
+            self.assertRaises(
+                exception.BadRequest, self.cluster.create, Mock(),
+                self.cluster_name, self.datastore, self.datastore_version,
+                self.instances, {'storage_mode': 'eon2'}, None, None)
+        mock_db.assert_not_called()
+
+    def test_an_eon_cluster_keeps_its_bucket_and_user(self):
+        self._eon_enabled()
+        context = Mock(user_id='user-1')
+        mock_db, configs = self._create(
+            {'storage_mode': 'eon', 'sync_writes': 'true'}, context)
+        mock_db.return_value.save_properties.assert_called_once_with(
+            {'storage_mode': 'eon', 'sync_writes': True,
+             'communal_bucket': 'trove-vertica-cluster-1',
+             'ec2_user_id': 'user-1'})
+        # The members only get what their guest acts on.
+        for config in configs:
+            self.assertNotIn('storage_mode', config)
+            self.assertIs(True, config['sync_writes'])
+
+    def test_what_a_cluster_shows_of_its_properties(self):
+        shown = vertica_api.shown_properties
+        # A cluster created before the properties were kept.
+        self.assertIsNone(shown({}))
+        self.assertEqual({'storage_mode': 'enterprise', 'sync_writes': True},
+                         shown({'storage_mode': 'enterprise',
+                                'sync_writes': True}))
+        self.assertEqual(
+            {'storage_mode': 'eon', 'sync_writes': False,
+             'communal_bucket': 'trove-vertica-c1'},
+            shown({'storage_mode': 'eon', 'sync_writes': False,
+                   'communal_bucket': 'trove-vertica-c1',
+                   'ec2_user_id': 'u1', 'ec2_access': 'AK'}))
+        view = vertica_api.VerticaClusterView(Mock())
+        view.cluster.db_info.get_properties.return_value = {
+            'storage_mode': 'eon', 'communal_bucket': 'b'}
+        self.assertEqual('eon', view.get_extended_properties()['storage_mode'])
 
     def test_every_member_gets_sync_writes(self):
         for value in ('true', 'True', True, '1'):

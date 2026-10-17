@@ -21,6 +21,7 @@ from trove.common import cfg
 from trove.common import exception
 from trove.common.i18n import _
 from trove.common.strategies.cluster import base
+from trove.common.strategies.cluster.experimental.vertica import communal
 from trove.common import utils
 from trove.extensions.mgmt.clusters.views import MgmtClusterView
 from trove.instance import models as inst_models
@@ -38,26 +39,64 @@ CONF = cfg.CONF
 SYNC_WRITES = 'sync_writes'
 
 
-def cluster_properties(extended_properties):
-    """The member settings the extended properties of a new cluster
-    ask for. A property this datastore does not know is refused rather
-    than ignored: a misspelled one would leave the writes unsynced
+# Where the data is: on the volumes of the members (Enterprise Mode), or
+# in a bucket of the project's object storage with the members' volumes
+# as its cache (Eon Mode, communal.py).
+STORAGE_MODE = 'storage_mode'
+ENTERPRISE = 'enterprise'
+EON = 'eon'
+# The user whose EC2 credential the communal storage is reached with.
+EC2_USER = 'ec2_user_id'
+
+
+def cluster_properties(extended_properties, conf=None):
+    """The storage mode and sync writes the extended properties of a new
+    cluster ask for. A property this datastore does not know is refused
+    rather than ignored: a misspelled one would leave the writes unsynced
     without a word.
     """
     props = dict(extended_properties or {})
-    unknown = sorted(set(props) - {SYNC_WRITES})
+    known = (STORAGE_MODE, SYNC_WRITES)
+    unknown = sorted(set(props) - set(known))
     if unknown:
         raise exception.BadRequest(_(
             "Unknown extended properties for a Vertica cluster: %(unknown)s."
             " Known: %(known)s.") % {'unknown': ', '.join(unknown),
-                                     'known': SYNC_WRITES})
+                                     'known': ', '.join(known)})
     try:
         sync = strutils.bool_from_string(props.get(SYNC_WRITES, False),
                                          strict=True)
     except ValueError:
         raise exception.BadRequest(_(
             "%s must be true or false.") % SYNC_WRITES)
-    return {SYNC_WRITES: True} if sync else {}
+    mode = str(props.get(STORAGE_MODE, ENTERPRISE)).lower()
+    if mode not in (ENTERPRISE, EON):
+        raise exception.BadRequest(_(
+            "%(name)s must be %(enterprise)s or %(eon)s.")
+            % {'name': STORAGE_MODE, 'enterprise': ENTERPRISE, 'eon': EON})
+    if mode == EON and not getattr(conf, 'eon_enabled', False):
+        raise exception.BadRequest(_(
+            "Eon Mode is not available for Vertica clusters in this "
+            "cloud."))
+    return {STORAGE_MODE: mode, SYNC_WRITES: sync}
+
+
+def member_settings(properties):
+    """What the guest of each member gets in its cluster configuration."""
+    return {SYNC_WRITES: True} if properties.get(SYNC_WRITES) else {}
+
+
+def shown_properties(properties):
+    """What a cluster shows of its properties; nothing for a cluster
+    created before they were kept.
+    """
+    if not properties:
+        return None
+    shown = {STORAGE_MODE: properties.get(STORAGE_MODE, ENTERPRISE),
+             SYNC_WRITES: bool(properties.get(SYNC_WRITES))}
+    if shown[STORAGE_MODE] == EON:
+        shown['communal_bucket'] = properties.get('communal_bucket')
+    return shown
 
 
 class VerticaAPIStrategy(base.BaseAPIStrategy):
@@ -101,7 +140,7 @@ class VerticaCluster(models.Cluster):
                           instances, extended_properties, locality,
                           new_cluster=True, image_id=None):
         vertica_conf = CONF.get(datastore_version.manager)
-        properties = cluster_properties(extended_properties)
+        properties = cluster_properties(extended_properties, vertica_conf)
         num_instances = len(instances)
 
         existing = inst_models.DBInstance.find_all(cluster_id=db_info.id,
@@ -147,7 +186,7 @@ class VerticaCluster(models.Cluster):
                 member_config = {"id": db_info.id, "instance_type": "master"}
             else:
                 member_config = {"id": db_info.id, "instance_type": "member"}
-            member_config.update(properties)
+            member_config.update(member_settings(properties))
             instance_name = "%s-member-%s" % (db_info.name,
                                               str(i + num_existing + 1))
             minstances.append(
@@ -172,10 +211,9 @@ class VerticaCluster(models.Cluster):
         if configuration:
             raise exception.ConfigurationNotSupported()
 
-        # Before anything is created.
-        cluster_properties(extended_properties)
-
         vertica_conf = CONF.get(datastore_version.manager)
+        # Before anything is created.
+        properties = cluster_properties(extended_properties, vertica_conf)
         num_instances = len(instances)
 
         # Matching number of instances with configured cluster_member_count
@@ -187,6 +225,12 @@ class VerticaCluster(models.Cluster):
             name=name, tenant_id=context.project_id,
             datastore_version_id=datastore_version.id,
             task_status=ClusterTasks.BUILDING_INITIAL)
+        if properties[STORAGE_MODE] == EON:
+            # The bucket is named after the cluster; the task manager
+            # creates it with an EC2 credential of this user.
+            properties['communal_bucket'] = communal.bucket_name(db_info.id)
+            properties[EC2_USER] = context.user_id
+        db_info.save_properties(properties)
 
         cls._create_instances(context, db_info, datastore, datastore_version,
                               instances, extended_properties, locality,
@@ -227,9 +271,15 @@ class VerticaClusterView(ClusterView):
         return self._build_instances(['member', 'master'],
                                      ['member', 'master'])
 
+    def get_extended_properties(self):
+        return shown_properties(self.cluster.db_info.get_properties())
+
 
 class VerticaMgmtClusterView(MgmtClusterView):
 
     def build_instances(self):
         return self._build_instances(['member', 'master'],
                                      ['member', 'master'])
+
+    def get_extended_properties(self):
+        return shown_properties(self.cluster.db_info.get_properties())
