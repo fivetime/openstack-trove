@@ -7,9 +7,12 @@ features:
     power at once lose recent commits, or come back unable to start until
     an administrator recovers the database to an earlier epoch, or cannot
     be recovered at all once the ancient history mark has passed what
-    reached the disk. With ``sync_writes`` the guest agent mounts the data
-    volume of every member with ``sync``, now and from the next boot, so
-    every write reaches the disk before it returns: in tests the members
+    reached the disk. With ``sync_writes`` the guest agent keeps ``sync``
+    in the fstab entry of the data volume of every member and remounts the
+    volume with it once the database exists (created on volumes mounted
+    with ``sync``, the database takes longer than ``vcluster`` waits for
+    its catalog), so every write reaches the disk before it returns, from
+    then on and after every boot: in tests the members
     came back by themselves with every acknowledged commit. Writes are
     slower, in those tests about 17 times for a bulk load and 21 times for
     single row commits. The default is unchanged.

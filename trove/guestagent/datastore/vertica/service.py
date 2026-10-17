@@ -399,19 +399,33 @@ class VerticaApp(service.BaseDbApp):
                 group=self.database_service_gid, force=True,
                 as_root=True)
 
-    def use_sync_writes(self):
-        """Mount the data volume with sync, now and from the next boot.
-        The server does not sync what it commits to disk; with sync every
-        write reaches the disk before it returns, so the members of a
-        cluster that all lose power at once keep their commits and start
-        again by themselves.
-        """
-        device = volume.VolumeDevice(
+    def _data_volume(self):
+        return volume.VolumeDevice(
             cfg.get_configuration_property('device_path'))
+
+    def plan_sync_writes(self):
+        """Keep sync in fstab for the data volume. The server does not
+        sync what it commits to disk; with sync every write reaches the
+        disk before it returns, so the members of a cluster that all lose
+        power at once keep their commits and start again by themselves.
+
+        The volume is remounted with it once the database exists
+        (apply_mount_options): created on volumes mounted with sync, the
+        database of a cluster takes longer than vcluster waits for its
+        catalog.
+        """
         options = volume.with_option(
             volume.fstab_options(self.mount_point) or CONF.mount_options,
             'sync')
-        device.remount(self.mount_point, options)
+        self._data_volume().keep_mount_options(self.mount_point, options)
+
+    def apply_mount_options(self):
+        """Remount the data volume with the options fstab has for it, when
+        they ask for sync.
+        """
+        options = volume.fstab_options(self.mount_point)
+        if options and 'sync' in options.split(','):
+            self._data_volume().remount(self.mount_point, options)
 
     def database_exists(self):
         return operating_system.exists(

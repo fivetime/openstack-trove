@@ -12,6 +12,7 @@
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 from unittest import mock
@@ -543,21 +544,50 @@ class TestVerticaSyncWrites(VerticaGuestTestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    @mock.patch.object(volume.VolumeDevice, 'remount')
-    def test_the_data_volume_is_mounted_sync(self, mock_remount):
+    def _fstab(self, content):
         with open(self.fstab, 'w') as f:
-            f.write("/dev/vdb\t/var/lib/vertica\text4\tdefaults,noatime"
+            f.write(content)
+
+    def _execute(self):
+        # The guest agent installs the new fstab with sudo; here it copies.
+        def execute(*args, **kwargs):
+            if args[0] == 'install':
+                shutil.copyfile(args[-2], args[-1])
+            return '', ''
+        return mock.patch.object(volume.utils, 'execute',
+                                 side_effect=execute)
+
+    def test_sync_is_kept_in_fstab_without_a_remount(self):
+        self._fstab("/dev/vdb\t/var/lib/vertica\text4\tdefaults,noatime"
                     "\t0\t0\n")
-        self._app().use_sync_writes()
+        with self._execute() as mock_execute:
+            self._app().plan_sync_writes()
+        self.assertEqual('defaults,noatime,sync',
+                         volume.fstab_options('/var/lib/vertica'))
+        self.assertEqual(['install'],
+                         [c[0][0] for c in mock_execute.call_args_list])
+
+    def test_without_an_fstab_entry_from_the_default_options(self):
+        with self._execute():
+            self._app().plan_sync_writes()
+        self.assertEqual(CONF.mount_options + ',sync',
+                         volume.fstab_options('/var/lib/vertica'))
+
+    @mock.patch.object(volume.VolumeDevice, 'remount')
+    def test_the_volume_is_remounted_with_what_fstab_has(self, mock_remount):
+        self._fstab("/dev/vdb /var/lib/vertica ext4 defaults,noatime,sync"
+                    " 0 0\n")
+        self._app().apply_mount_options()
         mock_remount.assert_called_once_with('/var/lib/vertica',
                                              'defaults,noatime,sync')
 
     @mock.patch.object(volume.VolumeDevice, 'remount')
-    def test_without_an_fstab_entry_from_the_default_options(
-            self, mock_remount):
-        self._app().use_sync_writes()
-        mock_remount.assert_called_once_with(
-            '/var/lib/vertica', CONF.mount_options + ',sync')
+    def test_no_remount_without_sync_in_fstab(self, mock_remount):
+        self._fstab("/dev/vdb /var/lib/vertica ext4 defaults,noatime 0 0\n")
+        self._app().apply_mount_options()
+        self._fstab("")
+        self._app().apply_mount_options()
+        mock_remount.assert_not_called()
 
 
 class TestVerticaAdmin(VerticaGuestTestCase):
@@ -847,23 +877,36 @@ class TestVerticaManager(VerticaGuestTestCase):
         manager.app.create_database.assert_not_called()
         manager.app.apply_settings.assert_not_called()
 
-    def test_a_member_with_sync_writes_mounts_sync_before_starting(self):
+    def test_a_member_with_sync_writes_keeps_sync_in_fstab(self):
+        # Mounted with sync only once the database exists: created on
+        # volumes mounted with sync, it takes longer than vcluster waits.
         manager = self._manager()
         order = mock.Mock()
-        for name in ('use_sync_writes', 'start_db'):
+        for name in ('plan_sync_writes', 'start_db'):
             order.attach_mock(getattr(manager.app, name), name)
         self._prepare(manager, cluster_config={'id': 'c1',
                                                'instance_type': 'member',
                                                'sync_writes': True})
-        self.assertEqual(['use_sync_writes', 'start_db'],
+        self.assertEqual(['plan_sync_writes', 'start_db'],
                          [call[0] for call in order.mock_calls])
+        manager.app.apply_mount_options.assert_not_called()
 
     def test_a_member_without_sync_writes_keeps_its_mount(self):
         manager = self._manager()
         self._prepare(manager, cluster_config={'id': 'c1',
                                                'instance_type': 'member'})
         self._prepare(manager)
-        manager.app.use_sync_writes.assert_not_called()
+        manager.app.plan_sync_writes.assert_not_called()
+
+    def test_the_mount_options_apply_before_the_member_is_ready(self):
+        manager = self._manager()
+        order = mock.Mock()
+        order.attach_mock(manager.app.apply_mount_options,
+                          'apply_mount_options')
+        order.attach_mock(manager.status.end_install, 'end_install')
+        manager.cluster_complete(None)
+        self.assertEqual(['apply_mount_options', 'end_install'],
+                         [call[0] for call in order.mock_calls])
 
     def test_cluster_calls_reach_the_app(self):
         manager = self._manager()

@@ -377,6 +377,12 @@ class VolumeDevice(object):
             log_fmt = "Could not remount '%s'."
             exc_fmt = _("Could not remount '%s'.")
             log_and_raise(log_fmt, exc_fmt, mount_point)
+        self.keep_mount_options(mount_point, options)
+
+    def keep_mount_options(self, mount_point, options):
+        """Write the options into fstab for the mount point, for the next
+        time it is mounted.
+        """
         entry = VolumeMountPoint(self.device_path, mount_point)
         entry.mount_options = options
         entry.write_to_fstab()

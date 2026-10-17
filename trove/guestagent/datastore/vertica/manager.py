@@ -79,7 +79,7 @@ class Manager(manager.Manager):
         member create the database on all of them.
         """
         if cluster_config and cluster_config.get('sync_writes'):
-            self.app.use_sync_writes()
+            self.app.plan_sync_writes()
 
         LOG.info('Preparing database config files')
         self.app.configuration_manager.reset_configuration(config_contents)
@@ -119,6 +119,11 @@ class Manager(manager.Manager):
 
     def set_cluster_config(self, context, config):
         self.app.set_cluster_config(config)
+
+    def cluster_complete(self, context):
+        # The database exists on every member by now.
+        self.app.apply_mount_options()
+        super(Manager, self).cluster_complete(context)
 
     def stop_db(self, context):
         self.app.stop_db()
