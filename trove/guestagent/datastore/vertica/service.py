@@ -59,6 +59,11 @@ CONFIG_FILE = f'{HOST_CONF_DIR}/vertica.conf'
 ADMIN_SECRET = 'admin.secret'
 # The address the node has on the user's network.
 HOST_FILE = 'host'
+# There while the guest agent has the server stopped in a running
+# container (for a backup): the start script does not take it for a crash.
+SERVER_STOPPED_FILE = 'server_stopped'
+# How often the start script looks for the server, in seconds.
+WATCH_INTERVAL = 5
 # What the container runs: the node management agent, and the database on
 # it.
 START_SCRIPT = 'start.sh'
@@ -121,6 +126,9 @@ nodes() {
     if [ -f "$CFG" ]; then grep -c '^ *address:' "$CFG"; else echo 0; fi
 }
 NODES=$(nodes)
+# Left by a guest agent that stopped the server and did not start it
+# again; the container starts the database.
+rm -f $CONF/%(stopped)s
 /opt/vertica/bin/node_management_agent &
 NMA=$!
 # The server, not the catalog editors that read its catalog before it
@@ -129,6 +137,7 @@ running() {
     ps -eo args | grep '^/opt/vertica/bin/vertica ' | grep -qv -- ' -Ebatch'
 }
 stop() {
+    STOPPING=1
     if [ "$(nodes)" -gt 1 ]; then
         # SHUTDOWN() stops the whole database, on every node.
         vcluster stop_node --stop-hosts "$HOST" \\
@@ -137,6 +146,30 @@ stop() {
         vsql -U %(admin)s -Atc "SELECT SHUTDOWN()"
     fi
     kill $NMA
+    wait $NMA
+}
+# Like the server of the other datastores, the process of their
+# container: once the server ran, the container ends when it does (a
+# crash, kill -9), and docker (unless-stopped) starts it again, and with
+# it this script and the database. Not when it is stopped on purpose: by
+# this script, or by the guest agent, which says so in a file.
+STOPPING=0
+watch() {
+    local up=0
+    while kill -0 $NMA 2>/dev/null; do
+        if running; then
+            up=1
+        elif [ $up = 1 ] && [ $STOPPING = 0 ] && \\
+                [ ! -e $CONF/%(stopped)s ]; then
+            echo "The server stopped: ending the container to start it again."
+            kill $NMA
+            wait $NMA
+            return 1
+        fi
+        # In the background, so that a signal is taken at once.
+        sleep %(watch_interval)d &
+        wait $!
+    done
     wait $NMA
 }
 trap stop TERM INT
@@ -181,7 +214,7 @@ elif [ -f "$CFG" ]; then
     vcluster start_db --db-name %(db)s --password-file $CONF/%(secret)s \\
         --timeout 120 $TLS --config "$CFG" &
 fi
-wait $NMA
+watch
 """
 
 
@@ -342,6 +375,8 @@ class VerticaApp(service.BaseDbApp):
                 'db': DB_NAME,
                 'data': CONTAINER_DATA_DIR,
                 'secret': ADMIN_SECRET,
+                'stopped': SERVER_STOPPED_FILE,
+                'watch_interval': WATCH_INTERVAL,
             }, mode=FileMode.ADD_READ_ALL)
 
     def _write_owned(self, path, content, mode=None):
@@ -710,8 +745,12 @@ class VerticaApp(service.BaseDbApp):
         LOG.info("Finished restarting database")
 
     def shutdown_database(self):
-        """Stop the server, leaving the container and its agent."""
+        """Stop the server, leaving the container and its agent, and
+        tell the start script it is stopped on purpose.
+        """
         LOG.info('Shutting the database down.')
+        operating_system.write_file(self._conf_path(SERVER_STOPPED_FILE),
+                                    '', as_root=True)
         self.adm.run(['SELECT SHUTDOWN()'])
         utils.poll_until(lambda: not self.database_is_running(),
                          sleep_time=2, time_out=CONF.state_change_wait_time)
@@ -719,10 +758,16 @@ class VerticaApp(service.BaseDbApp):
     def start_database(self):
         """Start the server on the running agent."""
         LOG.info('Starting the database.')
-        self.vcluster('start_db', '--db-name', DB_NAME,
-                      '--password-file',
-                      f'{CONTAINER_CONF_DIR}/{ADMIN_SECRET}')
-        self._wait_until_healthy()
+        try:
+            self.vcluster('start_db', '--db-name', DB_NAME,
+                          '--password-file',
+                          f'{CONTAINER_CONF_DIR}/{ADMIN_SECRET}')
+            self._wait_until_healthy()
+        finally:
+            # A server that did not come back ends the container as a
+            # crashed one does, and its next start tries again.
+            operating_system.remove(self._conf_path(SERVER_STOPPED_FILE),
+                                    force=True, as_root=True)
 
     ##########
     # Backup

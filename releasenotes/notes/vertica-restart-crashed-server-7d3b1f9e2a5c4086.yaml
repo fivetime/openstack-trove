@@ -1,0 +1,15 @@
+---
+fixes:
+  - |
+    A ``vertica`` server that stops by itself, a crash or a ``kill -9``,
+    is started again. The process of the container is the start script,
+    which waited on the node management agent, so the container kept
+    running without the server and nothing started it again: a member of a
+    cluster stayed down, and a single instance or a cluster whose servers
+    all stopped stayed unavailable, until the instances were restarted
+    through Trove. The start script now ends the container when the server
+    that ran is gone, and docker starts it again, as for the other
+    datastores, whose server is the process of its container. A server
+    stopped on purpose, by the start script or by the guest agent for a
+    backup, is not restarted, and neither is a database that never started
+    (one that has to be recovered to an earlier epoch).

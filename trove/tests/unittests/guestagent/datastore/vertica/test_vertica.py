@@ -795,7 +795,7 @@ class TestVerticaServerProcess(VerticaGuestTestCase):
     def _script_says(self, processes):
         # The running function of the start script as the guest writes it.
         text = vertica_service.START_SCRIPT_CONTENT % collections.defaultdict(
-            str, nma_port=0)
+            str, nma_port=0, watch_interval=0)
         start = text.index('running() {')
         function = text[start:text.index('\n}\n', start) + 3]
         r = subprocess.run(['/bin/bash', '-c', function + 'running'],
@@ -811,6 +811,96 @@ class TestVerticaServerProcess(VerticaGuestTestCase):
         for says in (self._guest_says, self._script_says):
             self.assertFalse(says(self.OTHERS + [self.EDITOR] * 3))
             self.assertFalse(says(self.OTHERS))
+
+
+class TestVerticaServerWatch(VerticaGuestTestCase):
+    """The start script ends the container when the server that ran stops
+    without being stopped on purpose, so that docker starts it again: the
+    real shell text, a ps that lists the server for its first calls, and a
+    sleep for the node management agent.
+    """
+
+    SERVER = TestVerticaServerProcess.SERVER
+    _bin = TestVerticaServerProcess._bin
+
+    def _watch(self, server_calls, agent_seconds=30, stopped=False):
+        conf = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, conf)
+        if stopped:
+            open(os.path.join(conf, vertica_service.SERVER_STOPPED_FILE),
+                 'w').close()
+        env = self._bin([])
+        bindir = env['PATH'].split(':')[0]
+        count = os.path.join(bindir, 'count')
+        with open(os.path.join(bindir, 'ps'), 'w') as f:
+            f.write('#!/bin/sh\n'
+                    'n=$(cat %(count)s 2>/dev/null || echo 0)\n'
+                    'echo $((n + 1)) > %(count)s\n'
+                    'echo COMMAND\n'
+                    'if [ $n -lt %(calls)d ]; then echo "%(server)s"; fi\n'
+                    % {'count': count, 'calls': server_calls,
+                       'server': self.SERVER})
+        text = vertica_service.START_SCRIPT_CONTENT % collections.defaultdict(
+            str, nma_port=0, watch_interval=0,
+            stopped=vertica_service.SERVER_STOPPED_FILE)
+        functions = ''
+        for name in ('running', 'watch'):
+            start = text.index(name + '() {')
+            functions += text[start:text.index('\n}\n', start) + 3]
+        script = (functions + 'CONF=%s\nSTOPPING=0\n'
+                  'sleep %d & NMA=$!\n'
+                  'watch; echo "rc=$?"\n'
+                  'kill -0 $NMA 2>/dev/null && echo agent=up || '
+                  'echo agent=gone\n' % (conf, agent_seconds))
+        r = subprocess.run(['/bin/bash', '-c', script], env=env,
+                           capture_output=True, text=True, timeout=60)
+        return r.stdout
+
+    def test_a_server_that_ran_and_died_ends_the_container(self):
+        out = self._watch(server_calls=3)
+        self.assertIn('ending the container', out)
+        self.assertIn('rc=1', out)
+        self.assertIn('agent=gone', out)
+
+    def test_a_server_that_never_ran_leaves_it(self):
+        # A database that cannot start (an earlier epoch to recover to)
+        # would only restart the container over and over.
+        out = self._watch(server_calls=0, agent_seconds=1)
+        self.assertNotIn('ending the container', out)
+        self.assertIn('rc=0', out)
+
+    def test_a_server_the_guest_agent_stopped_leaves_it(self):
+        out = self._watch(server_calls=3, agent_seconds=1, stopped=True)
+        self.assertNotIn('ending the container', out)
+        self.assertIn('rc=0', out)
+
+    def test_the_container_clears_what_a_guest_agent_left(self):
+        script = vertica_service.START_SCRIPT_CONTENT
+        self.assertLess(script.index('rm -f $CONF/%(stopped)s'),
+                        script.index('node_management_agent &'))
+
+    def test_the_backup_stop_is_on_purpose(self):
+        app = self._app()
+        app.adm = mock.Mock()
+        order = mock.Mock()
+        with mock.patch.object(vertica_service, 'operating_system') as os_, \
+                mock.patch.object(vertica_service.utils, 'poll_until'):
+            order.attach_mock(os_.write_file, 'write_file')
+            order.attach_mock(app.adm.run, 'run')
+            app.shutdown_database()
+        self.assertEqual(['write_file', 'run'],
+                         [call[0] for call in order.mock_calls])
+        self.assertEqual('/etc/vertica-trove/server_stopped',
+                         os_.write_file.call_args[0][0])
+
+    def test_the_mark_goes_even_when_the_server_does_not_start(self):
+        app = self._app()
+        with mock.patch.object(vertica_service, 'operating_system') as os_, \
+                mock.patch.object(vertica_service.VerticaApp, 'vcluster',
+                                  side_effect=exception.TroveError('no')):
+            self.assertRaises(exception.TroveError, app.start_database)
+        os_.remove.assert_called_once_with(
+            '/etc/vertica-trove/server_stopped', force=True, as_root=True)
 
 
 class TestVerticaAdmin(VerticaGuestTestCase):
