@@ -13,3 +13,4 @@
    database_management
    troubleshooting
    network_isolation
+   object_storage

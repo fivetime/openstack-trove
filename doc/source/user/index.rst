@@ -19,5 +19,6 @@ handling complex administrative tasks.
    set-up-replication.rst
    upgrade-datastore.rst
    set-up-clustering.rst
+   vertica-cluster-storage.rst
    upgrade-cluster-datastore.rst
    ssl/index
