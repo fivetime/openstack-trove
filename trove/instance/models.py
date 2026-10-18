@@ -509,6 +509,13 @@ class SimpleInstance(object):
         return True if self.db_info.encrypted_key is not None else False
 
     @property
+    def extended_properties(self):
+        """What the instance was created with that its datastore keeps;
+        None for one created before they were kept.
+        """
+        return self.db_info.get_properties() or None
+
+    @property
     def access(self):
         if hasattr(self.db_info, 'access'):
             if isinstance(self.db_info.access, str):
@@ -1332,7 +1339,7 @@ class Instance(BuiltInstance):
                configuration_id=None, slave_of_id=None, cluster_config=None,
                replica_count=None, volume_type=None, modules=None,
                locality=None, region_name=None, access=None,
-               ssl_mode=None, ssl_ref=None):
+               ssl_mode=None, ssl_ref=None, properties=None):
         nova_client = clients.create_nova_client(context)
         cinder_client = clients.create_cinder_client(context)
         datastore_cfg = CONF.get(datastore_version.manager)
@@ -1524,7 +1531,9 @@ class Instance(BuiltInstance):
                     shard_id=shard_id, type=instance_type,
                     region_id=region_name, access=access,
                     ssl_mode=ssl_mode, ssl_ref=ssl_ref,
-                    message_partition=partition)
+                    message_partition=partition,
+                    properties=(json.dumps(properties, sort_keys=True)
+                                if properties else None))
                 instance_id = db_info.id
                 instance_name = name
                 LOG.debug(f"Creating new instance {instance_id}")
@@ -2120,7 +2129,8 @@ class DBInstance(dbmodels.DatabaseModelBase):
                     'deleted', 'deleted_at', 'datastore_version_id',
                     'configuration_id', 'slave_of_id', 'cluster_id',
                     'shard_id', 'type', 'region_id', 'encrypted_key', 'access',
-                    'ssl_mode', 'ssl_ref', 'message_partition']
+                    'ssl_mode', 'ssl_ref', 'message_partition',
+                    'properties']
     _table_name = 'instances'
 
     def __init__(self, task_status, **kwargs):
@@ -2160,6 +2170,12 @@ class DBInstance(dbmodels.DatabaseModelBase):
         if 'access' in values and type(values['access'] != str):
             values['access'] = json.dumps(values['access'])
         return super(DBInstance, cls).create(**values)
+
+    def get_properties(self):
+        """What the instance was created with that its datastore keeps."""
+        # Not set on an instance made here rather than loaded.
+        properties = getattr(self, 'properties', None)
+        return json.loads(properties) if properties else {}
 
     def _validate(self, errors):
         if InstanceTask.from_code(self.task_id) is None:

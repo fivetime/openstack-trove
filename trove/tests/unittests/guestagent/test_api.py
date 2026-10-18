@@ -55,6 +55,32 @@ class GuestAPIDeleteQueueTest(trove_testtools.TestCase):
         get_client.assert_called_once_with(guest.target, mock.ANY)
 
 
+class GuestAPIPrepareTest(trove_testtools.TestCase):
+    def setUp(self):
+        super(GuestAPIPrepareTest, self).setUp()
+        patcher = mock.patch(
+            'trove.instance.models.get_instance_message_partition',
+            return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    @mock.patch.object(api.API, '_cast')
+    @mock.patch.object(api.API, '_create_guest_queue')
+    @mock.patch.object(api.API, 'get_client')
+    def test_the_properties_go_only_when_there_are_some(
+            self, get_client, create_guest_queue, cast):
+        guest = api.API(mock.Mock(), 'instance-id')
+
+        guest.prepare(768, None, [], [], properties={'sync_writes': True})
+        self.assertEqual({'sync_writes': True},
+                         cast.call_args.kwargs['properties'])
+
+        # The guests of datastores that take none do not know the argument.
+        for none in (None, {}):
+            guest.prepare(768, None, [], [], properties=none)
+            self.assertNotIn('properties', cast.call_args.kwargs)
+
+
 class GuestAPIMessagePartitionTest(trove_testtools.TestCase):
     """A guest on a guest message partition is reached through its broker."""
 

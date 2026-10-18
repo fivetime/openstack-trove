@@ -143,6 +143,10 @@ class InstanceDetailView(InstanceView):
         if self.instance.locality:
             result['instance']['locality'] = self.instance.locality
 
+        if self.instance.extended_properties:
+            result['instance']['extended_properties'] = (
+                self.instance.extended_properties)
+
         if (isinstance(self.instance, models.DetailInstance) and
                 self.instance.volume_used):
             used = self.instance.volume_used

@@ -143,6 +143,7 @@ Request
     - access: access
     - access.is_public: access_is_public
     - access.allowed_cidrs: access_allowed_cidrs
+    - extended_properties: extended_properties
 
 
 Request Example

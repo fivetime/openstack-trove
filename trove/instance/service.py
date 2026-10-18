@@ -38,6 +38,7 @@ from trove.datastore import models as ds_models
 from trove.extensions.common.common import populate_users
 from trove.extensions.common.common import populate_validated_databases
 from trove.instance import models, views
+from trove.instance import properties as instance_properties
 from trove.module import models as module_models
 from trove.module import views as module_views
 
@@ -382,6 +383,7 @@ class InstanceController(wsgi.Controller):
             'region_name', CONF.service_credentials.region_name
         )
         access = body['instance'].get('access', None)
+        extended_properties = body['instance'].get('extended_properties')
 
         if slave_of_id:
             if flavor_ref:
@@ -395,6 +397,10 @@ class InstanceController(wsgi.Controller):
                 raise exception.BadRequest(message=msg)
             if locality:
                 msg = 'Cannot specify locality when creating replicas.'
+                raise exception.BadRequest(message=msg)
+            if extended_properties:
+                msg = ('Cannot specify extended properties when creating '
+                       'replicas.')
                 raise exception.BadRequest(message=msg)
             if CONF.storage_strategy in ["swift"]:
                 backup_model.verify_swift_auth_token(context)
@@ -442,6 +448,9 @@ class InstanceController(wsgi.Controller):
         else:
             datastore, datastore_version = ds_models.get_datastore_version(
                 **datastore_args)
+
+        properties = instance_properties.instance_properties(
+            datastore_version.manager, extended_properties)
 
         # If only image_tags is configured in the datastore version, get
         # the image ID using the tags.
@@ -513,7 +522,8 @@ class InstanceController(wsgi.Controller):
                                           modules=modules,
                                           locality=locality,
                                           region_name=region_name,
-                                          access=access)
+                                          access=access,
+                                          properties=properties)
 
         if slave_of_id and replica_source.ssl_mode and \
            replica_source.ssl_mode != 'None':

@@ -1,0 +1,21 @@
+---
+features:
+  - |
+    An instance can be created with extended properties, as a cluster can:
+    ``extended_properties`` in the request, which its datastore keeps for
+    the life of the instance and an instance shows in
+    ``extended_properties``. A ``vertica`` instance takes
+    ``sync_writes=true``, as a ``vertica`` cluster does: the guest agent
+    mounts the data volume with ``sync`` while the database answers. A
+    single instance relies on no other member for its data, so a loss of
+    power of its host is a loss of power of the whole database. A
+    ``vertica`` instance created without it shows ``sync_writes: false``.
+    The properties are kept in a new column ``properties`` of the
+    ``instances`` table.
+upgrade:
+  - |
+    The ``instances`` table gets a column ``properties``: run the database
+    migrations before starting the new API. An instance of a datastore that
+    takes no extended properties, or a replica, created with some is
+    refused with a 400, and so is a ``vertica`` instance with a property
+    other than ``sync_writes``.

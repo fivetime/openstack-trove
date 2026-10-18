@@ -399,6 +399,54 @@ class CreateInstanceTest(trove_testtools.TestCase):
 
     @patch.object(task_api.API, 'get_client', Mock(return_value=Mock()))
     @patch.object(task_api.API, 'create_instance')
+    def test_the_instance_keeps_its_properties(self, create_instance):
+        self.backup.size = 0.2
+        self.backup.save()
+        models.run_with_quotas = Mock(
+            side_effect=lambda tenant, deltas, f: f())
+
+        instance = models.Instance.create(
+            self.context, self.name, self.flavor_id,
+            self.image_id, self.databases, self.users,
+            self.datastore, self.datastore_version,
+            self.volume_size, self.backup_id,
+            self.az, self.nics, self.configuration,
+            properties={'sync_writes': True})
+        self.addCleanup(DBInstance.find_by(id=instance.id).delete)
+
+        db_info = DBInstance.find_by(id=instance.id)
+        self.assertEqual({'sync_writes': True}, db_info.get_properties())
+        status = models.InstanceServiceStatus.find_by(instance_id=instance.id)
+        self.assertEqual({'sync_writes': True},
+                         models.SimpleInstance(self.context, db_info,
+                                               status).extended_properties)
+
+    @patch.object(task_api.API, 'get_client', Mock(return_value=Mock()))
+    @patch.object(task_api.API, 'create_instance')
+    def test_an_instance_without_properties_shows_none(self,
+                                                       create_instance):
+        self.backup.size = 0.2
+        self.backup.save()
+        models.run_with_quotas = Mock(
+            side_effect=lambda tenant, deltas, f: f())
+
+        instance = models.Instance.create(
+            self.context, self.name, self.flavor_id,
+            self.image_id, self.databases, self.users,
+            self.datastore, self.datastore_version,
+            self.volume_size, self.backup_id,
+            self.az, self.nics, self.configuration, properties={})
+        self.addCleanup(DBInstance.find_by(id=instance.id).delete)
+
+        db_info = DBInstance.find_by(id=instance.id)
+        self.assertIsNone(db_info.properties)
+        self.assertEqual({}, db_info.get_properties())
+        status = models.InstanceServiceStatus.find_by(instance_id=instance.id)
+        self.assertIsNone(models.SimpleInstance(
+            self.context, db_info, status).extended_properties)
+
+    @patch.object(task_api.API, 'get_client', Mock(return_value=Mock()))
+    @patch.object(task_api.API, 'create_instance')
     @patch.object(models.msg_partition, 'choose',
                   side_effect=exception.GuestMessagePartitionsFull(
                       zone='az'))

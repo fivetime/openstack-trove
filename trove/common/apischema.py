@@ -447,6 +447,11 @@ instance = {
                     "modules": module_list,
                     "region_name": non_empty_string,
                     "locality": non_empty_string,
+                    # Validated by the datastore (trove.instance.properties).
+                    "extended_properties": {
+                        "type": "object",
+                        "additionalProperties": True,
+                    },
                     "access": {
                         "type": "object",
                         "properties": {

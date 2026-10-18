@@ -42,11 +42,13 @@ class Manager(manager.Manager):
                 device_path=None, mount_point=None, backup_info=None,
                 config_contents=None, root_password=None, overrides=None,
                 cluster_config=None, snapshot=None, modules=None,
-                ds_version=None):
+                ds_version=None, properties=None):
         """Keep the license of a license module before anything else: the
         database is created with it. The module is then applied as any
-        other, after the database exists.
+        other, after the database exists. The extended properties of a
+        single instance (trove.instance.properties) are for do_prepare.
         """
+        self._properties = properties or {}
         for module in [data.get('module', {}) for data in modules or []]:
             if module.get('type') == LICENSE_MODULE_TYPE and \
                     module.get('contents'):
@@ -79,7 +81,10 @@ class Manager(manager.Manager):
         of a cluster stops at its agent: the taskmanager has the first
         member create the database on all of them.
         """
-        if cluster_config and cluster_config.get('sync_writes'):
+        # Asked for by the cluster, or by a single instance; the data
+        # volume gets sync once the database answers (keep_mount_options).
+        if (cluster_config or getattr(self, '_properties', {})).get(
+                'sync_writes'):
             self.app.plan_sync_writes()
 
         LOG.info('Preparing database config files')

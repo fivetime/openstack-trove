@@ -119,6 +119,15 @@ class InstanceDetailViewTest(trove_testtools.TestCase):
         self.assertEqual(self.instance.locality,
                          result['instance']['locality'])
 
+    def test_extended_properties(self):
+        self.instance.extended_properties = {'sync_writes': True}
+        result = InstanceDetailView(self.instance, self.req).data()
+        self.assertEqual({'sync_writes': True},
+                         result['instance']['extended_properties'])
+        self.instance.extended_properties = None
+        result = InstanceDetailView(self.instance, self.req).data()
+        self.assertNotIn('extended_properties', result['instance'])
+
     def test_fault(self):
         view = InstanceDetailView(self.instance, self.req)
         result = view.data()

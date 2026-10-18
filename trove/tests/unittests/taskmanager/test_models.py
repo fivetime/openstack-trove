@@ -225,6 +225,8 @@ class BaseFreshInstanceTasksTest(trove_testtools.TestCase):
             user_id='test_user')
         # On the default guest message partition.
         self.freshinstancetasks.db_info.message_partition = None
+        # Created without extended properties.
+        self.freshinstancetasks.db_info.get_properties.return_value = {}
 
     def tearDown(self):
         super(BaseFreshInstanceTasksTest, self).tearDown()
@@ -542,6 +544,42 @@ class FreshInstanceTasksTest(BaseFreshInstanceTasksTest):
     @patch.object(taskmanager_models.FreshInstanceTasks, '_guest_prepare')
     @patch.object(template, 'SingleInstanceConfigTemplate')
     @patch('trove.taskmanager.models.FreshInstanceTasks._create_port')
+    def test_the_guest_is_told_of_the_instance_properties(
+            self, mock_create_port, mock_single_instance_template,
+            mock_guest_prepare, *args):
+        mock_create_port.return_value = 'fake-port-id'
+        mock_single_instance_template.return_value.config_contents = ''
+        db_info = self.freshinstancetasks.db_info
+        for kept, told in [({'sync_writes': True}, {'sync_writes': True}),
+                           ({'sync_writes': False}, {}),
+                           ({}, {})]:
+            db_info.get_properties.return_value = kept
+            self.freshinstancetasks.create_instance(
+                {'id': 8, 'ram': 768, 'name': 'bigger_flavor'},
+                'vertica-image-id', None, None, 'vertica', None, 2, None,
+                None, None, [{'net-id': 'fake-net-id'}], None, None, None,
+                'volume_type', None, {'group': 'sg-id'})
+            self.assertEqual(
+                told, mock_guest_prepare.call_args.kwargs['properties'])
+
+    @patch.object(taskmanager_models.FreshInstanceTasks, 'guest')
+    def test_guest_prepare_passes_the_properties(self, guest):
+        self.freshinstancetasks._guest_prepare(
+            768, {'device_path': '/dev/vdb', 'mount_point': '/mnt'},
+            None, None, None, properties={'sync_writes': True})
+        self.assertEqual({'sync_writes': True},
+                         guest.prepare.call_args.kwargs['properties'])
+
+    @patch.object(BaseInstance, 'update_db')
+    @patch.object(taskmanager_models.FreshInstanceTasks, '_create_dns_entry')
+    @patch.object(taskmanager_models.FreshInstanceTasks, 'get_injected_files')
+    @patch.object(taskmanager_models.FreshInstanceTasks, '_create_server')
+    @patch.object(taskmanager_models.FreshInstanceTasks, '_create_secgroup')
+    @patch.object(taskmanager_models.FreshInstanceTasks, '_build_volume_info')
+    @patch.object(taskmanager_models.FreshInstanceTasks, '_create_root_volume')
+    @patch.object(taskmanager_models.FreshInstanceTasks, '_guest_prepare')
+    @patch.object(template, 'SingleInstanceConfigTemplate')
+    @patch('trove.taskmanager.models.FreshInstanceTasks._create_port')
     def test_create_instance(self,
                              mock_create_port,
                              mock_single_instance_template,
@@ -594,7 +632,8 @@ class FreshInstanceTasksTest(BaseFreshInstanceTasksTest):
         )
         mock_guest_prepare.assert_called_with(
             768, mock_build_volume_info(), 'mysql-server', None, None, None,
-            config_content, None, overrides, None, None, None, ds_version=None
+            config_content, None, overrides, None, None, None, ds_version=None,
+            properties={}
         )
         mock_create_server.assert_called_with(
             8, image_id, 'mysql',
@@ -678,7 +717,8 @@ class FreshInstanceTasksTest(BaseFreshInstanceTasksTest):
         )
         mock_guest_prepare.assert_called_with(
             768, mock_build_volume_info(), 'mysql-server', None, None, None,
-            config_content, None, mock.ANY, None, None, None, ds_version=None)
+            config_content, None, mock.ANY, None, None, None, ds_version=None,
+            properties={})
         mock_create_server.assert_called_with(
             8, image_id, 'mysql',
             mock_build_volume_info()['block_device'], None,

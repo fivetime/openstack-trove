@@ -1121,6 +1121,33 @@ class TestVerticaManager(VerticaGuestTestCase):
         self._prepare(manager)
         manager.app.plan_sync_writes.assert_not_called()
 
+    def _prepare_through_the_rpc(self, manager, **kwargs):
+        # As the guest gets it: prepare, whose base runs do_prepare.
+        with mock.patch.object(
+                base_manager.Manager, 'prepare',
+                side_effect=lambda *a, **kw: self._prepare(manager)) as base:
+            manager.prepare(mock.Mock(), None, None, 4096, None, **kwargs)
+        return base
+
+    def test_a_single_instance_with_sync_writes_asks_for_them(self):
+        manager = self._manager()
+        order = mock.Mock()
+        for name in ('plan_sync_writes', 'start_db', 'create_database'):
+            order.attach_mock(getattr(manager.app, name), name)
+        base = self._prepare_through_the_rpc(
+            manager, properties={'sync_writes': True})
+        self.assertEqual(['plan_sync_writes', 'start_db', 'create_database'],
+                         [call[0] for call in order.mock_calls])
+        # The base prepare takes no properties.
+        self.assertNotIn('properties', base.call_args.kwargs)
+
+    def test_a_single_instance_without_sync_writes_keeps_its_mount(self):
+        manager = self._manager()
+        self._prepare_through_the_rpc(manager)
+        self._prepare_through_the_rpc(manager, properties={})
+        manager.app.plan_sync_writes.assert_not_called()
+        manager.app.create_database.assert_called()
+
     def test_the_mount_options_apply_before_the_member_is_ready(self):
         manager = self._manager()
         order = mock.Mock()

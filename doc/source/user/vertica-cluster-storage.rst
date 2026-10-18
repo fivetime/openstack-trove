@@ -126,6 +126,27 @@ revive is refused until about 15 minutes after it stopped. The new cluster
 takes the bucket over; the old one, shown with ``communal_moved_to``, can be
 deleted without touching it.
 
+Single instances
+~~~~~~~~~~~~~~~~
+
+A single Vertica instance takes ``sync_writes`` too; it is always in
+Enterprise Mode. It has no other member to rely on, so a loss of power of
+its host is a loss of power of the whole database, as described above:
+
+.. code-block:: console
+
+   $ openstack database instance create myinstance --flavor <flavor> \
+       --size <size> --nic net-id=<net> \
+       --datastore vertica --datastore-version 25.4 \
+       --extended-properties sync_writes=true
+
+   $ openstack database instance show myinstance -c extended_properties
+   {'sync_writes': True}
+
+The volume gets sync within the status interval of the guest agent after the
+database first answers. Replicas take no extended properties, and instances
+of other datastores take none at all.
+
 Licenses
 ~~~~~~~~
 

@@ -172,6 +172,15 @@ class TestInstanceController(trove_testtools.TestCase):
                       error_messages)
         self.assertIn("locality", error_paths)
 
+    def test_validate_create_extended_properties(self):
+        body = copy.deepcopy(self.instance)
+        body['instance']['extended_properties'] = {'sync_writes': 'true'}
+        schema = self.controller.get_schema('create', body)
+        validator = jsonschema.Draft4Validator(schema)
+        self.assertTrue(validator.is_valid(body))
+        body['instance']['extended_properties'] = 'sync_writes=true'
+        self.assertFalse(validator.is_valid(body))
+
     def test_validate_create_valid_nics(self):
         body = copy.copy(self.instance)
         body['instance']['nics'] = [

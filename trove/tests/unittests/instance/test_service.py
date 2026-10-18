@@ -54,6 +54,9 @@ class TestInstanceController(trove_testtools.TestCase):
         ds_models.update_datastore_version(
             cls.ds_name, ds_version_name_disabled, 'mysql', '',
             ['trove'], '', 0, version='5.7.29')
+        ds_models.update_datastore_version(
+            cls.ds_name, 'test_vertica', 'vertica', cls.random_uuid(), [],
+            '', 1, version='25.4')
 
         cls.ds_version_imageid = ds_models.DatastoreVersion.load(
             cls.ds, 'test_image_id')
@@ -61,6 +64,8 @@ class TestInstanceController(trove_testtools.TestCase):
             cls.ds, 'test_image_tags')
         cls.ds_version_disabled = ds_models.DatastoreVersion.load(
             cls.ds, ds_version_name_disabled, version='5.7.29')
+        cls.ds_version_vertica = ds_models.DatastoreVersion.load(
+            cls.ds, 'test_vertica', version='25.4')
 
         cls.controller = service.InstanceController()
 
@@ -113,7 +118,8 @@ class TestInstanceController(trove_testtools.TestCase):
             mock.ANY, mock.ANY,
             None, None, None, [], None, None,
             replica_count=None, volume_type=None, modules=None, locality=None,
-            region_name=CONF.service_credentials.region_name, access=None
+            region_name=CONF.service_credentials.region_name, access=None,
+            properties={}
         )
         args = mock_model_create.call_args[0]
         actual_ds_version = args[7]
@@ -283,6 +289,44 @@ class TestInstanceController(trove_testtools.TestCase):
         self.assertEqual('ACTIVE', ret_instance.get('status'))
         self.assertEqual('ERROR', ret_instance.get('operating_status'))
 
+    def _create_with(self, version, extended_properties=None):
+        body = {
+            'instance': {
+                'name': self.random_name('instance'),
+                'flavorRef': self.random_uuid(),
+                'datastore': {'type': self.ds_name, 'version': version.id},
+            }
+        }
+        if extended_properties is not None:
+            body['instance']['extended_properties'] = extended_properties
+        return self.controller.create(mock.MagicMock(), body, mock.ANY)
+
+    @mock.patch.object(clients, 'create_glance_client')
+    @mock.patch('trove.instance.models.Instance.create')
+    def test_create_a_vertica_instance_with_sync_writes(
+            self, mock_model_create, mock_create_client):
+        self._create_with(self.ds_version_vertica, {'sync_writes': 'true'})
+        self.assertEqual({'sync_writes': True},
+                         mock_model_create.call_args.kwargs['properties'])
+
+    @mock.patch.object(clients, 'create_glance_client')
+    @mock.patch('trove.instance.models.Instance.create')
+    def test_a_vertica_instance_keeps_the_defaults(
+            self, mock_model_create, mock_create_client):
+        self._create_with(self.ds_version_vertica)
+        self.assertEqual({'sync_writes': False},
+                         mock_model_create.call_args.kwargs['properties'])
+
+    @mock.patch.object(clients, 'create_glance_client')
+    @mock.patch('trove.instance.models.Instance.create')
+    def test_unknown_extended_properties_are_refused(
+            self, mock_model_create, mock_create_client):
+        self.assertRaises(exception.BadRequest, self._create_with,
+                          self.ds_version_vertica, {'sync_write': 'true'})
+        self.assertRaises(exception.BadRequest, self._create_with,
+                          self.ds_version_imageid, {'sync_writes': 'true'})
+        mock_model_create.assert_not_called()
+
     @mock.patch.object(clients, 'create_glance_client')
     @mock.patch('trove.instance.models.Instance.create')
     def test_create_applies_default_locality(
@@ -350,3 +394,18 @@ class TestInstanceController(trove_testtools.TestCase):
         self.controller.create(mock.MagicMock(), body, mock.ANY)
 
         self.assertIsNone(mock_model_create.call_args.kwargs['locality'])
+
+    @mock.patch('trove.instance.models.Instance.create')
+    def test_a_replica_takes_no_extended_properties(self, mock_model_create):
+        body = {
+            'instance': {
+                'name': self.random_name('replica'),
+                'replica_of': self.random_uuid(),
+                'extended_properties': {'sync_writes': 'true'},
+            }
+        }
+        self.assertRaisesRegex(
+            exception.BadRequest, 'extended properties when creating '
+            'replicas', self.controller.create, mock.MagicMock(), body,
+            mock.ANY)
+        mock_model_create.assert_not_called()

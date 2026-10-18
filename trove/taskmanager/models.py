@@ -63,6 +63,7 @@ from trove.instance.models import Instance
 from trove.instance.models import InstanceServiceStatus
 from trove.instance.models import InstanceStatus
 from trove.instance.models import load_simple_instance_addresses
+from trove.instance import properties as instance_properties
 from trove.instance import service_status as srvstatus
 from trove.instance.tasks import InstanceTasks
 from trove.module import models as module_models
@@ -667,7 +668,9 @@ class FreshInstanceTasks(FreshInstance, NotifyMixin, ConfigurationMixin):
                             config.config_contents, root_password,
                             overrides,
                             cluster_config, snapshot, modules,
-                            ds_version=ds_version)
+                            ds_version=ds_version,
+                            properties=instance_properties.guest_properties(
+                                self.db_info.get_properties()))
 
         if root_password:
             self.report_root_enabled()
@@ -1155,7 +1158,7 @@ class FreshInstanceTasks(FreshInstance, NotifyMixin, ConfigurationMixin):
                        packages, databases, users, backup_info=None,
                        config_contents=None, root_password=None,
                        overrides=None, cluster_config=None, snapshot=None,
-                       modules=None, ds_version=None):
+                       modules=None, ds_version=None, properties=None):
         LOG.debug("Entering guest_prepare")
         # Now wait for the response from the create to do additional work
         self.guest.prepare(flavor_ram, packages, databases, users,
@@ -1167,7 +1170,7 @@ class FreshInstanceTasks(FreshInstance, NotifyMixin, ConfigurationMixin):
                            overrides=overrides,
                            cluster_config=cluster_config,
                            snapshot=snapshot, modules=modules,
-                           ds_version=ds_version)
+                           ds_version=ds_version, properties=properties)
 
     def _create_dns_entry(self):
         dns_support = CONF.trove_dns_support

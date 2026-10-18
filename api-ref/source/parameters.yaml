@@ -468,6 +468,16 @@ encrypted_rpc_messaging:
   in: body
   required: false
   type: boolean
+extended_properties:
+  description: |
+    What the instance is created with that its datastore keeps for the life
+    of the instance; most datastores take none. Vertica: ``sync_writes``
+    (``true`` or ``false``, default ``false``), whether the data volume is
+    mounted so that every write reaches the disk before it returns. Not for
+    replicas.
+  in: body
+  required: false
+  type: object
 flavor:
   description: |
     A ``flavor`` object, which includes the flavor ID
