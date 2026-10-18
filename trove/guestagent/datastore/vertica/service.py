@@ -148,18 +148,24 @@ stop() {
     kill $NMA
     wait $NMA
 }
+# The database answers, as the health check of the container asks it.
+answers() {
+    vsql -U %(admin)s -Atc 'SELECT 1' >/dev/null 2>&1
+}
 # Like the server of the other datastores, the process of their
-# container: once the server ran, the container ends when it does (a
-# crash, kill -9), and docker (unless-stopped) starts it again, and with
-# it this script and the database. Not when it is stopped on purpose: by
-# this script, or by the guest agent, which says so in a file.
+# container: once the database answered, the container ends when the
+# server is gone (a crash, kill -9), and docker (unless-stopped) starts it
+# again, and with it this script and the database. Not when it is stopped
+# on purpose: by this script, or by the guest agent, which says so in a
+# file. Nor when a start fails: its server runs for a while and aborts,
+# and ending the container would only start it over and over.
 STOPPING=0
 watch() {
     local up=0
     while kill -0 $NMA 2>/dev/null; do
-        if running; then
-            up=1
-        elif [ $up = 1 ] && [ $STOPPING = 0 ] && \\
+        if [ $up = 0 ]; then
+            answers && up=1
+        elif ! running && [ $STOPPING = 0 ] && \\
                 [ ! -e $CONF/%(stopped)s ]; then
             echo "The server stopped: ending the container to start it again."
             kill $NMA

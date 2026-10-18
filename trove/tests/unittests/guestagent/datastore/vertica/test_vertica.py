@@ -823,7 +823,8 @@ class TestVerticaServerWatch(VerticaGuestTestCase):
     SERVER = TestVerticaServerProcess.SERVER
     _bin = TestVerticaServerProcess._bin
 
-    def _watch(self, server_calls, agent_seconds=30, stopped=False):
+    def _watch(self, server_calls, agent_seconds=30, stopped=False,
+               answers=True):
         conf = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, conf)
         if stopped:
@@ -840,11 +841,19 @@ class TestVerticaServerWatch(VerticaGuestTestCase):
                     'if [ $n -lt %(calls)d ]; then echo "%(server)s"; fi\n'
                     % {'count': count, 'calls': server_calls,
                        'server': self.SERVER})
+        # The database answers while the server is listed, when it does.
+        with open(os.path.join(bindir, 'vsql'), 'w') as f:
+            f.write('#!/bin/sh\n' +
+                    ('ps | grep -q "^/opt/vertica/bin/vertica "\n'
+                     if answers else 'exit 1\n'))
+        os.chmod(os.path.join(bindir, 'vsql'), 0o755)
         text = vertica_service.START_SCRIPT_CONTENT % collections.defaultdict(
             str, nma_port=0, watch_interval=0,
             stopped=vertica_service.SERVER_STOPPED_FILE)
         functions = ''
-        for name in ('running', 'watch'):
+        for name in ('running', 'answers', 'watch'):
+            if name + '() {' not in text:
+                continue
             start = text.index(name + '() {')
             functions += text[start:text.index('\n}\n', start) + 3]
         script = (functions + 'CONF=%s\nSTOPPING=0\n'
@@ -866,6 +875,13 @@ class TestVerticaServerWatch(VerticaGuestTestCase):
         # A database that cannot start (an earlier epoch to recover to)
         # would only restart the container over and over.
         out = self._watch(server_calls=0, agent_seconds=1)
+        self.assertNotIn('ending the container', out)
+        self.assertIn('rc=0', out)
+
+    def test_a_start_that_fails_leaves_it(self):
+        # Its server runs for a while and aborts, the database never
+        # answers: ending the container would start it over and over.
+        out = self._watch(server_calls=3, agent_seconds=1, answers=False)
         self.assertNotIn('ending the container', out)
         self.assertIn('rc=0', out)
 
