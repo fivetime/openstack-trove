@@ -33,6 +33,7 @@ from trove.common.notification import (
     DBaaSClusterShrink,
     DBaaSClusterResetStatus,
     DBaaSClusterRestart)
+from trove.common.notification import DBaaSClusterResetCommunalCredential
 from trove.common.notification import DBaaSClusterUpgrade
 from trove.common.notification import DBaaSInstanceAttachConfiguration
 from trove.common.notification import DBaaSInstanceDetachConfiguration
@@ -377,6 +378,12 @@ class Cluster(object):
             with StartNotification(context, cluster_id=self.id):
                 return self.restart()
 
+        elif action == 'reset_communal_credential':
+            context.notification = DBaaSClusterResetCommunalCredential(
+                context, request=req)
+            with StartNotification(context, cluster_id=self.id):
+                return self.reset_communal_credential()
+
         elif action == 'upgrade':
             context.notification = DBaaSClusterUpgrade(context, request=req)
             dv_id = param['datastore_version']
@@ -446,6 +453,10 @@ class Cluster(object):
 
     def upgrade(self, datastore_version):
         raise exception.BadRequest(_("Action 'upgrade' not supported"))
+
+    def reset_communal_credential(self):
+        raise exception.BadRequest(
+            _("Action 'reset_communal_credential' not supported"))
 
     def configuration_attach(self, configuration_id):
         raise exception.BadRequest(

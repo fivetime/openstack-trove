@@ -11,6 +11,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 from unittest.mock import Mock
 from unittest.mock import patch
 import uuid
@@ -420,3 +421,58 @@ class ClusterTest(trove_testtools.TestCase):
                 self.cluster_name, self.datastore, self.datastore_version,
                 self.instances, {'sync_writes': 'yes please'}, None, None)
         mock_db.assert_not_called()
+
+    # reset_communal_credential.
+
+    def _eon_cluster(self, project=None):
+        self.db_info.properties = json.dumps(
+            {'storage_mode': 'eon', 'communal_bucket': 'b',
+             'ec2_user_id': 'u1', 'ec2_access': 'AK'})
+        self.cluster.context.project_id = project or self.tenant_id
+        return self.cluster
+
+    @patch.object(task_api, 'load')
+    @patch.object(DBCluster, 'update')
+    def test_reset_the_communal_credential(self, mock_update, mock_load):
+        self._eon_cluster().reset_communal_credential()
+        mock_update.assert_called_once_with(
+            task_status=ClusterTasks.UPDATING_CLUSTER)
+        mock_load.return_value.reset_communal_credential.\
+            assert_called_once_with(self.cluster_id)
+
+    @patch.object(task_api, 'load')
+    @patch.object(DBCluster, 'update')
+    def test_the_task_is_undone_when_the_cast_fails(self, mock_update,
+                                                    mock_load):
+        mock_load.return_value.reset_communal_credential.side_effect = (
+            exception.TroveError('no broker'))
+        self.assertRaises(exception.TroveError,
+                          self._eon_cluster().reset_communal_credential)
+        self.assertEqual(
+            [((), {'task_status': ClusterTasks.UPDATING_CLUSTER}),
+             ((), {'task_status': ClusterTasks.NONE})],
+            [(c[0], c[1]) for c in mock_update.call_args_list])
+
+    @patch.object(task_api, 'load')
+    def test_reset_is_refused_without_communal_storage_or_project(
+            self, mock_load):
+        self.db_info.properties = json.dumps({'storage_mode': 'enterprise'})
+        self.cluster.context.project_id = self.tenant_id
+        self.assertRaises(exception.BadRequest,
+                          self.cluster.reset_communal_credential)
+        # An admin of another project would make the credential there.
+        self.assertRaises(exception.BadRequest,
+                          self._eon_cluster('other').reset_communal_credential)
+        mock_load.assert_not_called()
+
+    def test_the_action_reaches_the_cluster(self):
+        with patch.object(vertica_api.VerticaCluster,
+                          'reset_communal_credential') as reset:
+            self.cluster.action(Mock(), Mock(), 'reset_communal_credential',
+                                {})
+        reset.assert_called_once_with()
+        # Another datastore has none.
+        base = Cluster(self.context, self.db_info, self.datastore,
+                       self.datastore_version)
+        self.assertRaises(exception.BadRequest,
+                          base.reset_communal_credential)

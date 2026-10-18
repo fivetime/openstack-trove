@@ -124,6 +124,9 @@ class Manager(manager.Manager):
     def set_cluster_config(self, context, config):
         self.app.set_cluster_config(config)
 
+    def set_communal_credential(self, context, access, secret):
+        self.app.set_communal_credential(access, secret)
+
     def cluster_complete(self, context):
         # The database exists on every member by now.
         self.app.apply_mount_options()

@@ -142,6 +142,49 @@ class VerticaClusterTasks(task_models.ClusterTasks):
                 'region': CONF.s3_region,
                 'access': access, 'secret': secret}
 
+    def reset_communal_credential(self, context, cluster_id):
+        """Give the database a new EC2 credential, of the user asking,
+        and remove the old one. Until the database has the new one the old
+        one stays: a failure leaves the cluster as it was.
+        """
+        properties = self.db_info.get_properties()
+        storage = object_storage.ProjectObjectStorage()
+        bucket = properties['communal_bucket']
+        access = secret = None
+        try:
+            access, secret = storage.credential(context.user_id,
+                                                self.db_info.tenant_id)
+            if not storage.bucket_exists(storage.client(access, secret),
+                                         bucket):
+                raise TroveError(_("The bucket %s is not there.") % bucket)
+            master = next(i for i in DBInstance.find_all(
+                cluster_id=cluster_id, deleted=False).all()
+                if i.type == 'master')
+            self.get_guest(Instance.load(context, master.id)
+                           ).set_communal_credential(access, secret)
+            old_user = properties.get(vertica_api.EC2_USER)
+            old_access = properties.get('ec2_access')
+            properties.update({vertica_api.EC2_USER: context.user_id,
+                               'ec2_access': access})
+            self.db_info.save_properties(properties)
+            access = None
+            if old_access:
+                storage.delete_credential(old_user, old_access)
+            LOG.info("The communal storage of cluster %(cluster)s has an "
+                     "EC2 credential of user %(user)s now.",
+                     {'cluster': cluster_id, 'user': context.user_id})
+        except Exception:
+            LOG.exception("Failed to reset the communal storage credential "
+                          "of cluster %s.", cluster_id)
+            if access:
+                try:
+                    storage.delete_credential(context.user_id, access)
+                except Exception:
+                    LOG.exception("Failed to remove the new EC2 credential "
+                                  "%s.", access)
+        finally:
+            self.reset_task()
+
     def delete_cluster(self, context, cluster_id):
         """An Eon Mode cluster takes its communal storage with it: the
         bucket, emptied, and then the EC2 credential, once the members

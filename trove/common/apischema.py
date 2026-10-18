@@ -386,6 +386,18 @@ cluster = {
                     }
                 }
             }
+        },
+        "reset_communal_credential": {
+            "type": "object",
+            "required": ["reset_communal_credential"],
+            "additionalProperties": False,
+            "properties": {
+                "reset_communal_credential": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {}
+                }
+            }
         }
     }
 }

@@ -621,6 +621,17 @@ class VerticaApp(service.BaseDbApp):
         return operating_system.read_file(
             f'{self.mount_point}/vertica_cluster.yaml', as_root=True)
 
+    def set_communal_credential(self, access, secret):
+        """The EC2 credential an Eon Mode database reaches its communal
+        storage with, changed while it runs.
+        """
+        LOG.info('Setting the communal storage credential.')
+        try:
+            self.adm.run(['ALTER DATABASE DEFAULT SET AWSAuth = %s'
+                          % quote_literal('%s:%s' % (access, secret))])
+        except exception.TroveError as e:
+            raise exception.TroveError(redact(str(e)))
+
     def set_cluster_config(self, content):
         path = f'{self.mount_point}/vertica_cluster.yaml'
         operating_system.write_file(path, content, as_root=True)

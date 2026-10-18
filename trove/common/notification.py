@@ -591,6 +591,15 @@ class DBaaSClusterRestart(DBaaSAPINotification):
         return ['cluster_id']
 
 
+class DBaaSClusterResetCommunalCredential(DBaaSAPINotification):
+
+    def event_type(self):
+        return 'cluster_reset_communal_credential'
+
+    def required_start_traits(self):
+        return ['cluster_id']
+
+
 class DBaaSClusterUpgrade(DBaaSAPINotification):
 
     @abc.abstractmethod

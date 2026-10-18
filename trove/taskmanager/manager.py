@@ -492,6 +492,10 @@ class Manager(periodic_task.PeriodicTasks):
         cluster_tasks = models.load_cluster_tasks(context, cluster_id)
         cluster_tasks.restart_cluster(context, cluster_id)
 
+    def reset_communal_credential(self, context, cluster_id):
+        cluster_tasks = models.load_cluster_tasks(context, cluster_id)
+        cluster_tasks.reset_communal_credential(context, cluster_id)
+
     def upgrade_cluster(self, context, cluster_id, datastore_version_id):
         datastore_version = DatastoreVersion.load_by_uuid(datastore_version_id)
         cluster_tasks = models.load_cluster_tasks(context, cluster_id)

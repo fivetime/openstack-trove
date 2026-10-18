@@ -243,3 +243,18 @@ class TestBucket(ObjectStorageTestCase):
         self.assertRaises(boto_exceptions.ClientError,
                           storage.purge_bucket, self.s3, bucket)
         self.stubber.assert_no_pending_responses()
+
+    def test_bucket_exists(self):
+        bucket = 'trove-vertica-c1'
+        self.stubber.add_response('head_bucket', {}, {'Bucket': bucket})
+        self.stubber.add_client_error('head_bucket', '404',
+                                      http_status_code=404)
+        self.stubber.add_client_error('head_bucket', '403',
+                                      http_status_code=403)
+        storage = self._storage()
+        self.assertTrue(storage.bucket_exists(self.s3, bucket))
+        self.assertFalse(storage.bucket_exists(self.s3, bucket))
+        # Not the credential's: an error, not a missing bucket.
+        self.assertRaises(boto_exceptions.ClientError,
+                          storage.bucket_exists, self.s3, bucket)
+        self.stubber.assert_no_pending_responses()

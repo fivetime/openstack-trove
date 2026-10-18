@@ -65,6 +65,13 @@ class VerticaGuestAgentAPI(guest_api.API):
         return self._call("install_cluster", CONF.cluster_usage_timeout,
                           version=guest_api.API.API_BASE_VERSION, **kwargs)
 
+    def set_communal_credential(self, access, secret):
+        LOG.debug("Setting the communal storage credential.")
+        return self._call("set_communal_credential",
+                          self.agent_high_timeout,
+                          version=guest_api.API.API_BASE_VERSION,
+                          access=access, secret=secret)
+
     def set_cluster_config(self, config):
         LOG.debug("Setting the cluster configuration.")
         return self._call("set_cluster_config", self.agent_high_timeout,

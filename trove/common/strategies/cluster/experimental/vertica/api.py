@@ -241,6 +241,31 @@ class VerticaCluster(models.Cluster):
 
         return VerticaCluster(context, db_info, datastore, datastore_version)
 
+    def reset_communal_credential(self):
+        """Give the communal storage of an Eon Mode cluster an EC2
+        credential of the user asking, for when the user whose credential
+        it has is deleted or leaves the project.
+        """
+        properties = self.db_info.get_properties()
+        if properties.get(STORAGE_MODE) != EON:
+            raise exception.BadRequest(_(
+                "Only an Eon Mode cluster has communal storage."))
+        if self.context.project_id != self.db_info.tenant_id:
+            raise exception.BadRequest(_(
+                "The communal storage credential is one of a user of the "
+                "project of the cluster: reset it with a token of that "
+                "project."))
+        self.validate_cluster_available()
+        self.db_info.update(task_status=ClusterTasks.UPDATING_CLUSTER)
+        try:
+            task_api.load(self.context, self.ds_version.manager
+                          ).reset_communal_credential(self.db_info.id)
+        except Exception:
+            self.db_info.update(task_status=ClusterTasks.NONE)
+            raise
+        return VerticaCluster(self.context, self.db_info, self.ds,
+                              self.ds_version)
+
     @staticmethod
     def k_safety(n):
         """

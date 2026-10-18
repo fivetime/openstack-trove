@@ -518,6 +518,20 @@ class TestVerticaApp(VerticaGuestTestCase):
         self.assertIn('AWSAuth=***', str(error))
         self.assertIn('AWSEndpoint=x', str(error))
 
+    def test_the_communal_credential_is_changed_in_the_database(self):
+        app = self._app()
+        with mock.patch.object(vertica_service.VerticaAdmin, 'run') as run:
+            app.set_communal_credential('AK', "S'K")
+        run.assert_called_once_with(
+            ["ALTER DATABASE DEFAULT SET AWSAuth = 'AK:S''K'"])
+        with mock.patch.object(
+                vertica_service.VerticaAdmin, 'run',
+                side_effect=exception.TroveError(
+                    "failed: ALTER DATABASE DEFAULT SET AWSAuth=AK:SK")):
+            error = self.assertRaises(exception.TroveError,
+                                      app.set_communal_credential, 'AK', 'SK')
+        self.assertNotIn('SK', str(error))
+
     def test_a_version_without_the_community_edition_needs_a_license(self):
         app = self._app()
         with mock.patch.object(
@@ -1062,6 +1076,12 @@ class TestVerticaManager(VerticaGuestTestCase):
         # A failure is logged, the other periodic tasks still run.
         manager.app.apply_mount_options.side_effect = exception.TroveError()
         manager.keep_mount_options(None)
+
+    def test_the_communal_credential_reaches_the_app(self):
+        manager = self._manager()
+        manager.set_communal_credential(None, 'AK', 'SK')
+        manager.app.set_communal_credential.assert_called_once_with(
+            'AK', 'SK')
 
     def test_the_communal_storage_reaches_the_app(self):
         manager = self._manager()

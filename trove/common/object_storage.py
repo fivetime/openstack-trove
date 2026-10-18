@@ -123,6 +123,16 @@ class ProjectObjectStorage(object):
             if _code(e) != 'BucketAlreadyOwnedByYou':
                 raise
 
+    def bucket_exists(self, s3, bucket):
+        """Whether the bucket is there and the credential reaches it."""
+        try:
+            s3.head_bucket(Bucket=bucket)
+            return True
+        except boto_exceptions.ClientError as e:
+            if _code(e) in ('404', 'NoSuchBucket', 'NotFound'):
+                return False
+            raise
+
     def purge_bucket(self, s3, bucket):
         """Delete every object of the bucket and the bucket; a bucket
         that is not there is purged already.

@@ -194,6 +194,64 @@ class VerticaClusterTasksTest(trove_testtools.TestCase):
         storage.secret.assert_not_called()
         storage.purge_bucket.assert_not_called()
 
+    def _reset_credential(self, user='user-2'):
+        context = MagicMock(user_id=user)
+        self.tasks.reset_communal_credential(context, 'cluster')
+        return context
+
+    def _reset_storage(self):
+        storage = self._eon()
+        self.properties['ec2_access'] = 'AK'
+        storage.credential.return_value = ('AK2', 'SK2')
+        storage.bucket_exists.return_value = True
+        return storage
+
+    def test_reset_gives_the_database_a_new_credential(self):
+        storage = self._reset_storage()
+        master = self._guest(MagicMock(id='a'))
+        order = MagicMock()
+        order.attach_mock(storage.credential, 'credential')
+        order.attach_mock(storage.bucket_exists, 'bucket_exists')
+        order.attach_mock(master.set_communal_credential, 'set')
+        order.attach_mock(storage.delete_credential, 'delete_credential')
+        self._reset_credential()
+        self.assertEqual(
+            ['credential', 'bucket_exists', 'set', 'delete_credential'],
+            [c[0] for c in order.mock_calls])
+        # A new credential of the user asking, in the project.
+        storage.credential.assert_called_once_with('user-2', 'project')
+        storage.bucket_exists.assert_called_once_with(
+            storage.client.return_value, 'trove-vertica-cluster')
+        storage.client.assert_called_once_with('AK2', 'SK2')
+        master.set_communal_credential.assert_called_once_with('AK2', 'SK2')
+        # The old one goes once the database has the new one.
+        storage.delete_credential.assert_called_once_with('user', 'AK')
+        self.assertEqual('user-2', self.properties['ec2_user_id'])
+        self.assertEqual('AK2', self.properties['ec2_access'])
+        self.tasks.reset_task.assert_called_once_with()
+
+    def test_reset_that_fails_keeps_the_old_credential(self):
+        for failure in ('bucket', 'guest'):
+            storage = self._reset_storage()
+            self.properties.update({'ec2_user_id': 'user',
+                                    'ec2_access': 'AK'})
+            self.guests.clear()
+            master = self._guest(MagicMock(id='a'))
+            self.tasks.reset_task.reset_mock()
+            if failure == 'bucket':
+                storage.bucket_exists.return_value = False
+            else:
+                master.set_communal_credential.side_effect = Exception('x')
+            self._reset_credential()
+            # Only the new credential goes.
+            storage.delete_credential.assert_called_once_with('user-2',
+                                                              'AK2')
+            self.assertEqual('AK', self.properties['ec2_access'])
+            self.assertEqual('user', self.properties['ec2_user_id'])
+            self.tasks.reset_task.assert_called_once_with()
+            if failure == 'bucket':
+                master.set_communal_credential.assert_not_called()
+
 
 class VerticaClusterApiTest(trove_testtools.TestCase):
 
@@ -218,3 +276,14 @@ class VerticaGuestAgentApiTest(trove_testtools.TestCase):
              {'members': ['10.0.0.1'], 'communal': {'location': 'l'}}],
             [{k: v for k, v in c[1].items() if k != 'version'}
              for c in call.call_args_list])
+
+    def test_the_communal_credential_goes_to_the_guest(self):
+        client = guestagent.VerticaGuestAgentAPI.__new__(
+            guestagent.VerticaGuestAgentAPI)
+        client.agent_high_timeout = 600
+        with patch.object(guestagent.VerticaGuestAgentAPI, '_call') as call:
+            client.set_communal_credential('AK', 'SK')
+        self.assertEqual('set_communal_credential', call.call_args[0][0])
+        self.assertEqual({'access': 'AK', 'secret': 'SK'},
+                         {k: v for k, v in call.call_args[1].items()
+                          if k != 'version'})

@@ -301,6 +301,13 @@ class API(object):
         cctxt = self.client.prepare(version=version)
         cctxt.cast(self.context, "restart_cluster", cluster_id=cluster_id)
 
+    def reset_communal_credential(self, cluster_id):
+        LOG.debug("Making async call to reset the communal storage "
+                  "credential of cluster %s", cluster_id)
+        cctxt = self.client.prepare(version=self.API_BASE_VERSION)
+        cctxt.cast(self.context, "reset_communal_credential",
+                   cluster_id=cluster_id)
+
     def upgrade_cluster(self, cluster_id, datastore_version_id):
         LOG.debug("Making async call to upgrade guest to datastore "
                   "version %s ", datastore_version_id)
