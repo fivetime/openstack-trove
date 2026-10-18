@@ -31,7 +31,8 @@ CONF = cfg.CONF
 
 
 class FakeKeystone(adapters.BaseAdapter):
-    """The EC2 credential calls of the Identity API, answered in the
+    """The calls of the Identity API Trove makes for object storage
+    (EC2 credentials, users, roles), answered in the
     process: the real keystoneauth session and keystoneclient build the
     requests and read the replies, no socket or thread is involved (the
     unit tests run under eventlet).
@@ -44,6 +45,11 @@ class FakeKeystone(adapters.BaseAdapter):
         self.credentials = {}   # access: (user, project, secret)
         self.seen = []
         self.created = 0
+        self.projects = {'p1': 'd1'}   # project: its domain
+        self.roles = ['objectstore']
+        self.users = {}   # id: (name, domain)
+        self.passwords = []
+        self.grants = set()   # (project, user, role)
 
     def close(self):
         pass
@@ -55,13 +61,52 @@ class FakeKeystone(adapters.BaseAdapter):
                                'links': {}}}
 
     def send(self, request, **kwargs):
-        # /v3/users/<user>/credentials/OS-EC2[/<access>]
-        path = parse.urlsplit(request.url).path
+        url = parse.urlsplit(request.url)
+        path = url.path
         parts = path.split('/')
-        user = parts[3]
-        access = parts[6] if len(parts) > 6 else None
+        query = dict(parse.parse_qsl(url.query))
         self.seen.append((request.method, path,
                           request.headers.get('X-Auth-Token')))
+        if parts[2] == 'projects' and len(parts) == 4:
+            project = self.projects.get(parts[3])
+            if not project:
+                return self._reply(request, 404, {'error': {'code': 404}})
+            return self._reply(request, 200, {'project': {
+                'id': parts[3], 'domain_id': project, 'links': {}}})
+        if parts[2] == 'projects':
+            # PUT /v3/projects/<p>/users/<u>/roles/<r>
+            self.grants.add((parts[3], parts[5], parts[7]))
+            return self._reply(request, 204)
+        if parts[2] == 'roles':
+            return self._reply(request, 200, {'roles': [
+                {'id': 'role-' + name, 'name': name, 'links': {}}
+                for name in self.roles if name == query.get('name')]})
+        if parts[2] == 'users' and len(parts) <= 4:
+            return self._users(request, parts, query)
+        return self._credentials(request, parts)
+
+    def _users(self, request, parts, query):
+        if request.method == 'GET':
+            return self._reply(request, 200, {'users': [
+                {'id': i, 'name': n, 'domain_id': d, 'links': {}}
+                for i, (n, d) in self.users.items()
+                if n == query.get('name') and d == query.get('domain_id')]})
+        if request.method == 'POST':
+            user = json.loads(request.body)['user']
+            self.passwords.append(user['password'])
+            user_id = 'user-%d' % (len(self.users) + 1)
+            self.users[user_id] = (user['name'], user['domain_id'])
+            return self._reply(request, 201, {'user': {
+                'id': user_id, 'name': user['name'],
+                'domain_id': user['domain_id'], 'links': {}}})
+        if self.users.pop(parts[3], None) is None:
+            return self._reply(request, 404, {'error': {'code': 404}})
+        return self._reply(request, 204)
+
+    def _credentials(self, request, parts):
+        # /v3/users/<user>/credentials/OS-EC2[/<access>]
+        user = parts[3]
+        access = parts[6] if len(parts) > 6 else None
         if request.method == 'POST':
             body = json.loads(request.body)
             self.created += 1
@@ -258,3 +303,38 @@ class TestBucket(ObjectStorageTestCase):
         self.assertRaises(boto_exceptions.ClientError,
                           storage.bucket_exists, self.s3, bucket)
         self.stubber.assert_no_pending_responses()
+
+
+class TestStorageUser(ObjectStorageTestCase):
+
+    def setUp(self):
+        super(TestStorageUser, self).setUp()
+        self._conf(s3_credential_role='objectstore')
+
+    def test_a_user_of_the_project_for_its_storage_alone(self):
+        storage = self._storage()
+        user = storage.storage_user('trove-vertica-c1', 'p1', 'the cluster')
+        # In the domain of the project, with the role on the project only.
+        self.assertEqual({user: ('trove-vertica-c1', 'd1')},
+                         self.keystone.users)
+        self.assertEqual({('p1', user, 'role-objectstore')},
+                         self.keystone.grants)
+        # A long random password nobody keeps.
+        self.assertGreaterEqual(len(self.keystone.passwords[0]), 32)
+        # A retry finds it.
+        self.assertEqual(user, storage.storage_user('trove-vertica-c1', 'p1',
+                                                    'the cluster'))
+        self.assertEqual(1, len(self.keystone.users))
+        storage.delete_user(user)
+        storage.delete_user(user)
+        self.assertEqual({}, self.keystone.users)
+
+    def test_no_role_no_user(self):
+        storage = self._storage()
+        self._conf(s3_credential_role='nosuchrole')
+        self.assertRaises(exception.TroveError, storage.storage_user,
+                          'trove-vertica-c1', 'p1', 'the cluster')
+        self._conf(s3_credential_role=None)
+        self.assertRaises(exception.TroveError, storage.storage_user,
+                          'trove-vertica-c1', 'p1', 'the cluster')
+        self.assertEqual({}, self.keystone.users)

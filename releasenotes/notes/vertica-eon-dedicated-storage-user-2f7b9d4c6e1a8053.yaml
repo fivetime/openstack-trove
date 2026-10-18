@@ -1,0 +1,24 @@
+---
+security:
+  - |
+    The communal storage of a Vertica Eon Mode cluster is reached with an
+    EC2 credential, and the database's administrator, the tenant's ``root``
+    user among them, reads it in full in ``configuration_parameters``. An
+    EC2 credential gets a Keystone token of its user in the whole project,
+    so the credential of the user who created the cluster was a key to all
+    of that user's project. The task manager now creates a user of the
+    project for each Eon Mode cluster, ``trove-vertica-<cluster id>``, with
+    a random password nobody keeps and only the role ``[DEFAULT]
+    s3_credential_role`` on the project, and reaches the bucket with an
+    EC2 credential of that user; the user goes with the cluster, and with
+    a takeover by a revived cluster. Set ``s3_credential_role`` to a role
+    the S3 service accepts (for Ceph RGW, in
+    ``rgw_keystone_accepted_roles``) and no other service does: Eon Mode is
+    not available until it is set. Trove's service account needs to be
+    allowed to create users in the domains of the projects.
+upgrade:
+  - |
+    ``reset_communal_credential`` gives the cluster's own user a new EC2
+    credential, and no longer needs a token of the project of the cluster.
+    A cluster made before has the credential of a person: resetting it
+    moves it to a user of its own and removes the person's credential.

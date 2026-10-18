@@ -19,11 +19,13 @@ rgw_s3_auth_use_keystone (with rgw_keystone_implicit_tenants the project
 sees the same buckets through Swift), or Swift with s3api and s3token. A
 bucket made with the EC2 credential of a user of the project is the
 project's: it is in the project's namespace and counts against its quota.
-Trove, with its service account, creates and removes the EC2 credential
-for that user, and with it the bucket. Only the Identity API and the S3
-API are used.
+Trove, with its service account, creates a user of the project for its
+object storage alone (storage_user, with s3_credential_role), an EC2
+credential of it, and with that the bucket, and removes them all again.
+Only the Identity API and the S3 API are used.
 """
 
+import secrets
 from urllib import parse
 
 import boto3
@@ -106,6 +108,43 @@ class ProjectObjectStorage(object):
             self._keystone().ec2.delete(user_id, access)
         except ks_exceptions.NotFound:
             pass
+
+    # A user of the project for its object storage alone.
+
+    def storage_user(self, name, project_id, description):
+        """The id of the user of this name in the domain of the project,
+        made if need be, with only the s3_credential_role on the project.
+        An EC2 credential of it reaches the project's object storage, and
+        a Keystone token got with it carries that role alone, which no
+        other service takes: unlike a credential of a person, it is no
+        key to the rest of the project.
+        """
+        keystone = self._keystone()
+        role = self._storage_role(keystone)
+        domain = keystone.projects.get(project_id).domain_id
+        found = keystone.users.list(name=name, domain=domain)
+        user = found[0] if found else keystone.users.create(
+            name=name, domain=domain, password=secrets.token_urlsafe(32),
+            description=description, enabled=True)
+        keystone.roles.grant(role, user=user.id, project=project_id)
+        return user.id
+
+    def delete_user(self, user_id):
+        try:
+            self._keystone().users.delete(user_id)
+        except ks_exceptions.NotFound:
+            pass
+
+    def _storage_role(self, keystone):
+        if not CONF.s3_credential_role:
+            raise exception.TroveError(_(
+                "s3_credential_role is not set: there is no role to give "
+                "the users of the object storage of projects."))
+        roles = keystone.roles.list(name=CONF.s3_credential_role)
+        if not roles:
+            raise exception.TroveError(_("There is no role %s.")
+                                       % CONF.s3_credential_role)
+        return roles[0].id
 
     # Buckets.
 

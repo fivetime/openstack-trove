@@ -129,6 +129,16 @@ common_opts = [
                     'catalog.'),
     cfg.StrOpt('s3_region', default='us-east-1',
                help='Region S3 requests are signed for.'),
+    cfg.StrOpt('s3_credential_role',
+               help='Role Trove gives the users it creates in the projects '
+                    'of tenants for their object storage, whose EC2 '
+                    'credential a database reaches its bucket with. The S3 '
+                    'service must accept it (for Ceph RGW, '
+                    'rgw_keystone_accepted_roles), and no other service '
+                    'should: the database\'s administrator can read the '
+                    'credential, and a Keystone token got with it carries '
+                    'this role alone. Needed for the communal storage of '
+                    'Vertica Eon Mode clusters.'),
     cfg.URIOpt('glance_url', help='URL ending in ``AUTH_``.'),
     cfg.StrOpt('glance_service_type', default='image',
                help='Service type to use when searching catalog.'),

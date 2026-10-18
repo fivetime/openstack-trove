@@ -47,8 +47,10 @@ SYNC_WRITES = 'sync_writes'
 STORAGE_MODE = 'storage_mode'
 ENTERPRISE = 'enterprise'
 EON = 'eon'
-# The user whose EC2 credential the communal storage is reached with.
+# The user whose EC2 credential the communal storage is reached with, and
+# whether it is one Trove made for that alone (and removes with it).
 EC2_USER = 'ec2_user_id'
+DEDICATED_USER = 'ec2_user_dedicated'
 # A bucket of the project an Eon Mode database is revived from, the
 # communal storage of a cluster whose members are gone.
 REVIVE_FROM = 'revive_from'
@@ -82,7 +84,8 @@ def cluster_properties(extended_properties, conf=None):
         raise exception.BadRequest(_(
             "%(name)s must be %(enterprise)s or %(eon)s.")
             % {'name': STORAGE_MODE, 'enterprise': ENTERPRISE, 'eon': EON})
-    if mode == EON and not getattr(conf, 'eon_enabled', False):
+    if mode == EON and not (getattr(conf, 'eon_enabled', False) and
+                            CONF.s3_credential_role):
         raise exception.BadRequest(_(
             "Eon Mode is not available for Vertica clusters in this "
             "cloud."))
@@ -249,10 +252,10 @@ class VerticaCluster(models.Cluster):
         if properties[STORAGE_MODE] == EON:
             # A new bucket is named after the cluster, and the task manager
             # creates it; a revived database takes the bucket it is revived
-            # from. Both with an EC2 credential of this user.
+            # from. Both with an EC2 credential of a user of the project the
+            # task manager makes for the cluster.
             properties['communal_bucket'] = properties.get(
                 REVIVE_FROM) or communal.bucket_name(db_info.id)
-            properties[EC2_USER] = context.user_id
         db_info.save_properties(properties)
 
         cls._create_instances(context, db_info, datastore, datastore_version,
@@ -265,19 +268,13 @@ class VerticaCluster(models.Cluster):
         return VerticaCluster(context, db_info, datastore, datastore_version)
 
     def reset_communal_credential(self):
-        """Give the communal storage of an Eon Mode cluster an EC2
-        credential of the user asking, for when the user whose credential
-        it has is deleted or leaves the project.
+        """Give the communal storage of an Eon Mode cluster a new EC2
+        credential, for when the one it has may be known to others.
         """
         properties = self.db_info.get_properties()
         if properties.get(STORAGE_MODE) != EON:
             raise exception.BadRequest(_(
                 "Only an Eon Mode cluster has communal storage."))
-        if self.context.project_id != self.db_info.tenant_id:
-            raise exception.BadRequest(_(
-                "The communal storage credential is one of a user of the "
-                "project of the cluster: reset it with a token of that "
-                "project."))
         self.validate_cluster_available()
         self.db_info.update(task_status=ClusterTasks.UPDATING_CLUSTER)
         try:

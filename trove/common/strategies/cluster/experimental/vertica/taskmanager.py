@@ -129,9 +129,9 @@ class VerticaClusterTasks(task_models.ClusterTasks):
         if properties.get(vertica_api.STORAGE_MODE) != vertica_api.EON:
             return None
         storage = object_storage.ProjectObjectStorage()
+        user = self._storage_user(storage, properties)
         access, secret = storage.credential(
-            properties[vertica_api.EC2_USER], self.db_info.tenant_id,
-            properties.get('ec2_access'))
+            user, self.db_info.tenant_id, properties.get('ec2_access'))
         if properties.get('ec2_access') != access:
             properties['ec2_access'] = access
             self.db_info.save_properties(properties)
@@ -161,6 +161,32 @@ class VerticaClusterTasks(task_models.ClusterTasks):
                 'region': CONF.s3_region,
                 'access': access, 'secret': secret, 'revive': revive}
 
+    def _storage_user(self, storage, properties):
+        """The user of the project the cluster reaches its communal
+        storage as, made for it alone (and recorded) if it has none yet:
+        the database's administrator can read the credential, which must
+        not be a key to the rest of the project.
+        """
+        if properties.get(vertica_api.DEDICATED_USER):
+            return properties[vertica_api.EC2_USER]
+        user = storage.storage_user(communal.user_name(self.id),
+                                    self.db_info.tenant_id,
+                                    communal.user_description(self.id))
+        properties.update({vertica_api.EC2_USER: user,
+                           vertica_api.DEDICATED_USER: True})
+        self.db_info.save_properties(properties)
+        return user
+
+    def _forget_credential(self, storage, properties):
+        """Remove the EC2 credential of the cluster, and its user when
+        Trove made it for the cluster.
+        """
+        user = properties.get(vertica_api.EC2_USER)
+        if properties.get('ec2_access'):
+            storage.delete_credential(user, properties['ec2_access'])
+        if properties.get(vertica_api.DEDICATED_USER) and user:
+            storage.delete_user(user)
+
     def _take_over_communal_storage(self):
         """A database revived from a bucket owns it from now on: the
         clusters of the project still naming it lose their EC2 credential,
@@ -178,16 +204,16 @@ class VerticaClusterTasks(task_models.ClusterTasks):
                      "%(bucket)s, takes it over from cluster %(other)s.",
                      {'cluster': self.id, 'bucket': bucket,
                       'other': other.id})
-            if theirs.get('ec2_access'):
-                try:
-                    storage.delete_credential(theirs.get(vertica_api.EC2_USER),
-                                              theirs['ec2_access'])
-                except Exception:
-                    LOG.exception("Failed to remove the EC2 credential %s.",
-                                  theirs['ec2_access'])
+            try:
+                self._forget_credential(storage, theirs)
+            except Exception:
+                LOG.exception("Failed to remove the EC2 credential of "
+                              "cluster %s.", other.id)
             theirs.update({'communal_moved_to': self.id,
                            COMMUNAL_OWNER: False})
-            theirs.pop('ec2_access', None)
+            for name in ('ec2_access', vertica_api.EC2_USER,
+                         vertica_api.DEDICATED_USER):
+                theirs.pop(name, None)
             other.save_properties(theirs)
 
     def _clusters_naming(self, bucket):
@@ -201,17 +227,20 @@ class VerticaClusterTasks(task_models.ClusterTasks):
                 c.get_properties().get('communal_bucket') == bucket]
 
     def reset_communal_credential(self, context, cluster_id):
-        """Give the database a new EC2 credential, of the user asking,
-        and remove the old one. Until the database has the new one the old
-        one stays: a failure leaves the cluster as it was.
+        """Give the database a new EC2 credential of the user of the
+        cluster, and remove the old one. Until the database has the new one
+        the old one stays: a failure leaves the cluster as it was. A
+        cluster whose credential is a person's (made before clusters had a
+        user of their own) moves to a user of its own.
         """
         properties = self.db_info.get_properties()
+        old = dict(properties)
         storage = object_storage.ProjectObjectStorage()
         bucket = properties['communal_bucket']
-        access = secret = None
+        user = access = None
         try:
-            access, secret = storage.credential(context.user_id,
-                                                self.db_info.tenant_id)
+            user = self._storage_user(storage, properties)
+            access, secret = storage.credential(user, self.db_info.tenant_id)
             if not storage.bucket_exists(storage.client(access, secret),
                                          bucket):
                 raise TroveError(_("The bucket %s is not there.") % bucket)
@@ -220,26 +249,28 @@ class VerticaClusterTasks(task_models.ClusterTasks):
                 if i.type == 'master')
             self.get_guest(Instance.load(context, master.id)
                            ).set_communal_credential(access, secret)
-            old_user = properties.get(vertica_api.EC2_USER)
-            old_access = properties.get('ec2_access')
-            properties.update({vertica_api.EC2_USER: context.user_id,
-                               'ec2_access': access})
+            properties['ec2_access'] = access
             self.db_info.save_properties(properties)
             access = None
-            if old_access:
-                storage.delete_credential(old_user, old_access)
-            LOG.info("The communal storage of cluster %(cluster)s has an "
-                     "EC2 credential of user %(user)s now.",
-                     {'cluster': cluster_id, 'user': context.user_id})
+            if old.get('ec2_access'):
+                storage.delete_credential(old.get(vertica_api.EC2_USER),
+                                          old['ec2_access'])
+            LOG.info("The communal storage of cluster %(cluster)s has a new "
+                     "EC2 credential of user %(user)s.",
+                     {'cluster': cluster_id, 'user': user})
         except Exception:
             LOG.exception("Failed to reset the communal storage credential "
                           "of cluster %s.", cluster_id)
-            if access:
-                try:
-                    storage.delete_credential(context.user_id, access)
-                except Exception:
-                    LOG.exception("Failed to remove the new EC2 credential "
-                                  "%s.", access)
+            try:
+                if access:
+                    storage.delete_credential(user, access)
+                if user and not old.get(vertica_api.DEDICATED_USER):
+                    # The user made for the move: back to the old one.
+                    storage.delete_user(user)
+                    self.db_info.save_properties(old)
+            except Exception:
+                LOG.exception("Failed to undo the reset of the communal "
+                              "storage credential of cluster %s.", cluster_id)
         finally:
             self.reset_task()
 
@@ -262,10 +293,16 @@ class VerticaClusterTasks(task_models.ClusterTasks):
         bucket = properties.get('communal_bucket')
         what = {'bucket': bucket, 'project': self.db_info.tenant_id,
                 'access': access, 'user': user, 'cluster': self.id}
-        if not access:
-            # The cluster failed before it had any.
-            return
         storage = object_storage.ProjectObjectStorage()
+        if not access:
+            # The cluster failed before it had a credential, maybe after
+            # its user was made.
+            try:
+                self._forget_credential(storage, properties)
+            except Exception:
+                LOG.exception("Failed to remove the user %(user)s of "
+                              "cluster %(cluster)s.", what)
+            return
         # The bucket is this cluster's to purge if it made it, or took it
         # over by reviving from it; not once another cluster revived from
         # it, nor while another one names it.
@@ -277,7 +314,7 @@ class VerticaClusterTasks(task_models.ClusterTasks):
                      "cluster %(cluster)s's to remove; removing its EC2 "
                      "credential %(access)s only.", what)
             try:
-                storage.delete_credential(user, access)
+                self._forget_credential(storage, properties)
             except Exception:
                 LOG.exception("Failed to remove the EC2 credential "
                               "%(access)s of user %(user)s of cluster "
@@ -290,9 +327,10 @@ class VerticaClusterTasks(task_models.ClusterTasks):
                             "is gone: the bucket %(bucket)s of project "
                             "%(project)s of cluster %(cluster)s is left.",
                             what)
+                self._forget_credential(storage, properties)
                 return
             storage.purge_bucket(storage.client(access, secret), bucket)
-            storage.delete_credential(user, access)
+            self._forget_credential(storage, properties)
             LOG.info("Removed the bucket %(bucket)s of project %(project)s "
                      "and the EC2 credential %(access)s of cluster "
                      "%(cluster)s.", what)

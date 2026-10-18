@@ -325,9 +325,21 @@ class ClusterTest(trove_testtools.TestCase):
         return mock_db, [c.kwargs['cluster_config']
                          for c in mock_ins.call_args_list]
 
-    def _eon_enabled(self):
+    def _eon_enabled(self, role='objectstore'):
         CONF.set_override('eon_enabled', True, group='vertica')
         self.addCleanup(CONF.clear_override, 'eon_enabled', group='vertica')
+        CONF.set_override('s3_credential_role', role)
+        self.addCleanup(CONF.clear_override, 's3_credential_role')
+
+    def test_eon_needs_a_role_for_the_storage_users(self):
+        # The credential must not be a key to the rest of the project.
+        self._eon_enabled(role=None)
+        with patch.object(DBCluster, 'create') as mock_db:
+            self.assertRaises(
+                exception.BadRequest, self.cluster.create, Mock(),
+                self.cluster_name, self.datastore, self.datastore_version,
+                self.instances, {'storage_mode': 'eon'}, None, None)
+        mock_db.assert_not_called()
 
     def test_the_properties_are_kept(self):
         mock_db, _configs = self._create({})
@@ -363,8 +375,7 @@ class ClusterTest(trove_testtools.TestCase):
             {'storage_mode': 'eon', 'sync_writes': 'true'}, context)
         mock_db.return_value.save_properties.assert_called_once_with(
             {'storage_mode': 'eon', 'sync_writes': True,
-             'communal_bucket': 'trove-vertica-cluster-1',
-             'ec2_user_id': 'user-1'})
+             'communal_bucket': 'trove-vertica-cluster-1'})
         # The members only get what their guest acts on.
         for config in configs:
             self.assertNotIn('storage_mode', config)
@@ -454,16 +465,20 @@ class ClusterTest(trove_testtools.TestCase):
             [(c[0], c[1]) for c in mock_update.call_args_list])
 
     @patch.object(task_api, 'load')
-    def test_reset_is_refused_without_communal_storage_or_project(
-            self, mock_load):
+    def test_reset_is_refused_without_communal_storage(self, mock_load):
         self.db_info.properties = json.dumps({'storage_mode': 'enterprise'})
-        self.cluster.context.project_id = self.tenant_id
         self.assertRaises(exception.BadRequest,
                           self.cluster.reset_communal_credential)
-        # An admin of another project would make the credential there.
-        self.assertRaises(exception.BadRequest,
-                          self._eon_cluster('other').reset_communal_credential)
         mock_load.assert_not_called()
+
+    @patch.object(task_api, 'load')
+    @patch.object(DBCluster, 'update')
+    def test_an_admin_of_another_project_resets_too(self, mock_update,
+                                                    mock_load):
+        # The credential is the cluster's user's, not the caller's.
+        self._eon_cluster('other').reset_communal_credential()
+        mock_load.return_value.reset_communal_credential.\
+            assert_called_once_with(self.cluster_id)
 
     def test_the_action_reaches_the_cluster(self):
         with patch.object(vertica_api.VerticaCluster,
@@ -487,8 +502,7 @@ class ClusterTest(trove_testtools.TestCase):
         mock_db.return_value.save_properties.assert_called_once_with(
             {'storage_mode': 'eon', 'sync_writes': False,
              'revive_from': 'trove-vertica-old',
-             'communal_bucket': 'trove-vertica-old',
-             'ec2_user_id': 'user-1'})
+             'communal_bucket': 'trove-vertica-old'})
 
     def test_revive_from_is_refused(self):
         for props, enabled in (
@@ -499,8 +513,10 @@ class ClusterTest(trove_testtools.TestCase):
                 ({'revive_from': ''}, True)):
             if enabled:
                 CONF.set_override('eon_enabled', True, group='vertica')
+                CONF.set_override('s3_credential_role', 'objectstore')
             else:
                 CONF.clear_override('eon_enabled', group='vertica')
+                CONF.clear_override('s3_credential_role')
             with patch.object(DBCluster, 'create') as mock_db:
                 self.assertRaises(
                     exception.BadRequest, self.cluster.create, Mock(),
@@ -509,6 +525,7 @@ class ClusterTest(trove_testtools.TestCase):
                     None, None)
             mock_db.assert_not_called()
         CONF.clear_override('eon_enabled', group='vertica')
+        CONF.clear_override('s3_credential_role')
 
     def test_a_revived_cluster_shows_where_from(self):
         self.assertEqual(

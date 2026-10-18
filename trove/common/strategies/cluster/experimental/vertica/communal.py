@@ -26,6 +26,17 @@ def bucket_name(cluster_id):
     return BUCKET_PREFIX + cluster_id
 
 
+def user_name(cluster_id):
+    """The user of the project the communal storage is reached as."""
+    return BUCKET_PREFIX + cluster_id
+
+
+def user_description(cluster_id):
+    return ('Trove: the communal storage of Vertica cluster %s. Removed '
+            'with the cluster; removing it, or its EC2 credential, breaks '
+            'the database.' % cluster_id)
+
+
 def location(bucket):
     return 's3://%s/%s' % (bucket, DATA_PREFIX)
 

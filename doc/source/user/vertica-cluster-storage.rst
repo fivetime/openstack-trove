@@ -91,17 +91,40 @@ Eon Mode: your bucket and your EC2 credential
 
 The communal storage of an Eon Mode cluster is the bucket shown as
 ``communal_bucket``, in your project, and counts against your project's
-object storage quota. Trove reaches it with an EC2 credential it creates for
-the user who created the cluster. You see both, in the object storage of the
-project (Swift and S3) and in ``openstack ec2 credentials list``.
+object storage quota. Trove reaches it as a user of your project it makes for
+the cluster, ``trove-vertica-<cluster id>``, which can use the project's object
+storage and nothing else. The database's administrators (``root`` among them)
+can read the EC2 credential of that user: it opens all the object storage of
+the project. Give it a new one with
+``openstack database cluster reset communal credential <cluster>`` when it may
+be known to others.
 
 .. warning::
 
-   Removing the bucket, any object in it, or the EC2 credential destroys the
-   database. The credential stops working when its user is deleted or leaves
-   the project, and the database with it.
+   Removing the bucket, any object in it, the user or its EC2 credential
+   destroys the database.
 
-Deleting the cluster empties and removes the bucket and then the credential.
+Deleting the cluster empties and removes the bucket, and then the credential
+and the user.
+
+Reviving a cluster from its bucket
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When the members of an Eon Mode cluster are gone, create a new cluster from
+its bucket:
+
+.. code-block:: console
+
+   $ openstack database cluster create newcluster vertica 25.4 \
+       --extended-properties revive_from=trove-vertica-<old cluster id> \
+       --instance ... --instance ... --instance ...
+
+The database comes back as it was the last time its catalog reached the
+bucket, with the users of the old cluster, and the old cluster's admin
+password replaced by the new one's. The old database must not run: the
+revive is refused until about 15 minutes after it stopped. The new cluster
+takes the bucket over; the old one, shown with ``communal_moved_to``, can be
+deleted without touching it.
 
 Licenses
 ~~~~~~~~

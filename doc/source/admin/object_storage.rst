@@ -11,9 +11,9 @@ API, and it counts against the project's quota.
 Trove uses two APIs for it, and nothing that depends on how the cloud is
 deployed:
 
-- the Identity API, with Trove's service account, to create, read and delete
-  an EC2 credential of the user who creates the database, in the user's
-  project;
+- the Identity API, with Trove's service account, to create a user of the
+  project for the database alone, with only the role ``s3_credential_role``,
+  and an EC2 credential of it, and to remove both again;
 - the S3 API, with that credential, to create, empty and remove the bucket.
   The database instances reach the bucket with the same credential.
 
@@ -41,10 +41,24 @@ Check it with a user of a project before enabling a datastore on it:
    # write, read and delete an object; the bucket shows in
    # "openstack container list" of the same project only.
 
-Trove's service account (``[service_credentials]``) needs a role that may
-manage the EC2 credentials of other users. With the default policy of
-Keystone that is ``admin`` (``identity:ec2_create_credential``,
-``identity:ec2_get_credential``, ``identity:ec2_delete_credential``).
+The database's administrator can read the EC2 credential, and an EC2
+credential gets a Keystone token of its user in the project: the user Trove
+makes has a role the S3 service accepts and no other service does, so the
+credential opens the project's object storage and nothing else. Create such
+a role and let the S3 service accept it:
+
+.. code-block:: console
+
+   $ openstack role create objectstore-only
+   # Ceph RGW: rgw_keystone_accepted_roles = member,admin,objectstore-only
+   # (restart RGW); do not give the role any rule in other policies.
+
+Trove's service account (``[service_credentials]``) needs to be allowed to
+create and delete users in the domains of the projects, grant roles on the
+projects, and manage the EC2 credentials of those users. With the default
+policy of Keystone that is ``admin``. A domain whose users come from LDAP
+cannot have users made in it: Eon Mode clusters cannot be created in its
+projects.
 
 The task manager and the database instances need to reach the S3 service:
 the instances over their management network, unless their tenant network
@@ -65,6 +79,10 @@ The S3 service, for every datastore, in ``[DEFAULT]``:
 
 ``s3_region`` (``us-east-1``)
   The region S3 requests are signed for.
+``s3_credential_role``
+  The role of the users Trove makes for the object storage of projects
+  (``objectstore-only`` above). Datastores that keep data in object storage
+  are not available until it is set.
 
 Vertica, in ``[vertica]``:
 
@@ -80,13 +98,14 @@ The API and the task manager need ``boto3``.
 Operations
 ~~~~~~~~~~
 
-- A database in Eon Mode needs its bucket when it starts: maintenance of the
-  S3 service while such databases start, after a power failure for instance,
-  holds them up.
+- A database in Eon Mode uploads the data of every commit to its bucket: while
+  the S3 service is down it starts and answers from the volumes of its
+  members, but cannot commit writes.
 - Deleting the cluster empties and removes the bucket and then the EC2
   credential. When that fails, or when the credential is gone already (its
   user was deleted), the task manager logs a warning with the project, the
   bucket and the access key, and the bucket is left to be removed by hand.
-- The EC2 credential belongs to the user who created the cluster. When that
-  user is deleted or leaves the project, the database cannot reach its bucket
-  any more.
+- The users Trove makes are named ``trove-vertica-<cluster id>``; deleting one,
+  or its EC2 credential, breaks the database. ``reset_communal_credential``
+  gives a cluster's user a new credential, when the old one may be known to
+  others.
