@@ -121,7 +121,8 @@ class VerticaClusterTasksTest(trove_testtools.TestCase):
             ['ip-b', 'ip-a', 'ip-c'], communal={
                 'location': 's3://trove-vertica-cluster/db',
                 'endpoint': '10.0.0.10:80', 'https': False,
-                'region': 'us-east-1', 'access': 'AK', 'secret': 'SK'})
+                'region': 'us-east-1', 'access': 'AK', 'secret': 'SK',
+                'revive': False})
         # The access key is kept, the secret is not.
         self.assertEqual('AK', self.properties['ec2_access'])
         self.assertNotIn('SK', self.properties.values())
@@ -129,7 +130,8 @@ class VerticaClusterTasksTest(trove_testtools.TestCase):
 
     def test_a_retry_takes_the_recorded_credential(self):
         storage = self._eon()
-        self.properties['ec2_access'] = 'AK'
+        # An earlier try made the credential and the bucket.
+        self.properties.update({'ec2_access': 'AK', 'communal_owner': True})
         self.tasks.create_cluster(None, 'cluster')
         storage.credential.assert_called_once_with('user', 'project', 'AK')
         self.tasks.db_info.save_properties.assert_not_called()
@@ -142,13 +144,106 @@ class VerticaClusterTasksTest(trove_testtools.TestCase):
         self.tasks.update_statuses_on_failure.assert_called_once_with(
             'cluster')
 
-    def _delete(self, deleted=True):
+    def _other_cluster(self, properties, cluster_id='other'):
+        other = MagicMock(id=cluster_id)
+        other.get_properties.return_value = dict(properties)
+        return other
+
+    def _delete(self, deleted=True, others=()):
         with patch.object(taskmanager.task_models.ClusterTasks,
                           'delete_cluster') as mock_super, \
-                patch.object(taskmanager.DBCluster, 'find_by') as mock_find:
+                patch.object(taskmanager.DBCluster, 'find_by') as mock_find, \
+                patch.object(taskmanager.DBCluster,
+                             'find_all') as mock_all:
             mock_find.return_value.deleted = deleted
+            mock_find.return_value.get_properties.return_value = dict(
+                self.properties)
+            mock_all.return_value.all.return_value = list(others)
             self.tasks.delete_cluster(None, 'cluster')
         mock_super.assert_called_once_with(None, 'cluster')
+
+    # Reviving from a bucket.
+
+    def _revive(self, others=()):
+        storage = self._eon()
+        self.properties.update({'revive_from': 'trove-vertica-old',
+                                'communal_bucket': 'trove-vertica-old'})
+        storage.bucket_exists.return_value = True
+        with patch.object(taskmanager.DBCluster, 'find_all') as mock_all:
+            mock_all.return_value.all.return_value = list(others)
+            self.tasks.create_cluster(None, 'cluster')
+        return storage
+
+    def test_create_revives_from_the_bucket(self):
+        old = self._other_cluster({'storage_mode': 'eon',
+                                   'communal_bucket': 'trove-vertica-old',
+                                   'ec2_user_id': 'old-user',
+                                   'ec2_access': 'OLD'}, 'old')
+        unrelated = self._other_cluster({'communal_bucket': 'another'})
+        storage = self._revive(others=[old, unrelated, self.tasks.db_info])
+        storage.bucket_exists.assert_called_once_with(
+            storage.client.return_value, 'trove-vertica-old')
+        storage.create_bucket.assert_not_called()
+        communal = self.guests['a'].install_cluster.call_args[1]['communal']
+        self.assertIs(True, communal['revive'])
+        self.assertEqual('s3://trove-vertica-old/db', communal['location'])
+        # The bucket is this cluster's now; the old cluster loses its
+        # credential and will not purge the bucket.
+        self.assertIs(True, self.properties['communal_owner'])
+        storage.delete_credential.assert_called_once_with('old-user', 'OLD')
+        theirs = old.save_properties.call_args[0][0]
+        self.assertEqual('cluster', theirs['communal_moved_to'])
+        self.assertIs(False, theirs['communal_owner'])
+        self.assertNotIn('ec2_access', theirs)
+        unrelated.save_properties.assert_not_called()
+        self.tasks.update_statuses_on_failure.assert_not_called()
+
+    def test_no_bucket_to_revive_from(self):
+        storage = self._eon()
+        self.properties.update({'revive_from': 'trove-vertica-old',
+                                'communal_bucket': 'trove-vertica-old'})
+        storage.bucket_exists.return_value = False
+        self.tasks.create_cluster(None, 'cluster')
+        self.guests['a'].install_cluster.assert_not_called()
+        self.tasks.update_statuses_on_failure.assert_called_once_with(
+            'cluster')
+        self.assertNotIn('communal_owner', self.properties)
+
+    def test_a_failed_revive_leaves_the_bucket_alone(self):
+        storage = self._eon()
+        self.properties.update({'revive_from': 'trove-vertica-old',
+                                'communal_bucket': 'trove-vertica-old',
+                                'ec2_access': 'AK'})
+        storage.secret.return_value = 'SK'
+        self._delete()
+        storage.purge_bucket.assert_not_called()
+        storage.delete_credential.assert_called_once_with('user', 'AK')
+
+    def test_a_bucket_another_cluster_names_is_not_purged(self):
+        storage = self._eon()
+        self.properties['ec2_access'] = 'AK'
+        storage.secret.return_value = 'SK'
+        self._delete(others=[self._other_cluster(
+            {'communal_bucket': 'trove-vertica-cluster'})])
+        storage.purge_bucket.assert_not_called()
+        storage.delete_credential.assert_called_once_with('user', 'AK')
+
+    def test_a_cluster_made_owner_purges(self):
+        storage = self._eon()
+        self.properties.update({'revive_from': 'trove-vertica-old',
+                                'communal_bucket': 'trove-vertica-old',
+                                'communal_owner': True, 'ec2_access': 'AK'})
+        storage.secret.return_value = 'SK'
+        self._delete()
+        storage.purge_bucket.assert_called_once_with(
+            storage.client.return_value, 'trove-vertica-old')
+
+    def test_create_in_eon_mode_owns_its_bucket(self):
+        self._eon()
+        self.tasks.create_cluster(None, 'cluster')
+        self.assertIs(True, self.properties['communal_owner'])
+        self.assertIs(False, self.guests['a'].install_cluster.call_args[1][
+            'communal']['revive'])
 
     def test_delete_removes_the_bucket_and_then_the_credential(self):
         storage = self._eon()

@@ -32,6 +32,10 @@ import trove.taskmanager.models as task_models
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
 
+# Whether the bucket is the cluster's to purge with it: it made the bucket,
+# or took it over by reviving from it.
+COMMUNAL_OWNER = 'communal_owner'
+
 
 class VerticaTaskManagerStrategy(base.BaseTaskManagerStrategy):
 
@@ -86,6 +90,8 @@ class VerticaClusterTasks(task_models.ClusterTasks):
                 LOG.debug("Installing cluster with members: %s.", member_ips)
                 config = master_guest.install_cluster(member_ips,
                                                       communal=storage)
+                if storage and storage['revive']:
+                    self._take_over_communal_storage()
 
                 # Every member starts and stops its node with vcluster,
                 # which needs the configuration the creation wrote.
@@ -130,17 +136,69 @@ class VerticaClusterTasks(task_models.ClusterTasks):
             properties['ec2_access'] = access
             self.db_info.save_properties(properties)
         bucket = properties['communal_bucket']
-        LOG.info("Creating the bucket %(bucket)s of project %(project)s "
-                 "for the communal storage of cluster %(cluster)s.",
-                 {'bucket': bucket, 'project': self.db_info.tenant_id,
-                  'cluster': self.id})
-        storage.create_bucket(storage.client(access, secret), bucket)
+        what = {'bucket': bucket, 'project': self.db_info.tenant_id,
+                'cluster': self.id}
+        s3 = storage.client(access, secret)
+        revive = bool(properties.get(vertica_api.REVIVE_FROM))
+        if revive:
+            if not storage.bucket_exists(s3, bucket):
+                raise TroveError(_(
+                    "The bucket %(bucket)s of project %(project)s to revive "
+                    "cluster %(cluster)s from is not there.") % what)
+            LOG.info("Reviving cluster %(cluster)s from the bucket "
+                     "%(bucket)s of project %(project)s.", what)
+        else:
+            LOG.info("Creating the bucket %(bucket)s of project %(project)s "
+                     "for the communal storage of cluster %(cluster)s.", what)
+            storage.create_bucket(s3, bucket)
+            if not properties.get(COMMUNAL_OWNER):
+                properties[COMMUNAL_OWNER] = True
+                self.db_info.save_properties(properties)
         endpoint, https = communal.guest_endpoint(storage,
                                                   self.ds_version.manager)
         return {'location': communal.location(bucket),
                 'endpoint': endpoint, 'https': https,
                 'region': CONF.s3_region,
-                'access': access, 'secret': secret}
+                'access': access, 'secret': secret, 'revive': revive}
+
+    def _take_over_communal_storage(self):
+        """A database revived from a bucket owns it from now on: the
+        clusters of the project still naming it lose their EC2 credential,
+        so that their members cannot reach it if they come up again, and
+        do not purge it when they are deleted.
+        """
+        properties = self.db_info.get_properties()
+        bucket = properties['communal_bucket']
+        properties[COMMUNAL_OWNER] = True
+        self.db_info.save_properties(properties)
+        storage = object_storage.ProjectObjectStorage()
+        for other in self._clusters_naming(bucket):
+            theirs = other.get_properties()
+            LOG.info("Cluster %(cluster)s, revived from the bucket "
+                     "%(bucket)s, takes it over from cluster %(other)s.",
+                     {'cluster': self.id, 'bucket': bucket,
+                      'other': other.id})
+            if theirs.get('ec2_access'):
+                try:
+                    storage.delete_credential(theirs.get(vertica_api.EC2_USER),
+                                              theirs['ec2_access'])
+                except Exception:
+                    LOG.exception("Failed to remove the EC2 credential %s.",
+                                  theirs['ec2_access'])
+            theirs.update({'communal_moved_to': self.id,
+                           COMMUNAL_OWNER: False})
+            theirs.pop('ec2_access', None)
+            other.save_properties(theirs)
+
+    def _clusters_naming(self, bucket):
+        """The other clusters of the project whose communal storage is
+        the bucket, and that are not deleted.
+        """
+        clusters = DBCluster.find_all(tenant_id=self.db_info.tenant_id,
+                                      deleted=False).all()
+        return [c for c in clusters
+                if c.id != self.id and
+                c.get_properties().get('communal_bucket') == bucket]
 
     def reset_communal_credential(self, context, cluster_id):
         """Give the database a new EC2 credential, of the user asking,
@@ -191,7 +249,7 @@ class VerticaClusterTasks(task_models.ClusterTasks):
         are gone. A failure is logged and leaves them to be removed by
         hand, as the load balancer of other clusters.
         """
-        properties = self.db_info.get_properties()
+        properties = DBCluster.find_by(id=cluster_id).get_properties()
         super(VerticaClusterTasks, self).delete_cluster(context, cluster_id)
         if (properties.get(vertica_api.STORAGE_MODE) != vertica_api.EON or
                 not DBCluster.find_by(id=cluster_id).deleted):
@@ -208,6 +266,23 @@ class VerticaClusterTasks(task_models.ClusterTasks):
             # The cluster failed before it had any.
             return
         storage = object_storage.ProjectObjectStorage()
+        # The bucket is this cluster's to purge if it made it, or took it
+        # over by reviving from it; not once another cluster revived from
+        # it, nor while another one names it.
+        owner = properties.get(COMMUNAL_OWNER,
+                               not properties.get(vertica_api.REVIVE_FROM))
+        if (not owner or properties.get('communal_moved_to') or
+                self._clusters_naming(bucket)):
+            LOG.info("The bucket %(bucket)s of project %(project)s is not "
+                     "cluster %(cluster)s's to remove; removing its EC2 "
+                     "credential %(access)s only.", what)
+            try:
+                storage.delete_credential(user, access)
+            except Exception:
+                LOG.exception("Failed to remove the EC2 credential "
+                              "%(access)s of user %(user)s of cluster "
+                              "%(cluster)s.", what)
+            return
         try:
             secret = storage.secret(user, access)
             if secret is None:

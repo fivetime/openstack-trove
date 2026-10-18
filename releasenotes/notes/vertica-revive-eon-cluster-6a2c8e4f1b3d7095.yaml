@@ -1,0 +1,23 @@
+---
+features:
+  - |
+    A Vertica cluster can be created from the communal storage of an Eon
+    Mode cluster whose members are gone, with the extended property
+    ``revive_from=<bucket>`` (it implies ``storage_mode=eon``): the task
+    manager checks with an EC2 credential of the user creating the cluster
+    that the bucket of the project is there, and the first member's guest
+    revives the database from it (``vcluster revive_db``), starts it, and
+    gives its admin the password of the new cluster. The database comes
+    back as it was the last time its catalog was synced to the bucket, with
+    the users of the cluster it came from. The bucket must be the
+    communal storage of a cluster created by Trove, and the database on it
+    must not run: ``revive_db`` refuses a bucket whose cluster lease has
+    not expired, about 15 minutes after its database stopped.
+
+    The revived cluster takes the bucket over: the other clusters of the
+    project naming it lose their EC2 credential, so that their members
+    cannot reach it if they come up again, show ``communal_moved_to``, and
+    do not purge it when they are deleted. A cluster purges its bucket when
+    it is deleted only if it created the bucket or took it over, and no
+    other cluster that is not deleted names it; a revive that failed leaves
+    the bucket alone.

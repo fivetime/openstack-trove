@@ -185,10 +185,10 @@ wait $NMA
 """
 
 
-def eon_args(communal, shards):
-    """The create_db arguments of an Eon Mode database. The S3 settings
-    go in --config-param: vcluster 25.4 ignores --config-param-file and
-    the database would go to AWS.
+def s3_params(communal):
+    """The S3 settings of an Eon Mode database, for --config-param:
+    vcluster 25.4 ignores --config-param-file and the database would go to
+    AWS.
     """
     params = {
         'AWSAuth': '%s:%s' % (communal['access'], communal['secret']),
@@ -196,10 +196,15 @@ def eon_args(communal, shards):
         'AWSEnableHttps': '1' if communal['https'] else '0',
         'AWSRegion': communal['region'],
     }
+    return ','.join('%s=%s' % kv for kv in params.items())
+
+
+def eon_args(communal, shards):
+    """The create_db arguments of an Eon Mode database."""
     return ['--communal-storage-location', communal['location'],
             '--depot-path', CONTAINER_DATA_DIR,
             '--shard-count', str(shards),
-            '--config-param', ','.join('%s=%s' % kv for kv in params.items())]
+            '--config-param', s3_params(communal)]
 
 
 def redact(text):
@@ -616,10 +621,55 @@ class VerticaApp(service.BaseDbApp):
         the configuration vcluster wrote, which the others need to start
         and stop their node: in Eon Mode it names the communal storage.
         """
-        self.create_database(hosts=members, communal=communal)
+        if communal and communal.get('revive'):
+            self.revive_database(members, communal)
+        else:
+            self.create_database(hosts=members, communal=communal)
         self.apply_settings()
         return operating_system.read_file(
             f'{self.mount_point}/vertica_cluster.yaml', as_root=True)
+
+    def revive_database(self, hosts, communal):
+        """Bring back the Eon Mode database of a cluster whose members are
+        gone from its communal storage, onto these members, and give its
+        admin the password of this cluster.
+
+        The revived catalog has the password of the cluster it came from,
+        which start_db logs in with to confirm the nodes are up: the nodes
+        start, and start_db reports them not up. The local trust login the
+        catalog also has lets the admin in to change the password.
+        """
+        utils.poll_until(self.agent_is_up, sleep_time=2,
+                         time_out=CONF.state_change_wait_time)
+        LOG.info('Reviving the database from %s.', communal['location'])
+        try:
+            self.vcluster('revive_db', '--db-name', DB_NAME,
+                          '--hosts', ','.join(hosts),
+                          '--communal-storage-location',
+                          communal['location'],
+                          '--config-param', s3_params(communal))
+        except exception.TroveError as e:
+            # Another cluster on the bucket holds its lease, for one.
+            raise exception.TroveError(redact(str(e)))
+        LOG.info('Starting the revived database.')
+        try:
+            self.vcluster('start_db', '--db-name', DB_NAME,
+                          '--password-file',
+                          f'{CONTAINER_CONF_DIR}/{ADMIN_SECRET}',
+                          '--timeout', str(CONF.state_change_wait_time))
+        except exception.TroveError as e:
+            LOG.info('start_db could not confirm the revived nodes, as '
+                     'expected: %s', redact(str(e))[-200:])
+        utils.poll_until(self._answers_locally, sleep_time=5,
+                         time_out=CONF.state_change_wait_time)
+        self.reset_admin_password()
+
+    def _answers_locally(self):
+        try:
+            self.adm.run(['SELECT 1'])
+            return True
+        except exception.TroveError:
+            return False
 
     def set_communal_credential(self, access, secret):
         """The EC2 credential an Eon Mode database reaches its communal

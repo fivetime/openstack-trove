@@ -476,3 +476,48 @@ class ClusterTest(trove_testtools.TestCase):
                        self.datastore_version)
         self.assertRaises(exception.BadRequest,
                           base.reset_communal_credential)
+
+    # revive_from.
+
+    def test_revive_from_a_bucket_of_the_project(self):
+        self._eon_enabled()
+        context = Mock(user_id='user-1')
+        mock_db, _configs = self._create(
+            {'revive_from': 'trove-vertica-old'}, context)
+        mock_db.return_value.save_properties.assert_called_once_with(
+            {'storage_mode': 'eon', 'sync_writes': False,
+             'revive_from': 'trove-vertica-old',
+             'communal_bucket': 'trove-vertica-old',
+             'ec2_user_id': 'user-1'})
+
+    def test_revive_from_is_refused(self):
+        for props, enabled in (
+                ({'revive_from': 'trove-vertica-old'}, False),
+                ({'revive_from': 'trove-vertica-old',
+                  'storage_mode': 'enterprise'}, True),
+                ({'revive_from': 'Not_A/Bucket'}, True),
+                ({'revive_from': ''}, True)):
+            if enabled:
+                CONF.set_override('eon_enabled', True, group='vertica')
+            else:
+                CONF.clear_override('eon_enabled', group='vertica')
+            with patch.object(DBCluster, 'create') as mock_db:
+                self.assertRaises(
+                    exception.BadRequest, self.cluster.create, Mock(),
+                    self.cluster_name, self.datastore,
+                    self.datastore_version, self.instances, props,
+                    None, None)
+            mock_db.assert_not_called()
+        CONF.clear_override('eon_enabled', group='vertica')
+
+    def test_a_revived_cluster_shows_where_from(self):
+        self.assertEqual(
+            {'storage_mode': 'eon', 'sync_writes': False,
+             'communal_bucket': 'b', 'revive_from': 'b'},
+            vertica_api.shown_properties(
+                {'storage_mode': 'eon', 'communal_bucket': 'b',
+                 'revive_from': 'b', 'communal_owner': True}))
+        self.assertEqual(
+            'new', vertica_api.shown_properties(
+                {'storage_mode': 'eon', 'communal_bucket': 'b',
+                 'communal_moved_to': 'new'})['communal_moved_to'])

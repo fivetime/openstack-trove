@@ -498,6 +498,70 @@ class TestVerticaApp(VerticaGuestTestCase):
         args = self._create_db_args(hosts=['10.0.0.1'], communal=https)
         self.assertIn('AWSEnableHttps=1', value('--config-param'))
 
+    def test_a_database_revived_from_its_bucket(self):
+        app = self._app()
+        revive = dict(self.COMMUNAL, revive=True)
+        calls = []
+
+        def vcluster(*args):
+            calls.append(args)
+            if args[0] == 'start_db':
+                # The revived catalog has the old admin password.
+                raise exception.TroveError(
+                    'wrong password/certificate AWSAuth=AK:SK')
+        with mock.patch.object(vertica_service.VerticaApp, 'vcluster',
+                               side_effect=vcluster), \
+                mock.patch.object(vertica_service.VerticaApp,
+                                  'agent_is_up', return_value=True), \
+                mock.patch.object(vertica_service.VerticaApp,
+                                  '_answers_locally', return_value=True), \
+                mock.patch.object(vertica_service.VerticaApp,
+                                  'reset_admin_password') as reset, \
+                mock.patch.object(vertica_service.VerticaApp,
+                                  'create_database') as create:
+            app.revive_database(['10.0.0.1', '10.0.0.2'], revive)
+        revive_args = list(calls[0])
+        self.assertEqual('revive_db', revive_args[0])
+        value = (lambda flag: revive_args[revive_args.index(flag) + 1])
+        self.assertEqual('10.0.0.1,10.0.0.2', value('--hosts'))
+        self.assertEqual('s3://trove-vertica-c1/db',
+                         value('--communal-storage-location'))
+        self.assertIn('AWSEndpoint=10.0.0.10:80', value('--config-param'))
+        self.assertEqual('start_db', calls[1][0])
+        reset.assert_called_once_with()
+        create.assert_not_called()
+
+    def test_install_cluster_revives_or_creates(self):
+        app = self._app()
+        with mock.patch.object(vertica_service.VerticaApp,
+                               'revive_database') as revive, \
+                mock.patch.object(vertica_service.VerticaApp,
+                                  'create_database') as create, \
+                mock.patch.object(vertica_service.VerticaApp,
+                                  'apply_settings'), \
+                mock.patch.object(vertica_service.operating_system,
+                                  'read_file', return_value='yaml'):
+            app.install_cluster(['h'], communal=dict(self.COMMUNAL,
+                                                     revive=True))
+            app.install_cluster(['h'], communal=dict(self.COMMUNAL,
+                                                     revive=False))
+        revive.assert_called_once_with(['h'], dict(self.COMMUNAL,
+                                                   revive=True))
+        create.assert_called_once_with(hosts=['h'], communal=dict(
+            self.COMMUNAL, revive=False))
+
+    def test_a_revive_that_fails_hides_the_secret(self):
+        app = self._app()
+        with mock.patch.object(vertica_service.VerticaApp, 'vcluster',
+                               side_effect=exception.TroveError(
+                                   'lease AWSAuth=AK:SK')), \
+                mock.patch.object(vertica_service.VerticaApp,
+                                  'agent_is_up', return_value=True):
+            error = self.assertRaises(
+                exception.TroveError, app.revive_database, ['h'],
+                dict(self.COMMUNAL, revive=True))
+        self.assertNotIn('SK', str(error))
+
     def test_an_enterprise_mode_database_has_no_communal_storage(self):
         args = self._create_db_args(hosts=['10.0.0.1'])
         for flag in ('--communal-storage-location', '--depot-path',

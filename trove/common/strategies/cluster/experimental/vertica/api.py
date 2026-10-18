@@ -11,6 +11,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
+
 from oslo_log import log as logging
 from oslo_utils import strutils
 
@@ -47,6 +49,10 @@ ENTERPRISE = 'enterprise'
 EON = 'eon'
 # The user whose EC2 credential the communal storage is reached with.
 EC2_USER = 'ec2_user_id'
+# A bucket of the project an Eon Mode database is revived from, the
+# communal storage of a cluster whose members are gone.
+REVIVE_FROM = 'revive_from'
+BUCKET_NAME = re.compile(r'^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$')
 
 
 def cluster_properties(extended_properties, conf=None):
@@ -56,7 +62,7 @@ def cluster_properties(extended_properties, conf=None):
     without a word.
     """
     props = dict(extended_properties or {})
-    known = (STORAGE_MODE, SYNC_WRITES)
+    known = (STORAGE_MODE, SYNC_WRITES, REVIVE_FROM)
     unknown = sorted(set(props) - set(known))
     if unknown:
         raise exception.BadRequest(_(
@@ -69,7 +75,9 @@ def cluster_properties(extended_properties, conf=None):
     except ValueError:
         raise exception.BadRequest(_(
             "%s must be true or false.") % SYNC_WRITES)
-    mode = str(props.get(STORAGE_MODE, ENTERPRISE)).lower()
+    revive_from = props.get(REVIVE_FROM)
+    mode = str(props.get(STORAGE_MODE,
+                         EON if revive_from else ENTERPRISE)).lower()
     if mode not in (ENTERPRISE, EON):
         raise exception.BadRequest(_(
             "%(name)s must be %(enterprise)s or %(eon)s.")
@@ -78,7 +86,16 @@ def cluster_properties(extended_properties, conf=None):
         raise exception.BadRequest(_(
             "Eon Mode is not available for Vertica clusters in this "
             "cloud."))
-    return {STORAGE_MODE: mode, SYNC_WRITES: sync}
+    properties = {STORAGE_MODE: mode, SYNC_WRITES: sync}
+    if revive_from is not None:
+        if mode != EON:
+            raise exception.BadRequest(_(
+                "%s revives an Eon Mode database.") % REVIVE_FROM)
+        if not BUCKET_NAME.match(str(revive_from)):
+            raise exception.BadRequest(_(
+                "%s must be the name of a bucket.") % REVIVE_FROM)
+        properties[REVIVE_FROM] = str(revive_from)
+    return properties
 
 
 def member_settings(properties):
@@ -96,6 +113,10 @@ def shown_properties(properties):
              SYNC_WRITES: bool(properties.get(SYNC_WRITES))}
     if shown[STORAGE_MODE] == EON:
         shown['communal_bucket'] = properties.get('communal_bucket')
+    for name in (REVIVE_FROM, 'communal_moved_to'):
+        value = properties.get(name)
+        if value:
+            shown[name] = value
     return shown
 
 
@@ -226,9 +247,11 @@ class VerticaCluster(models.Cluster):
             datastore_version_id=datastore_version.id,
             task_status=ClusterTasks.BUILDING_INITIAL)
         if properties[STORAGE_MODE] == EON:
-            # The bucket is named after the cluster; the task manager
-            # creates it with an EC2 credential of this user.
-            properties['communal_bucket'] = communal.bucket_name(db_info.id)
+            # A new bucket is named after the cluster, and the task manager
+            # creates it; a revived database takes the bucket it is revived
+            # from. Both with an EC2 credential of this user.
+            properties['communal_bucket'] = properties.get(
+                REVIVE_FROM) or communal.bucket_name(db_info.id)
             properties[EC2_USER] = context.user_id
         db_info.save_properties(properties)
 
