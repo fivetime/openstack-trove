@@ -1,15 +1,15 @@
 {
- "set": "rs",
+ "set": "rs1",
  "date": {
   "$date": {
-   "$numberLong": "1792383459814"
+   "$numberLong": "1792413022793"
   }
  },
  "myState": {
   "$numberInt": "3"
  },
  "term": {
-  "$numberLong": "1"
+  "$numberLong": "3"
  },
  "tooStale": true,
  "syncSourceHost": "",
@@ -35,8 +35,8 @@
   "lastCommittedOpTime": {
    "ts": {
     "$timestamp": {
-     "t": 1792383452,
-     "i": 20
+     "t": 1792412482,
+     "i": 1
     }
    },
    "t": {
@@ -45,14 +45,14 @@
   },
   "lastCommittedWallTime": {
    "$date": {
-    "$numberLong": "1792383452131"
+    "$numberLong": "1792412482218"
    }
   },
   "readConcernMajorityOpTime": {
    "ts": {
     "$timestamp": {
-     "t": 1792383379,
-     "i": 16
+     "t": 1792410792,
+     "i": 1
     }
    },
    "t": {
@@ -62,8 +62,8 @@
   "appliedOpTime": {
    "ts": {
     "$timestamp": {
-     "t": 1792383379,
-     "i": 16
+     "t": 1792410792,
+     "i": 1
     }
    },
    "t": {
@@ -73,8 +73,8 @@
   "durableOpTime": {
    "ts": {
     "$timestamp": {
-     "t": 1792383379,
-     "i": 16
+     "t": 1792410792,
+     "i": 1
     }
    },
    "t": {
@@ -84,8 +84,8 @@
   "writtenOpTime": {
    "ts": {
     "$timestamp": {
-     "t": 1792383379,
-     "i": 16
+     "t": 1792410792,
+     "i": 1
     }
    },
    "t": {
@@ -94,24 +94,86 @@
   },
   "lastAppliedWallTime": {
    "$date": {
-    "$numberLong": "1792383379748"
+    "$numberLong": "1792410792151"
    }
   },
   "lastDurableWallTime": {
    "$date": {
-    "$numberLong": "1792383379748"
+    "$numberLong": "1792410792151"
    }
   },
   "lastWrittenWallTime": {
    "$date": {
-    "$numberLong": "1792383379748"
+    "$numberLong": "1792410792151"
    }
   }
  },
  "lastStableRecoveryTimestamp": {
   "$timestamp": {
-   "t": 1792383368,
+   "t": 1792410792,
    "i": 1
+  }
+ },
+ "electionParticipantMetrics": {
+  "votedForCandidate": true,
+  "electionTerm": {
+   "$numberLong": "3"
+  },
+  "lastVoteDate": {
+   "$date": {
+    "$numberLong": "1792412704303"
+   }
+  },
+  "electionCandidateMemberId": {
+   "$numberInt": "0"
+  },
+  "voteReason": "",
+  "lastWrittenOpTimeAtElection": {
+   "ts": {
+    "$timestamp": {
+     "t": 1792410792,
+     "i": 1
+    }
+   },
+   "t": {
+    "$numberLong": "1"
+   }
+  },
+  "maxWrittenOpTimeInSet": {
+   "ts": {
+    "$timestamp": {
+     "t": 1792412693,
+     "i": 1
+    }
+   },
+   "t": {
+    "$numberLong": "2"
+   }
+  },
+  "lastAppliedOpTimeAtElection": {
+   "ts": {
+    "$timestamp": {
+     "t": 1792410792,
+     "i": 1
+    }
+   },
+   "t": {
+    "$numberLong": "1"
+   }
+  },
+  "maxAppliedOpTimeInSet": {
+   "ts": {
+    "$timestamp": {
+     "t": 1792412693,
+     "i": 1
+    }
+   },
+   "t": {
+    "$numberLong": "2"
+   }
+  },
+  "priorityAtElection": {
+   "$numberInt": "1"
   }
  },
  "members": [
@@ -119,7 +181,7 @@
    "_id": {
     "$numberInt": "0"
    },
-   "name": "m1:27017",
+   "name": "192.168.1.112:27017",
    "health": {
     "$numberInt": "1"
    },
@@ -128,79 +190,79 @@
    },
    "stateStr": "PRIMARY",
    "uptime": {
-    "$numberInt": "5"
+    "$numberInt": "2110"
    },
    "optime": {
     "ts": {
      "$timestamp": {
-      "t": 1792383452,
-      "i": 20
+      "t": 1792413015,
+      "i": 1
      }
     },
     "t": {
-     "$numberLong": "1"
+     "$numberLong": "3"
     }
    },
    "optimeDurable": {
     "ts": {
      "$timestamp": {
-      "t": 1792383452,
-      "i": 20
+      "t": 1792413015,
+      "i": 1
      }
     },
     "t": {
-     "$numberLong": "1"
+     "$numberLong": "3"
     }
    },
    "optimeWritten": {
     "ts": {
      "$timestamp": {
-      "t": 1792383452,
-      "i": 20
+      "t": 1792413015,
+      "i": 1
      }
     },
     "t": {
-     "$numberLong": "1"
+     "$numberLong": "3"
     }
    },
    "optimeDate": {
     "$date": {
-     "$numberLong": "1792383452000"
+     "$numberLong": "1792413015000"
     }
    },
    "optimeDurableDate": {
     "$date": {
-     "$numberLong": "1792383452000"
+     "$numberLong": "1792413015000"
     }
    },
    "optimeWrittenDate": {
     "$date": {
-     "$numberLong": "1792383452000"
+     "$numberLong": "1792413015000"
     }
    },
    "lastAppliedWallTime": {
     "$date": {
-     "$numberLong": "1792383452131"
+     "$numberLong": "1792413015499"
     }
    },
    "lastDurableWallTime": {
     "$date": {
-     "$numberLong": "1792383452131"
+     "$numberLong": "1792413015499"
     }
    },
    "lastWrittenWallTime": {
     "$date": {
-     "$numberLong": "1792383452131"
+     "$numberLong": "1792413015499"
     }
    },
    "lastHeartbeat": {
     "$date": {
-     "$numberLong": "1792383459483"
+     "$numberLong": "1792413022517"
     }
    },
    "lastHeartbeatRecv": {
     "$date": {
-     "$numberLong": "1792383458751"
+     "$numberLong": "1792413021572"
     }
    },
    "pingMs": {
@@ -214,27 +276,27 @@
    "infoMessage": "",
    "electionTime": {
     "$timestamp": {
-     "t": 1792383379,
+     "t": 1792412704,
      "i": 1
     }
    },
    "electionDate": {
     "$date": {
-     "$numberLong": "1792383379000"
+     "$numberLong": "1792412704000"
     }
    },
    "configVersion": {
-    "$numberInt": "1"
+    "$numberInt": "4"
    },
    "configTerm": {
-    "$numberInt": "1"
+    "$numberInt": "3"
    }
   },
   {
    "_id": {
     "$numberInt": "1"
    },
-   "name": "m2:27017",
+   "name": "192.168.1.150:27017",
    "health": {
     "$numberInt": "1"
    },
@@ -243,102 +305,102 @@
    },
    "stateStr": "SECONDARY",
    "uptime": {
-    "$numberInt": "5"
+    "$numberInt": "136"
    },
    "optime": {
     "ts": {
      "$timestamp": {
-      "t": 1792383452,
-      "i": 20
+      "t": 1792413015,
+      "i": 1
      }
     },
     "t": {
-     "$numberLong": "1"
+     "$numberLong": "3"
     }
    },
    "optimeDurable": {
     "ts": {
      "$timestamp": {
-      "t": 1792383452,
-      "i": 20
+      "t": 1792413015,
+      "i": 1
      }
     },
     "t": {
-     "$numberLong": "1"
+     "$numberLong": "3"
     }
    },
    "optimeWritten": {
     "ts": {
      "$timestamp": {
-      "t": 1792383452,
-      "i": 20
+      "t": 1792413015,
+      "i": 1
      }
     },
     "t": {
-     "$numberLong": "1"
+     "$numberLong": "3"
     }
    },
    "optimeDate": {
     "$date": {
-     "$numberLong": "1792383452000"
+     "$numberLong": "1792413015000"
     }
    },
    "optimeDurableDate": {
     "$date": {
-     "$numberLong": "1792383452000"
+     "$numberLong": "1792413015000"
     }
    },
    "optimeWrittenDate": {
     "$date": {
-     "$numberLong": "1792383452000"
+     "$numberLong": "1792413015000"
     }
    },
    "lastAppliedWallTime": {
     "$date": {
-     "$numberLong": "1792383452131"
+     "$numberLong": "1792413015499"
     }
    },
    "lastDurableWallTime": {
     "$date": {
-     "$numberLong": "1792383452131"
+     "$numberLong": "1792413015499"
     }
    },
    "lastWrittenWallTime": {
     "$date": {
-     "$numberLong": "1792383452131"
+     "$numberLong": "1792413015499"
     }
    },
    "lastHeartbeat": {
     "$date": {
-     "$numberLong": "1792383459483"
+     "$numberLong": "1792413022520"
     }
    },
    "lastHeartbeatRecv": {
     "$date": {
-     "$numberLong": "1792383457818"
+     "$numberLong": "1792413022679"
     }
    },
    "pingMs": {
     "$numberLong": "0"
    },
    "lastHeartbeatMessage": "",
-   "syncSourceHost": "m1:27017",
+   "syncSourceHost": "192.168.1.112:27017",
    "syncSourceId": {
     "$numberInt": "0"
    },
    "infoMessage": "",
    "configVersion": {
-    "$numberInt": "1"
+    "$numberInt": "4"
    },
    "configTerm": {
-    "$numberInt": "1"
+    "$numberInt": "3"
    }
   },
   {
    "_id": {
     "$numberInt": "2"
    },
-   "name": "m3:27017",
+   "name": "192.168.1.96:27017",
    "health": {
     "$numberInt": "1"
    },
@@ -347,13 +409,13 @@
    },
    "stateStr": "RECOVERING",
    "uptime": {
-    "$numberInt": "7"
+    "$numberInt": "2112"
    },
    "optime": {
     "ts": {
      "$timestamp": {
-      "t": 1792383379,
-      "i": 16
+      "t": 1792410792,
+      "i": 1
      }
     },
     "t": {
@@ -362,14 +424,14 @@
    },
    "optimeDate": {
     "$date": {
-     "$numberLong": "1792383379000"
+     "$numberLong": "1792410792000"
     }
    },
    "optimeWritten": {
     "ts": {
      "$timestamp": {
-      "t": 1792383379,
-      "i": 16
+      "t": 1792410792,
+      "i": 1
      }
     },
     "t": {
@@ -378,22 +440,22 @@
    },
    "optimeWrittenDate": {
     "$date": {
-     "$numberLong": "1792383379000"
+     "$numberLong": "1792410792000"
     }
    },
    "lastAppliedWallTime": {
     "$date": {
-     "$numberLong": "1792383379748"
+     "$numberLong": "1792410792151"
     }
    },
    "lastDurableWallTime": {
     "$date": {
-     "$numberLong": "1792383379748"
+     "$numberLong": "1792410792151"
     }
    },
    "lastWrittenWallTime": {
     "$date": {
-     "$numberLong": "1792383379748"
+     "$numberLong": "1792410792151"
     }
    },
    "syncSourceHost": "",
@@ -405,10 +467,10 @@
    },
    "infoMessage": "",
    "configVersion": {
-    "$numberInt": "1"
+    "$numberInt": "4"
    },
    "configTerm": {
-    "$numberInt": "1"
+    "$numberInt": "3"
    },
    "self": true,
    "lastHeartbeatMessage": ""

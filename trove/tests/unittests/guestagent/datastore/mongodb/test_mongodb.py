@@ -11,6 +11,7 @@
 #    under the License.
 
 import copy
+import datetime
 import inspect
 import json
 import os
@@ -19,6 +20,7 @@ from unittest import mock
 from bson import json_util
 from oslo_config import cfg as oslo_cfg
 from oslo_utils import importutils
+from oslo_utils import timeutils
 
 import trove
 from trove.common import cfg
@@ -694,35 +696,71 @@ def _replset(name):
 
 class TestMongoDBStaleMember(MongoDBGuestTestCase):
 
-    def _adm(self, status, oldest=None):
+    # Captured from a Trove MongoDB 8.2 member that was powered off while
+    # more than its oplog was written (2026-10-19): it stays RECOVERING and
+    # its server turns down both other members as sync sources, each about
+    # once a minute.
+    CAPTURED = datetime.datetime(2026, 10, 19, 12, 30, 22)
+
+    def _adm(self, status, *logs):
         adm = mongodb_service.MongoDBAdmin(_app(_render()))
         adm.get_repl_status = mock.Mock(return_value=status)
-        adm.oldest_oplog_entry = mock.Mock(
-            return_value=_replset('oldest-m1')['ts'] if oldest is None
-            else oldest)
+        adm._run = mock.Mock(side_effect=[_replset(n) for n in logs])
+        timeutils.set_time_override(self.CAPTURED)
+        self.addCleanup(timeutils.clear_time_override)
         return adm
 
-    def test_a_stale_member_is_found_by_what_it_means(self):
+    def test_a_stale_member_is_found_by_what_its_server_logs(self):
         # replSetGetStatus says nothing of it: no infoMessage, no
-        # lastHeartbeatMessage; "Too stale to catch up" is in the log only.
+        # lastHeartbeatMessage.
         status = _replset('status-stale')
         me = [m for m in status['members'] if m.get('self')][0]
         self.assertEqual('RECOVERING', me['stateStr'])
         self.assertEqual('', me.get('infoMessage', ''))
-        adm = self._adm(status)
+        adm = self._adm(status, 'getlog-stale')
 
         reason = adm.staleness()
 
-        self.assertIn('m1:27017, m2:27017', reason)
-        self.assertEqual(['m1:27017', 'm2:27017'],
-                         [c[0][0] for c in
-                          adm.oldest_oplog_entry.call_args_list])
+        self.assertIn('192.168.1.112:27017, 192.168.1.150:27017', reason)
+        adm._run.assert_called_once_with('getLog', 'global')
 
-    def test_a_member_one_source_can_still_feed_is_not_stale(self):
-        status = _replset('status-stale')
-        adm = self._adm(status,
-                        oldest=status['optimes']['appliedOpTime']['ts'])
+    def test_what_the_log_tells(self):
+        adm = self._adm(_replset('status-stale'), 'getlog-stale')
+        self.assertEqual(
+            {'192.168.1.150:27017': datetime.datetime(
+                2026, 10, 19, 12, 30, 11, 6000),
+             '192.168.1.112:27017': datetime.datetime(
+                 2026, 10, 19, 12, 30, 21, 13000)},
+            adm.too_stale_for())
+
+    def test_what_was_seen_before_counts(self):
+        # The server keeps less than two minutes of its log: a member it
+        # turned down a minute ago may be gone from it already.
+        adm = self._adm(_replset('status-stale'), 'getlog-stale-one',
+                        'getlog-stale-one', 'getlog-stale')
         self.assertIsNone(adm.staleness())
+        self.assertIsNone(adm.staleness())
+        self.assertIsNotNone(adm.staleness())
+
+    def test_what_was_seen_long_ago_does_not(self):
+        adm = self._adm(_replset('status-stale'), 'getlog-stale',
+                        'getlog-stale-one')
+        self.assertIsNotNone(adm.staleness())
+        # A member it has not turned down again since: maybe it can sync.
+        timeutils.advance_time_seconds(
+            mongodb_service.TOO_STALE_WITHIN - 10)
+        self.assertIsNone(adm.staleness())
+        # An older line read later keeps the newer time.
+        self.assertEqual(
+            datetime.datetime(2026, 10, 19, 12, 30, 21, 13000),
+            adm._too_stale_for['192.168.1.112:27017'])
+
+    def test_a_member_that_catches_up_forgets(self):
+        adm = self._adm(_replset('status-stale'), 'getlog-stale')
+        self.assertIsNotNone(adm.staleness())
+        adm.get_repl_status.return_value = _replset('status-secondary')
+        self.assertIsNone(adm.staleness())
+        self.assertEqual({}, adm._too_stale_for)
 
     def test_nothing_is_done_without_a_primary(self):
         status = _replset('status-stale')
@@ -731,32 +769,12 @@ class TestMongoDBStaleMember(MongoDBGuestTestCase):
                 member['state'], member['stateStr'] = 2, 'SECONDARY'
         adm = self._adm(status)
         self.assertIsNone(adm.staleness())
-        adm.oldest_oplog_entry.assert_not_called()
+        adm._run.assert_not_called()
 
     def test_a_secondary_is_not_stale(self):
         adm = self._adm(_replset('status-secondary'))
         self.assertIsNone(adm.staleness())
-        adm.oldest_oplog_entry.assert_not_called()
-
-    @mock.patch.object(mongodb_service.pymongo, 'MongoClient')
-    def test_the_oldest_entry_of_another_member(self, mock_client):
-        adm = mongodb_service.MongoDBAdmin(_app(_render()))
-        client = mock.MagicMock()
-        mock_client.return_value.__enter__.return_value = client
-        client.local.__getitem__.return_value.find_one.return_value = \
-            _replset('oldest-m1')
-        with mock.patch.object(mongodb_service.MongoDBApp, 'admin_password',
-                               new_callable=mock.PropertyMock,
-                               return_value='pw'):
-            ts = adm.oldest_oplog_entry('m1:27017')
-        self.assertEqual(_replset('oldest-m1')['ts'], ts)
-        kwargs = mock_client.call_args[1]
-        self.assertEqual('m1:27017', kwargs['host'])
-        self.assertTrue(kwargs['directConnection'])
-        self.assertEqual('os_admin', kwargs['username'])
-        client.local.__getitem__.assert_called_once_with('oplog.rs')
-        self.assertEqual([('$natural', 1)], client.local.__getitem__.
-                         return_value.find_one.call_args[1]['sort'])
+        adm._run.assert_not_called()
 
     def test_the_retention_as_the_server_reports_it(self):
         # Not in serverStatus at all until it is set.

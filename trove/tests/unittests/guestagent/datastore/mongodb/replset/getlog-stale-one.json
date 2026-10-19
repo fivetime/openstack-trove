@@ -1,0 +1,30 @@
+{
+ "totalLinesWritten": {
+  "$numberInt": "18065"
+ },
+ "log": [
+  "{\"t\":{\"$date\":\"2026-10-19T12:27:16.618+00:00\"},\"s\":\"I\",  \"c\":\"REPL\",     \"id\":3873115, \"svc\":\"S\", \"ctx\":\"BackgroundSync\",\"msg\":\"Cannot select sync source which is denylisted\",\"attr\":{\"syncSourceCandidate\":\"192.168.1.112:27017\"}}\n",
+  "{\"t\":{\"$date\":\"2026-10-19T12:27:16.618+00:00\"},\"s\":\"I\",  \"c\":\"REPL\",     \"id\":3873106, \"svc\":\"S\", \"ctx\":\"BackgroundSync\",\"msg\":\"Cannot select sync source because it is not up\",\"attr\":{\"syncSourceCandidate\":\"192.168.1.150:27017\"}}\n",
+  "{\"t\":{\"$date\":\"2026-10-19T12:27:17.618+00:00\"},\"s\":\"I\",  \"c\":\"REPL\",     \"id\":3873115, \"svc\":\"S\", \"ctx\":\"BackgroundSync\",\"msg\":\"Cannot select sync source which is denylisted\",\"attr\":{\"syncSourceCandidate\":\"192.168.1.112:27017\"}}\n",
+  "{\"t\":{\"$date\":\"2026-10-19T12:27:17.618+00:00\"},\"s\":\"I\",  \"c\":\"REPL\",     \"id\":3873106, \"svc\":\"S\", \"ctx\":\"BackgroundSync\",\"msg\":\"Cannot select sync source because it is not up\",\"attr\":{\"syncSourceCandidate\":\"192.168.1.150:27017\"}}\n",
+  "{\"t\":{\"$date\":\"2026-10-19T12:27:17.618+00:00\"},\"s\":\"I\",  \"c\":\"REPL\",     \"id\":8423402, \"svc\":\"S\", \"ctx\":\"BackgroundSync\",\"msg\":\"Failed to select a sync source on the first attempt. Starting second attempt\"}\n",
+  "{\"t\":{\"$date\":\"2026-10-19T12:27:17.618+00:00\"},\"s\":\"I\",  \"c\":\"REPL\",     \"id\":3873115, \"svc\":\"S\", \"ctx\":\"BackgroundSync\",\"msg\":\"Cannot select sync source which is denylisted\",\"attr\":{\"syncSourceCandidate\":\"192.168.1.112:27017\"}}\n",
+  "{\"t\":{\"$date\":\"2026-10-19T12:27:17.618+00:00\"},\"s\":\"I\",  \"c\":\"REPL\",     \"id\":3873106, \"svc\":\"S\", \"ctx\":\"BackgroundSync\",\"msg\":\"Cannot select sync source because it is not up\",\"attr\":{\"syncSourceCandidate\":\"192.168.1.150:27017\"}}\n",
+  "{\"t\":{\"$date\":\"2026-10-19T12:27:18.619+00:00\"},\"s\":\"I\",  \"c\":\"REPL\",     \"id\":3873115, \"svc\":\"S\", \"ctx\":\"BackgroundSync\",\"msg\":\"Cannot select sync source which is denylisted\",\"attr\":{\"syncSourceCandidate\":\"192.168.1.112:27017\"}}\n",
+  "{\"t\":{\"$date\":\"2026-10-19T12:27:18.619+00:00\"},\"s\":\"I\",  \"c\":\"REPL\",     \"id\":3873106, \"svc\":\"S\", \"ctx\":\"BackgroundSync\",\"msg\":\"Cannot select sync source because it is not up\",\"attr\":{\"syncSourceCandidate\":\"192.168.1.150:27017\"}}\n",
+  "{\"t\":{\"$date\":\"2026-10-19T12:27:18.619+00:00\"},\"s\":\"I\",  \"c\":\"REPL\",     \"id\":8423402, \"svc\":\"S\", \"ctx\":\"BackgroundSync\",\"msg\":\"Failed to select a sync source on the first attempt. Starting second attempt\"}\n",
+  "{\"t\":{\"$date\":\"2026-10-19T12:27:18.619+00:00\"},\"s\":\"I\",  \"c\":\"REPL\",     \"id\":3873115, \"svc\":\"S\", \"ctx\":\"BackgroundSync\",\"msg\":\"Cannot select sync source which is denylisted\",\"attr\":{\"syncSourceCandidate\":\"192.168.1.112:27017\"}}\n",
+  "{\"t\":{\"$date\":\"2026-10-19T12:27:18.619+00:00\"},\"s\":\"I\",  \"c\":\"REPL\",     \"id\":3873106, \"svc\":\"S\", \"ctx\":\"BackgroundSync\",\"msg\":\"Cannot select sync source because it is not up\",\"attr\":{\"syncSourceCandidate\":\"192.168.1.150:27017\"}}\n",
+  "{\"t\":{\"$date\":\"2026-10-19T12:27:19.619+00:00\"},\"s\":\"I\",  \"c\":\"REPL\",     \"id\":3873115, \"svc\":\"S\", \"ctx\":\"BackgroundSync\",\"msg\":\"Cannot select sync source which is denylisted\",\"attr\":{\"syncSourceCandidate\":\"192.168.1.112:27017\"}}\n",
+  "{\"t\":{\"$date\":\"2026-10-19T12:27:19.619+00:00\"},\"s\":\"I\",  \"c\":\"REPL\",     \"id\":3873106, \"svc\":\"S\", \"ctx\":\"BackgroundSync\",\"msg\":\"Cannot select sync source because it is not up\",\"attr\":{\"syncSourceCandidate\":\"192.168.1.150:27017\"}}\n",
+  "{\"t\":{\"$date\":\"2026-10-19T12:27:19.619+00:00\"},\"s\":\"I\",  \"c\":\"REPL\",     \"id\":8423402, \"svc\":\"S\", \"ctx\":\"BackgroundSync\",\"msg\":\"Failed to select a sync source on the first attempt. Starting second attempt\"}\n",
+  "{\"t\":{\"$date\":\"2026-10-19T12:27:19.619+00:00\"},\"s\":\"I\",  \"c\":\"REPL\",     \"id\":3873115, \"svc\":\"S\", \"ctx\":\"BackgroundSync\",\"msg\":\"Cannot select sync source which is denylisted\",\"attr\":{\"syncSourceCandidate\":\"192.168.1.112:27017\"}}\n",
+  "{\"t\":{\"$date\":\"2026-10-19T12:27:19.619+00:00\"},\"s\":\"I\",  \"c\":\"REPL\",     \"id\":3873106, \"svc\":\"S\", \"ctx\":\"BackgroundSync\",\"msg\":\"Cannot select sync source because it is not up\",\"attr\":{\"syncSourceCandidate\":\"192.168.1.150:27017\"}}\n",
+  "{\"t\":{\"$date\":\"2026-10-19T12:27:20.619+00:00\"},\"s\":\"I\",  \"c\":\"REPL\",     \"id\":3873106, \"svc\":\"S\", \"ctx\":\"BackgroundSync\",\"msg\":\"Cannot select sync source because it is not up\",\"attr\":{\"syncSourceCandidate\":\"192.168.1.150:27017\"}}\n",
+  "{\"t\":{\"$date\":\"2026-10-19T12:27:20.620+00:00\"},\"s\":\"I\",  \"c\":\"REPL\",     \"id\":21799,   \"svc\":\"S\", \"ctx\":\"BackgroundSync\",\"msg\":\"Sync source candidate chosen\",\"attr\":{\"syncSource\":\"192.168.1.112:27017\"}}\n",
+  "{\"t\":{\"$date\":\"2026-10-19T12:27:20.621+00:00\"},\"s\":\"I\",  \"c\":\"REPL\",     \"id\":5579708, \"svc\":\"S\", \"ctx\":\"ReplCoordExtern-0\",\"msg\":\"We are too stale to use candidate as a sync source. Denylisting this sync source because our last fetched timestamp is before their earliest timestamp\",\"attr\":{\"candidate\":\"192.168.1.112:27017\",\"lastOpTimeFetchedTimestamp\":{\"$timestamp\":{\"t\":1792410792,\"i\":1}},\"remoteEarliestOpTimeTimestamp\":{\"$timestamp\":{\"t\":1792410814,\"i\":77}},\"denylistDurationMinutes\":1,\"denylistUntil\":{\"$date\":\"2026-10-19T12:28:20.621Z\"}}}\n"
+ ],
+ "ok": {
+  "$numberInt": "1"
+ }
+}

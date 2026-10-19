@@ -56,8 +56,9 @@ class Manager(manager.Manager):
                       else None)
         except Exception as e:
             # Before the member has its admin user, or while the set is
-            # being changed: nothing to do now.
-            LOG.debug("Replica set maintenance skipped: %s", e)
+            # being changed: nothing to do now. Not at debug level: a
+            # check that always fails would never be seen.
+            LOG.info("Replica set maintenance skipped: %s", e)
             return
         if reason is None:
             self._stale_since = None

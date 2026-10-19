@@ -52,8 +52,7 @@ MongoDB: members that fell behind
 
 A replica set member (of a shard, or a config server) that was down for
 longer than the oplog of the other members covers can never catch up: it
-stays ``RECOVERING``, with ``Too stale to catch up`` in its log and
-nothing in ``replSetGetStatus`` to say so. The way back MongoDB documents
+stays ``RECOVERING``, with nothing in ``replSetGetStatus`` to say why. The way back MongoDB documents
 is an initial sync from an empty data directory.
 
 Two options keep a cluster out of this, and get it out:
@@ -71,10 +70,16 @@ Two options keep a cluster out of this, and get it out:
   Whether a member that is too stale to catch up resyncs by itself: it
   stops, empties its data directory and starts again, and MongoDB copies
   the data from the others. A member counts as too stale when it is
-  ``RECOVERING``, the set has a primary, and the oplog of every member it
-  could sync from starts after the last write it applied; when anything
-  cannot be asked, it does not count. Its data is behind the others' and
-  has nothing they lack.
+  ``RECOVERING``, the set has a primary, and its server turned down every
+  member it could sync from within the last five minutes because the
+  oplog of that member starts after the last write it fetched. The
+  server compares this itself and logs each candidate it turns down (log
+  id 5579708, about once a minute each); the guest agent reads those
+  lines from the log the server keeps in memory (``getLog``). It never
+  connects to another member, which with network isolation only the
+  database container could. When anything cannot be asked, the member
+  does not count as stale. Its data is behind the others' and has
+  nothing they lack.
 ``resync_stale_after`` (``300``)
   Seconds a member has been too stale before it resyncs.
 

@@ -10,11 +10,14 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import datetime
+import json
 import os
 import urllib.parse
 
 from oslo_log import log as logging
 from oslo_utils import netutils
+from oslo_utils import timeutils
 import pymongo
 from pymongo import errors as pymongo_errors
 
@@ -72,6 +75,12 @@ RS_PRIMARY = 1
 RS_RECOVERING = 3
 # The change of the configuration that keeps the oplog retention.
 CNF_OPLOG = 'oplog'
+# A member logs this (MongoDB log id 5579708) each time it turns down a
+# candidate sync source whose oplog starts after the last write it fetched,
+# and does not ask that candidate again for a minute.
+LOG_ID_TOO_STALE = 5579708
+# How recently every member that could feed it must have been turned down so.
+TOO_STALE_WITHIN = 300
 
 
 def socket_path(port):
@@ -621,6 +630,9 @@ class MongoDBAdmin(object):
 
     def __init__(self, app):
         self.app = app
+        # The members this one found too stale to sync from, by when it
+        # last did: {host: UTC time}, kept across staleness() calls.
+        self._too_stale_for = {}
 
     def _client(self, authenticate=True):
         # pymongo takes a socket only in its URI form.
@@ -874,48 +886,54 @@ class MongoDBAdmin(object):
     def set_oplog_min_retention_hours(self, hours):
         self._run('replSetResizeOplog', minRetentionHours=hours)
 
-    def _member_client(self, host):
-        return pymongo.MongoClient(
-            host=host, directConnection=True,
-            serverSelectionTimeoutMS=10000, username=ADMIN_USER,
-            password=self.app.admin_password, authSource='admin')
-
-    def oldest_oplog_entry(self, host):
-        """The time of the oldest write the oplog of a member still
-        has, the earliest a member syncing from it can have.
+    def too_stale_for(self):
+        """The candidates this member last turned down as sync sources
+        for being too stale, from the last lines of its log the server
+        keeps in memory: {host: UTC time}.
         """
-        with self._member_client(host) as client:
-            entry = client.local['oplog.rs'].find_one(
-                {}, {'ts': 1}, sort=[('$natural', 1)])
-        return entry['ts'] if entry else None
+        found = {}
+        for line in self._run('getLog', 'global')['log']:
+            entry = json.loads(line)
+            if entry.get('id') == LOG_ID_TOO_STALE:
+                found[entry['attr']['candidate']] = timeutils.normalize_time(
+                    timeutils.parse_isotime(entry['t']['$date']))
+        return found
 
     def staleness(self):
         """Why this member can never catch up, or None.
 
         A member that was down for longer than the oplog of the others
-        covers stays RECOVERING ("Too stale to catch up", in its log only;
-        replSetGetStatus says nothing of it). It is found here by what it
-        means: the member is RECOVERING, the set has a primary, and the
-        oplog of every member it could sync from starts after the last
-        write it applied. Anything that cannot be asked counts as not
-        stale.
+        covers stays RECOVERING; replSetGetStatus says nothing of why.
+        The server itself compares its last write with the start of the
+        oplog of each candidate sync source, and logs each one it turns
+        down for that. This member is stale when it is RECOVERING, the
+        set has a primary, and every member it could sync from has been
+        turned down so within TOO_STALE_WITHIN seconds. The server keeps
+        only its last log lines in memory, so what is seen is kept across
+        calls. Nothing here connects to another member: with network
+        isolation only the database container is on the members' network.
         """
         status = self.get_repl_status()
         me = next(m for m in status['members'] if m.get('self'))
         if me['state'] != RS_RECOVERING:
+            self._too_stale_for.clear()
             return None
-        sources = [m for m in status['members']
+        sources = [m['name'] for m in status['members']
                    if not m.get('self') and m.get('health') == 1 and
                    m['state'] in RS_HEALTHY_STATES]
-        if not any(m['state'] == RS_PRIMARY for m in sources):
+        if not any(m['state'] == RS_PRIMARY for m in status['members']
+                   if m['name'] in sources):
             return None
-        applied = status['optimes']['appliedOpTime']['ts']
-        for member in sources:
-            oldest = self.oldest_oplog_entry(member['name'])
-            if oldest is None or oldest <= applied:
-                return None
-        return ("its last applied write %s is older than the oplog of %s"
-                % (applied, ', '.join(m['name'] for m in sources)))
+        for host, when in self.too_stale_for().items():
+            self._too_stale_for[host] = max(
+                when, self._too_stale_for.get(host, when))
+        since = timeutils.utcnow() - datetime.timedelta(
+            seconds=TOO_STALE_WITHIN)
+        if any(self._too_stale_for.get(host, datetime.datetime.min) < since
+               for host in sources):
+            return None
+        return ("the oplog of %s starts after its last write"
+                % ', '.join(sources))
 
     def is_primary(self):
         """Whether this member is the primary of its replica set.

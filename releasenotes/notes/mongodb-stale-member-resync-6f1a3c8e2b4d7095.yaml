@@ -6,8 +6,9 @@ features:
     and so can never catch up, syncs again from the others by itself: it
     stops, empties its data directory and starts again, the way MongoDB
     documents to resync a stale member. It does so only while the set has
-    a primary and the oplog of every member it could sync from starts after
-    the last write it applied, and after it has been found so for
+    a primary and its server has turned down every member it could sync
+    from for having an oplog that starts after its last write (as the
+    server logs it), and after it has been found so for
     ``[mongodb] resync_stale_after`` seconds (default 300).
     ``[mongodb] resync_stale_members`` (default ``true``) turns it off.
   - |
