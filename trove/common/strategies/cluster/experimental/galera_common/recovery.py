@@ -46,6 +46,12 @@ class GaleraClusterRecovery(common_recovery.ClusterRecovery):
         position = answer.get('position') if answer else None
         return tuple(position) if position else None
 
+    def _member_out(self, answer):
+        return not answer.get('in_group')
+
+    def _serving(self, answers):
+        return any(answer.get('in_group') for answer in answers)
+
     def _position_text(self, answer):
         position = self._position(answer)
         return '%s:%s' % position if position else 'unknown'

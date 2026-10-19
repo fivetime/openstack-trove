@@ -57,7 +57,17 @@ LOG = logging.getLogger(__name__)
 def persisted_models():
     return {
         'clusters': DBCluster,
+        'cluster_health': DBClusterHealth,
     }
+
+
+class DBClusterHealth(dbmodels.DatabaseModelBase):
+    """The health of a cluster as the task manager last found it
+    (``trove.common.cluster_health``): its id is the cluster's; detail is
+    JSON ({'out', 'reason', 'members'}); since is when it last changed.
+    """
+    _data_fields = ['status', 'detail', 'since', 'created', 'updated']
+    _table_name = 'cluster_health'
 
 
 class DBCluster(dbmodels.DatabaseModelBase):
@@ -221,6 +231,23 @@ class Cluster(object):
     @property
     def deleted_at(self):
         return self.db_info.deleted_at
+
+    @property
+    def health(self):
+        """The cluster's health as the task manager last recorded it
+        (a DBClusterHealth), None when it has not yet; loaded once, or
+        given by the list that loads them all at once.
+        """
+        if not hasattr(self, '_health'):
+            try:
+                self._health = DBClusterHealth.find_by(id=self.id)
+            except exception.NotFound:
+                self._health = None
+        return self._health
+
+    @health.setter
+    def health(self, row):
+        self._health = row
 
     @property
     def configuration_id(self):

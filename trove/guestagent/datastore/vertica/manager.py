@@ -16,6 +16,7 @@ from oslo_service import periodic_task
 
 from trove.common import cfg
 from trove.common.notification import EndNotification
+from trove.guestagent.common import cluster_member
 from trove.guestagent.datastore import manager
 from trove.guestagent.datastore import service as base_service
 from trove.guestagent.datastore.vertica import service
@@ -26,13 +27,14 @@ CONF = cfg.CONF
 LICENSE_MODULE_TYPE = 'vertica_license'
 
 
-class Manager(manager.Manager):
+class Manager(cluster_member.ClusterWatchMixin, manager.Manager):
 
     def __init__(self):
         super(Manager, self).__init__('vertica')
         self.status = base_service.BaseDbStatus(self.docker_client)
         self.app = service.VerticaApp(self.status, self.docker_client)
         self.adm = self.app.adm
+        self.init_cluster_watch()
 
     @property
     def configuration_manager(self):

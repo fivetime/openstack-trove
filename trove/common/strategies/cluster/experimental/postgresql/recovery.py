@@ -68,6 +68,19 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
     manager.
     """
 
+    def _member_out(self, answer):
+        """Neither the primary nor a standby streaming from one."""
+        state = answer.get('state')
+        if state == topology.PRIMARY:
+            return False
+        return not (state == topology.STANDBY and
+                    (answer.get('receiver') or {}).get('status') ==
+                    topology.STREAMING)
+
+    def _serving(self, answers):
+        return any(a.get('state') == topology.PRIMARY and a.get('writable')
+                   for a in answers)
+
     def __init__(self, manager, guest_factory=None):
         super(PostgresqlClusterRecovery, self).__init__(manager,
                                                         guest_factory)

@@ -42,6 +42,14 @@ The probe runs every few seconds, apart from the guest agent's periodic
 tasks, which run every report interval: a failover has to show on the
 ready port within seconds.
 
+A datastore whose clusters heal themselves (Redis, MongoDB, Cassandra,
+Vertica) runs only the part that watches and tells, ``ClusterWatch``: its
+app gives ``is_cluster_member()``, ``member_view()`` and
+``cluster_health()``, what the member sees of its cluster from its own
+database (``trove.common.cluster_health``). The cluster is complete once
+the task manager says so (``enable_complete``), which the watch keeps on
+the data volume.
+
 The probe also tells the control plane, through the conductor, when the
 member's cluster state changes (``cluster_event``), and again every
 ``cluster_event_interval`` seconds while the member is not where it
@@ -62,8 +70,11 @@ from oslo_service import loopingcall
 from oslo_utils import timeutils
 
 from trove.common import cfg
+from trove.common import cluster_health
 from trove.common import context as trove_context
 from trove.conductor import api as conductor_api
+from trove.guestagent.common import guestagent_utils
+from trove.guestagent.common import operating_system
 from trove.guestagent.common import readyport
 
 LOG = logging.getLogger(__name__)
@@ -203,29 +214,25 @@ def decide(self_ip, self_position, peers, n_members, not_ahead,
     return BOOTSTRAP, 'majority here, out of the group, nothing missing'
 
 
-class ClusterProbe(object):
-    """Watches the member's state in the cluster, keeps the ready port
-    open on a member that takes writes, and brings a member that is out
-    of the cluster back.
+class ClusterWatch(object):
+    """Watches the member's state in its cluster and tells the control
+    plane when it is not where it should be, and what it sees of the
+    cluster.
 
     Started with the manager and quiet until the member is in a cluster;
     the manager's cluster calls tell it when the member joins, when the
     cluster is complete and when the member is leaving.
     """
 
-    def __init__(self, app, docker_client, conf=None):
+    # Where the watch keeps that the cluster is complete, for an app
+    # without is_cluster_complete(): in the data volume's conf.d.
+    COMPLETE_MARK = 'cluster_complete'
+
+    def __init__(self, app, conf=None):
         conf = conf or CONF.get(CONF.datastore_manager or 'mysql')
         self.app = app
         self.interval = conf.cluster_probe_interval
         self.query_timeout = conf.cluster_probe_timeout
-        self.reconcile_every = conf.cluster_ready_port_reconcile
-        self.recovery_grace = conf.cluster_recovery_grace
-        self.recovery_interval = conf.cluster_recovery_interval
-        self.peer_timeout = conf.cluster_peer_timeout
-        self.auto_bootstrap = conf.cluster_auto_bootstrap
-        self.needs_all = conf.cluster_bootstrap_needs_all_members
-        self.jitter = conf.cluster_bootstrap_jitter
-        self.last_recovery = 0
         # Telling the control plane: whether to, and the reporter that
         # decides when; a cast may block while the broker is away, so it
         # runs apart from the tick, one at a time.
@@ -236,14 +243,10 @@ class ClusterProbe(object):
             send=self._send_event)
         self._spawn = eventlet.spawn_n
         self._sending = False
-        self.port = readyport.ReadyPort(
-            docker_client, conf.cluster_ready_port, app.DATABASE_PORT)
-        # A second port, open on a member that serves reads (a standby of
-        # a primary), for a datastore whose conf has one.
-        read_port = getattr(conf, 'cluster_read_port', 0)
-        self.read_port = readyport.ReadyPort(
-            docker_client, read_port, app.DATABASE_PORT) if read_port else None
         self.view = UNKNOWN_MEMBER
+        # What the member sees of its cluster (cluster_health()), for an
+        # app that tells it; None otherwise or when it did not answer.
+        self.health = None
         self.since = time.monotonic()
         # Whether the member is in a cluster, whether the cluster is
         # complete (every member has joined) and whether the member is on
@@ -292,6 +295,12 @@ class ClusterProbe(object):
         self.complete = True
         self.leaving = False
         self._flags_loaded = True
+        if not hasattr(self.app, 'is_cluster_complete'):
+            try:
+                operating_system.write_file(
+                    self._complete_mark(), 'complete', as_root=True)
+            except Exception:
+                LOG.exception("Could not keep that the cluster is complete.")
 
     def disable(self):
         """The member is leaving the cluster: close the port, do nothing to
@@ -299,9 +308,22 @@ class ClusterProbe(object):
         """
         self.leaving = True
 
+    def _complete_mark(self):
+        return guestagent_utils.build_file_path(
+            guestagent_utils.get_conf_dir(), self.COMPLETE_MARK)
+
     def _load_flags(self):
-        self.member = self.app.is_cluster_member()
-        self.complete = self.member and self.app.is_cluster_complete()
+        # A datastore may watch more than its cluster members (the config
+        # servers of a MongoDB cluster).
+        watched = getattr(self.app, 'is_watched_member', None)
+        self.member = (watched or self.app.is_cluster_member)()
+        if not self.member:
+            self.complete = False
+        elif hasattr(self.app, 'is_cluster_complete'):
+            self.complete = self.app.is_cluster_complete()
+        else:
+            self.complete = operating_system.exists(
+                self._complete_mark(), as_root=True)
         self._flags_loaded = True
 
     def _probe_view(self):
@@ -312,6 +334,21 @@ class ClusterProbe(object):
         with eventlet.Timeout(self.query_timeout, False):
             view = self.app.member_view()
         return view
+
+    def _probe_health(self):
+        """What the member sees of its cluster; None when the app does not
+        tell it or the database does not answer in time.
+        """
+        tell = getattr(self.app, 'cluster_health', None)
+        if tell is None:
+            return None
+        health = None
+        try:
+            with eventlet.Timeout(self.query_timeout, False):
+                health = tell()
+        except Exception as err:
+            LOG.debug("No health of the cluster: %s", err)
+        return health
 
     def writable(self):
         return not self.leaving and bool(self.view.writable)
@@ -337,6 +374,125 @@ class ClusterProbe(object):
                      self.view.role, view.state, view.role)
             self.since = time.monotonic()
         self.view = view
+        if self.complete and not self.leaving:
+            self.health = self._probe_health()
+        self._serve(view)
+
+        # Tell the control plane, once the cluster is complete (a cluster
+        # being built is full of members not where they should be yet)
+        # and what the member serves is set: that never waits on it.
+        if self.events and self.complete and not self.leaving:
+            try:
+                self.reporter.observe(self._signal(view), view)
+            except Exception:
+                LOG.exception("The cluster event was not told; next tick.")
+        self._after(view)
+
+    def _serve(self, view):
+        """What the member does every tick before telling, if anything."""
+
+    def _after(self, view):
+        """What the member does every tick after telling, if anything."""
+
+    # Telling the control plane
+
+    def _signal(self, view):
+        """What the member says of its cluster state: the datastore's
+        word, or else abnormal when the member does not answer or is out
+        of the cluster.
+        """
+        hook = getattr(self.app, 'cluster_signal', None)
+        if hook is not None:
+            signal = hook(view)
+            if signal is not None:
+                return signal
+        if view.state is None:
+            return ClusterSignal(True, ABNORMAL, 'the member does not answer')
+        if view.down:
+            return ClusterSignal(True, ABNORMAL,
+                                 'out of the cluster: %s' % view.state)
+        health = self.health or {}
+        if health.get('status') not in (None, cluster_health.HEALTHY):
+            return ClusterSignal(True, ABNORMAL, 'the cluster is %s: %s' % (
+                health['status'], health.get('reason')))
+        return NORMAL
+
+    def _event(self, kind, signal, view, since):
+        """What the event carries: the member as the probe sees it, the
+        datastore's extra signals, and its view for the task manager
+        (the one it would ask for), when the app gives one.
+        """
+        event = {'kind': kind, 'reason': signal.reason, 'since': since,
+                 'datastore_manager': CONF.datastore_manager,
+                 'member': self.snapshot(), 'extra': signal.extra or {},
+                 'view': None, 'health': self.health}
+        give = getattr(self.app, 'cluster_event_view', None)
+        if give is None:
+            give = getattr(self.app, 'recovery_view', None)
+            if give is not None:
+                give = lambda _view, _give=give: _give()  # noqa: E731
+        if give is not None:
+            try:
+                event['view'] = give(view)
+            except Exception as err:
+                LOG.debug("No view for the event: %s", err)
+        return event
+
+    def _send_event(self, kind, signal, view, since):
+        if self._sending:
+            LOG.warning("A cluster event is still being sent (the broker?); "
+                        "not sending %s now.", kind)
+            return
+        event = self._event(kind, signal, view, since)
+        LOG.info("Cluster event %s (%s): %s/%s, writable %s, readable %s, "
+                 "%ds in this state.", kind, signal.reason, view.state,
+                 view.role, self.writable(), self.readable(), int(since))
+        self._sending = True
+        self._spawn(self._cast_event, event)
+
+    def _cast_event(self, event):
+        try:
+            context = trove_context.TroveContext()
+            conductor_api.API(context).cluster_event(
+                CONF.guest_id, event['kind'],
+                sent=timeutils.utcnow_ts(microsecond=True), payload=event)
+        except Exception as err:
+            LOG.warning("The cluster event %s was not sent: %s",
+                        event['kind'], err)
+        finally:
+            self._sending = False
+
+    def snapshot(self):
+        return {'state': self.view.state, 'role': self.view.role,
+                'writable': self.writable()}
+
+
+class ClusterProbe(ClusterWatch):
+    """Watches the member's state in the cluster, keeps the ready port
+    open on a member that takes writes, and brings a member that is out
+    of the cluster back.
+    """
+
+    def __init__(self, app, docker_client, conf=None):
+        conf = conf or CONF.get(CONF.datastore_manager or 'mysql')
+        super(ClusterProbe, self).__init__(app, conf)
+        self.reconcile_every = conf.cluster_ready_port_reconcile
+        self.recovery_grace = conf.cluster_recovery_grace
+        self.recovery_interval = conf.cluster_recovery_interval
+        self.peer_timeout = conf.cluster_peer_timeout
+        self.auto_bootstrap = conf.cluster_auto_bootstrap
+        self.needs_all = conf.cluster_bootstrap_needs_all_members
+        self.jitter = conf.cluster_bootstrap_jitter
+        self.last_recovery = 0
+        self.port = readyport.ReadyPort(
+            docker_client, conf.cluster_ready_port, app.DATABASE_PORT)
+        # A second port, open on a member that serves reads (a standby of
+        # a primary), for a datastore whose conf has one.
+        read_port = getattr(conf, 'cluster_read_port', 0)
+        self.read_port = readyport.ReadyPort(
+            docker_client, read_port, app.DATABASE_PORT) if read_port else None
+
+    def _serve(self, view):
         # What the member does for the cluster every tick, if anything
         # (a primary keeping its standbys' settings right).
         reconcile = getattr(self.app, 'reconcile', None)
@@ -363,21 +519,21 @@ class ClusterProbe(object):
                                   port.port)
         self.ticks += 1
 
-        # Tell the control plane, once the cluster is complete (a cluster
-        # being built is full of members not where they should be yet)
-        # and the ports are set: the ports never wait on it.
-        if self.events and self.complete and not self.leaving:
-            try:
-                self.reporter.observe(self._signal(view), view)
-            except Exception:
-                LOG.exception("The cluster event was not told; next tick.")
-
+    def _after(self, view):
         now = time.monotonic()
         if (self.complete and not self.leaving and view.down and
                 now - self.since >= self.recovery_grace and
                 now - self.last_recovery >= self.recovery_interval):
             self.last_recovery = now
             self.recover(view.state)
+
+    def snapshot(self):
+        snapshot = super(ClusterProbe, self).snapshot()
+        snapshot['ready_port'] = self.port.applied
+        if self.read_port is not None:
+            snapshot['readable'] = self.readable()
+            snapshot['read_port'] = self.read_port.applied
+        return snapshot
 
     def _scan_peers(self):
         user, password = self.app._recovery_credentials()
@@ -430,76 +586,3 @@ class ClusterProbe(object):
             return False
         return all(self.app._not_ahead(p.position, position)
                    for p in reachable)
-
-    # Telling the control plane
-
-    def _signal(self, view):
-        """What the member says of its cluster state: the datastore's
-        word, or else abnormal when the member does not answer or is out
-        of the cluster.
-        """
-        hook = getattr(self.app, 'cluster_signal', None)
-        if hook is not None:
-            signal = hook(view)
-            if signal is not None:
-                return signal
-        if view.state is None:
-            return ClusterSignal(True, ABNORMAL, 'the member does not answer')
-        if view.down:
-            return ClusterSignal(True, ABNORMAL,
-                                 'out of the cluster: %s' % view.state)
-        return NORMAL
-
-    def _event(self, kind, signal, view, since):
-        """What the event carries: the member as the probe sees it, the
-        datastore's extra signals, and its view for the task manager
-        (the one it would ask for), when the app gives one.
-        """
-        event = {'kind': kind, 'reason': signal.reason, 'since': since,
-                 'datastore_manager': CONF.datastore_manager,
-                 'member': self.snapshot(), 'extra': signal.extra or {},
-                 'view': None}
-        give = getattr(self.app, 'cluster_event_view', None)
-        if give is None:
-            give = getattr(self.app, 'recovery_view', None)
-            if give is not None:
-                give = lambda _view, _give=give: _give()  # noqa: E731
-        if give is not None:
-            try:
-                event['view'] = give(view)
-            except Exception as err:
-                LOG.debug("No view for the event: %s", err)
-        return event
-
-    def _send_event(self, kind, signal, view, since):
-        if self._sending:
-            LOG.warning("A cluster event is still being sent (the broker?); "
-                        "not sending %s now.", kind)
-            return
-        event = self._event(kind, signal, view, since)
-        LOG.info("Cluster event %s (%s): %s/%s, writable %s, readable %s, "
-                 "%ds in this state.", kind, signal.reason, view.state,
-                 view.role, self.writable(), self.readable(), int(since))
-        self._sending = True
-        self._spawn(self._cast_event, event)
-
-    def _cast_event(self, event):
-        try:
-            context = trove_context.TroveContext()
-            conductor_api.API(context).cluster_event(
-                CONF.guest_id, event['kind'],
-                sent=timeutils.utcnow_ts(microsecond=True), payload=event)
-        except Exception as err:
-            LOG.warning("The cluster event %s was not sent: %s",
-                        event['kind'], err)
-        finally:
-            self._sending = False
-
-    def snapshot(self):
-        snapshot = {'state': self.view.state, 'role': self.view.role,
-                    'writable': self.writable(),
-                    'ready_port': self.port.applied}
-        if self.read_port is not None:
-            snapshot['readable'] = self.readable()
-            snapshot['read_port'] = self.read_port.applied
-        return snapshot

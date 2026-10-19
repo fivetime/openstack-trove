@@ -1,0 +1,33 @@
+---
+features:
+  - |
+    Clusters have a health: ``HEALTHY``, ``DEGRADED`` (serving, short of
+    members), ``DOWN`` (no member answers, or the cluster or a part of it
+    no longer serves) or ``UNKNOWN`` (not looked at yet). ``cluster show``
+    and ``cluster list`` return ``health`` with ``status``,
+    ``members_out``, ``reason`` and ``since``.
+
+    The members of Redis, Valkey, KeyDB, MongoDB, Cassandra and Vertica
+    clusters, which heal themselves, run a watch in the guest agent (the
+    generic part of the cluster probe, ``ClusterWatch``) that tells what
+    the member sees of its cluster from its own database (Redis
+    ``CLUSTER INFO``/``CLUSTER NODES``, MongoDB ``replSetGetStatus``,
+    Cassandra ``nodetool status``, Vertica ``nodes`` and ``system``),
+    through the conductor to the task manager, when it changes and every
+    ``cluster_event_interval`` (300) seconds while the cluster is not
+    whole. The task manager asks every member (the new guest call
+    ``get_cluster_health``), counts the members that do not answer or
+    whose heartbeat is stale as out, and records the health; a cluster not
+    healthy is looked at again every ``cluster_health_interval`` (120)
+    seconds. PostgreSQL and Galera clusters get their health from the
+    views their recovery looks at. New options of these datastores:
+    ``cluster_probe_interval`` (30), ``cluster_probe_timeout``,
+    ``cluster_events``, ``cluster_event_interval``,
+    ``cluster_event_min_interval``, ``cluster_health_timeout`` (30),
+    ``cluster_health_interval``. A member whose guest agent is from before
+    the watch counts as up while its heartbeat is fresh.
+upgrade:
+  - |
+    Database migration ``8e1b4c7a2d65`` adds the table ``cluster_health``
+    (one row per cluster, apart from ``clusters`` so that a cluster saved
+    from an older read cannot write an older health back).

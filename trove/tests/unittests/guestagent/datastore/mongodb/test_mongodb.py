@@ -710,6 +710,70 @@ def _replset(name):
         return json_util.loads(f.read())
 
 
+class TestMongoDBClusterHealth(MongoDBGuestTestCase):
+    """What a replica set member sees of its set, from replSetGetStatus of
+    MongoDB 8.2 (2026-10-19): a set of three all up (as m3 sees it), with
+    m3 stopped (as the primary m1 sees it), then with m2 stopped too (m1
+    stepped down, no primary), and a Trove member that is RECOVERING.
+    """
+
+    def _app(self, status, config_server=False):
+        app = _app(_render())
+        app.apply_initial_guestagent_configuration(
+            {'instance_type': 'config_server' if config_server
+             else 'member', 'replica_set_name': 'rs1'})
+        app.adm = mock.Mock()
+        app.adm.get_repl_status.return_value = _replset(status)
+        return app
+
+    def test_a_set_all_up(self):
+        app = self._app('status-secondary')
+        self.assertEqual({'status': 'HEALTHY', 'out': [], 'reason': None,
+                          'me': 'm3:27017'}, app.cluster_health())
+        view = app.member_view()
+        self.assertEqual(('SECONDARY', False, False),
+                         (view.state, view.writable, view.down))
+
+    def test_a_member_down(self):
+        health = self._app('status-member-down').cluster_health()
+        self.assertEqual('DEGRADED', health['status'])
+        self.assertEqual(['m3:27017'], health['out'])
+        self.assertEqual('replica set rs: m3:27017 out', health['reason'])
+        self.assertTrue(self._app('status-member-down').member_view(
+        ).writable)
+
+    def test_a_shard_without_a_primary(self):
+        health = self._app('status-no-primary').cluster_health()
+        self.assertEqual('DOWN', health['status'])
+        self.assertEqual(['m2:27017', 'm3:27017'], health['out'])
+        self.assertEqual('replica set rs has no primary', health['reason'])
+
+    def test_config_servers_without_a_primary(self):
+        # No chunk moves or metadata changes; reads and writes go on.
+        health = self._app('status-no-primary',
+                           config_server=True).cluster_health()
+        self.assertEqual('DEGRADED', health['status'])
+
+    def test_a_member_recovering(self):
+        health = self._app('status-stale').cluster_health()
+        self.assertEqual('DEGRADED', health['status'])
+        self.assertEqual(['192.168.1.96:27017'], health['out'])
+        self.assertEqual('192.168.1.96:27017', health['me'])
+        self.assertTrue(self._app('status-stale').member_view().down)
+
+    def test_who_is_watched(self):
+        for kind, watched in (('member', True), ('config_server', True),
+                              ('query_router', False)):
+            app = _app(_render())
+            info = {'instance_type': kind}
+            if kind == 'query_router':
+                info['config_server_hosts'] = 'c1:27019'
+            else:
+                info['replica_set_name'] = 'rs1'
+            app.apply_initial_guestagent_configuration(info)
+            self.assertEqual(watched, app.is_watched_member(), kind)
+
+
 class TestMongoDBStaleMember(MongoDBGuestTestCase):
 
     # Captured from a Trove MongoDB 8.2 member that was powered off while

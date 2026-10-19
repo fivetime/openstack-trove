@@ -12,6 +12,7 @@
 
 from unittest import mock
 
+from trove.common import cluster_health as ch
 from trove.guestagent.common import cluster_probe as probe
 from trove.guestagent.common import readyport
 from trove.tests.unittests import trove_testtools
@@ -36,6 +37,10 @@ class ProbeTestBase(trove_testtools.TestCase):
         self.app.is_cluster_complete.return_value = False
         self.app.member_view.return_value = _view('ONLINE', 'PRIMARY')
         self.app.was_last_standing.return_value = False
+        # What the apps of the datastores that recover their clusters do
+        # not have.
+        del self.app.cluster_health
+        del self.app.is_watched_member
         self.conf = mock.Mock(cluster_probe_interval=3,
                               cluster_read_port=0,
                               cluster_probe_timeout=5,
@@ -606,3 +611,165 @@ class TestRecovery(ProbeTestBase):
         self._tick_at(0)
         self._tick_at(100)
         self.app._query_peer.assert_not_called()
+
+
+class _WatchedApp(object):
+    """An app of a datastore whose clusters heal themselves, as the
+    watch sees it: no ready port, no recovery.
+    """
+
+    def __init__(self):
+        self.health = ch.view(ch.HEALTHY, me='10.0.0.1')
+
+    def is_watched_member(self):
+        return True
+
+    def member_view(self):
+        return probe.MemberView('ok', 'master', True, False)
+
+    def cluster_health(self):
+        return self.health
+
+
+class TestClusterWatch(trove_testtools.TestCase):
+    """The watch tells what the member sees of its cluster."""
+
+    def setUp(self):
+        super(TestClusterWatch, self).setUp()
+        self.app = _WatchedApp()
+        self.conf = mock.Mock(cluster_probe_interval=30,
+                              cluster_probe_timeout=10, cluster_events=True,
+                              cluster_event_interval=300,
+                              cluster_event_min_interval=5)
+        timeout = mock.patch.object(probe.eventlet, 'Timeout').start()
+        timeout.return_value.__enter__.return_value = None
+        self.os = mock.patch.object(probe, 'operating_system').start()
+        self.os.exists.return_value = False
+        mock.patch.object(probe.guestagent_utils, 'get_conf_dir',
+                          return_value='/var/lib/redis/conf.d').start()
+        self.cast = mock.patch.object(
+            probe.conductor_api, 'API').start().return_value.cluster_event
+        self.addCleanup(mock.patch.stopall)
+        self.now = 1000.0
+        mock.patch.object(probe.time, 'monotonic',
+                          side_effect=lambda: self.now).start()
+        self.patch_conf_property('guest_id', 'i1')
+        self.patch_conf_property('datastore_manager', 'redis')
+        self.watch = self._watch()
+
+    def _watch(self):
+        watch = probe.ClusterWatch(self.app, conf=self.conf)
+        watch._spawn = lambda fn, *args: fn(*args)
+        watch.reporter._now = lambda: self.now
+        return watch
+
+    def _tick(self, now):
+        self.now = now
+        self.watch._tick()
+
+    def test_quiet_until_the_cluster_is_complete(self):
+        self.app.health = ch.view(ch.DEGRADED, ['10.0.0.2'], 'failing')
+        self._tick(1000)
+        self.assertTrue(self.watch.member)
+        self.assertFalse(self.watch.complete)
+        self.assertIsNone(self.watch.health)
+        self.cast.assert_not_called()
+
+    def test_complete_is_kept_for_the_next_start(self):
+        self.watch.enable_complete()
+        self.os.write_file.assert_called_once_with(
+            '/var/lib/redis/conf.d/cluster_complete', 'complete',
+            as_root=True)
+        # The guest agent started again: read back.
+        self.os.exists.return_value = True
+        watch = self._watch()
+        watch._load_flags()
+        self.assertTrue(watch.complete)
+        self.os.exists.assert_called_with(
+            '/var/lib/redis/conf.d/cluster_complete', as_root=True)
+
+    def test_a_cluster_short_of_a_member_and_whole_again(self):
+        self.watch.enable_complete()
+        self._tick(1000)
+        self.cast.assert_not_called()
+        self.app.health = ch.view(ch.DEGRADED, ['10.0.0.2'],
+                                  'failing: 10.0.0.2', me='10.0.0.1')
+        self._tick(1030)
+        kind, payload = (self.cast.call_args[0][1],
+                         self.cast.call_args[1]['payload'])
+        self.assertEqual(probe.ABNORMAL, kind)
+        self.assertEqual('the cluster is DEGRADED: failing: 10.0.0.2',
+                         payload['reason'])
+        self.assertEqual(self.app.health, payload['health'])
+        # No ready port on a watched member.
+        self.assertEqual({'state': 'ok', 'role': 'master', 'writable': True},
+                         payload['member'])
+        # Again only after the event interval while it lasts.
+        self._tick(1060)
+        self.assertEqual(1, self.cast.call_count)
+        self._tick(1330)
+        self.assertEqual(2, self.cast.call_count)
+        self.app.health = ch.view(ch.HEALTHY, me='10.0.0.1')
+        self._tick(1360)
+        self.assertEqual(probe.NORMAL_KIND, self.cast.call_args[0][1])
+
+    def test_a_member_that_does_not_answer(self):
+        self.watch.enable_complete()
+        self.app.member_view = lambda: probe.UNKNOWN_MEMBER
+        self.app.cluster_health = mock.Mock(side_effect=RuntimeError('no'))
+        self._tick(1000)
+        self.assertIsNone(self.watch.health)
+        self.assertEqual('the member does not answer',
+                         self.cast.call_args[1]['payload']['reason'])
+
+    def test_leaving_says_nothing(self):
+        self.watch.enable_complete()
+        self.watch.disable()
+        self.app.health = ch.view(ch.DOWN, [], 'cluster_state fail')
+        self._tick(1000)
+        self.cast.assert_not_called()
+
+
+class TestWatchedManagers(trove_testtools.TestCase):
+    """The managers of the datastores whose clusters heal themselves run
+    the watch.
+    """
+
+    MANAGERS = (
+        'trove.guestagent.datastore.redis.manager.Manager',
+        'trove.guestagent.datastore.valkey.manager.Manager',
+        'trove.guestagent.datastore.keydb.manager.Manager',
+        'trove.guestagent.datastore.mongodb.manager.Manager',
+        'trove.guestagent.datastore.cassandra.manager.Manager',
+        'trove.guestagent.datastore.vertica.manager.Manager',
+    )
+
+    def test_they_watch(self):
+        from oslo_utils import importutils
+        from trove.guestagent.common import cluster_member
+        for path in self.MANAGERS:
+            cls = importutils.import_class(path)
+            self.assertTrue(
+                issubclass(cls, cluster_member.ClusterWatchMixin), path)
+
+    def test_complete_and_asked(self):
+        from trove.guestagent.common import cluster_member
+
+        class Base(object):
+            def cluster_complete(self, context):
+                self.completed = True
+
+        class Manager(cluster_member.ClusterWatchMixin, Base):
+            pass
+
+        manager = Manager()
+        manager.app = mock.Mock()
+        manager.app.cluster_health.return_value = ch.view(ch.HEALTHY)
+        with mock.patch.object(probe, 'ClusterWatch') as watch:
+            manager.init_cluster_watch()
+        watch.return_value.start.assert_called_once_with()
+        manager.cluster_complete(None)
+        self.assertTrue(manager.completed)
+        watch.return_value.enable_complete.assert_called_once_with()
+        self.assertEqual(ch.view(ch.HEALTHY),
+                         manager.get_cluster_health(None))

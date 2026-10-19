@@ -326,6 +326,15 @@ class API(object):
         return self._call("is_root_enabled", self.agent_low_timeout,
                           version=version)
 
+    def get_cluster_health(self, timeout=None):
+        """What a cluster member sees of its cluster
+        (``trove.common.cluster_health``); a member that does not answer
+        in time is counted out by the caller.
+        """
+        return self._call("get_cluster_health",
+                          timeout or self.agent_low_timeout,
+                          version=self.API_BASE_VERSION)
+
     def get_hwinfo(self):
         """Make a synchronous call to get hardware info for the container"""
         LOG.debug("Check hwinfo on instance %s.", self.id)

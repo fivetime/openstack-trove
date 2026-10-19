@@ -28,12 +28,14 @@ from oslo_log import log as logging
 from oslo_utils import netutils
 
 from trove.common import cfg
+from trove.common import cluster_health
 from trove.common import constants
 from trove.common.db.vertica import models
 from trove.common import exception
 from trove.common.i18n import _
 from trove.common import stream_codecs
 from trove.common import utils
+from trove.guestagent.common import cluster_probe
 from trove.guestagent.common import configuration
 from trove.guestagent.common import guestagent_utils
 from trove.guestagent.common import operating_system
@@ -722,6 +724,50 @@ class VerticaApp(service.BaseDbApp):
                           % quote_literal('%s:%s' % (access, secret))])
         except exception.TroveError as e:
             raise exception.TroveError(redact(str(e)))
+
+    # The cluster watch (trove.guestagent.common.cluster_probe): it tells
+    # only once the task manager says the cluster is complete, which it
+    # never says of a single instance.
+
+    def is_watched_member(self):
+        return self.database_exists()
+
+    def _nodes(self):
+        return [(row[0], row[1]) for row in self.adm.query(
+            "SELECT node_address, node_state FROM nodes ORDER BY 1")
+            if len(row) > 1]
+
+    def member_view(self):
+        state = dict(self._nodes()).get(self.address)
+        return cluster_probe.MemberView(state, None, state == 'UP',
+                                        state != 'UP')
+
+    def cluster_health(self):
+        """What this node sees of the database: degraded while a node is
+        not up or the database can lose fewer nodes than it was designed
+        to (its K-safety). A database that lost its quorum shuts down: no
+        node answers then, which the task manager tells.
+        """
+        nodes = self._nodes()
+        me = self.address
+        out = sorted(a for a, st in nodes if st != 'UP')
+        tolerance = self.adm.query(
+            "SELECT designed_fault_tolerance, current_fault_tolerance "
+            "FROM system")
+        reasons = []
+        if out:
+            reasons.append('not up: %s' % ', '.join(
+                '%s %s' % (a, st) for a, st in nodes if st != 'UP'))
+        try:
+            designed, current = (int(v) for v in tolerance[0][:2])
+        except (IndexError, ValueError):
+            designed = current = None
+        if designed is not None and current < designed:
+            reasons.append('fault tolerance %d of %d' % (current, designed))
+        if reasons:
+            return cluster_health.view(cluster_health.DEGRADED, out,
+                                       '; '.join(reasons), me=me)
+        return cluster_health.view(cluster_health.HEALTHY, me=me)
 
     def set_cluster_config(self, content):
         path = f'{self.mount_point}/vertica_cluster.yaml'

@@ -1,0 +1,430 @@
+{
+ "set": "rs",
+ "date": {
+  "$date": {
+   "$numberLong": "1792434633217"
+  }
+ },
+ "myState": {
+  "$numberInt": "2"
+ },
+ "term": {
+  "$numberLong": "1"
+ },
+ "syncSourceHost": "",
+ "syncSourceId": {
+  "$numberInt": "-1"
+ },
+ "heartbeatIntervalMillis": {
+  "$numberLong": "2000"
+ },
+ "majorityVoteCount": {
+  "$numberInt": "2"
+ },
+ "writeMajorityCount": {
+  "$numberInt": "2"
+ },
+ "votingMembersCount": {
+  "$numberInt": "3"
+ },
+ "writableVotingMembersCount": {
+  "$numberInt": "3"
+ },
+ "optimes": {
+  "lastCommittedOpTime": {
+   "ts": {
+    "$timestamp": {
+     "t": 1792434611,
+     "i": 1
+    }
+   },
+   "t": {
+    "$numberLong": "1"
+   }
+  },
+  "lastCommittedWallTime": {
+   "$date": {
+    "$numberLong": "1792434611580"
+   }
+  },
+  "readConcernMajorityOpTime": {
+   "ts": {
+    "$timestamp": {
+     "t": 1792434611,
+     "i": 1
+    }
+   },
+   "t": {
+    "$numberLong": "1"
+   }
+  },
+  "appliedOpTime": {
+   "ts": {
+    "$timestamp": {
+     "t": 1792434621,
+     "i": 1
+    }
+   },
+   "t": {
+    "$numberLong": "1"
+   }
+  },
+  "durableOpTime": {
+   "ts": {
+    "$timestamp": {
+     "t": 1792434621,
+     "i": 1
+    }
+   },
+   "t": {
+    "$numberLong": "1"
+   }
+  },
+  "writtenOpTime": {
+   "ts": {
+    "$timestamp": {
+     "t": 1792434621,
+     "i": 1
+    }
+   },
+   "t": {
+    "$numberLong": "1"
+   }
+  },
+  "lastAppliedWallTime": {
+   "$date": {
+    "$numberLong": "1792434621581"
+   }
+  },
+  "lastDurableWallTime": {
+   "$date": {
+    "$numberLong": "1792434621581"
+   }
+  },
+  "lastWrittenWallTime": {
+   "$date": {
+    "$numberLong": "1792434621581"
+   }
+  }
+ },
+ "lastStableRecoveryTimestamp": {
+  "$timestamp": {
+   "t": 1792434611,
+   "i": 1
+  }
+ },
+ "members": [
+  {
+   "_id": {
+    "$numberInt": "0"
+   },
+   "name": "m1:27017",
+   "health": {
+    "$numberInt": "1"
+   },
+   "state": {
+    "$numberInt": "2"
+   },
+   "stateStr": "SECONDARY",
+   "uptime": {
+    "$numberInt": "87"
+   },
+   "optime": {
+    "ts": {
+     "$timestamp": {
+      "t": 1792434621,
+      "i": 1
+     }
+    },
+    "t": {
+     "$numberLong": "1"
+    }
+   },
+   "optimeDate": {
+    "$date": {
+     "$numberLong": "1792434621000"
+    }
+   },
+   "optimeWritten": {
+    "ts": {
+     "$timestamp": {
+      "t": 1792434621,
+      "i": 1
+     }
+    },
+    "t": {
+     "$numberLong": "1"
+    }
+   },
+   "optimeWrittenDate": {
+    "$date": {
+     "$numberLong": "1792434621000"
+    }
+   },
+   "lastAppliedWallTime": {
+    "$date": {
+     "$numberLong": "1792434621581"
+    }
+   },
+   "lastDurableWallTime": {
+    "$date": {
+     "$numberLong": "1792434621581"
+    }
+   },
+   "lastWrittenWallTime": {
+    "$date": {
+     "$numberLong": "1792434621581"
+    }
+   },
+   "syncSourceHost": "",
+   "syncSourceId": {
+    "$numberInt": "-1"
+   },
+   "infoMessage": "",
+   "configVersion": {
+    "$numberInt": "1"
+   },
+   "configTerm": {
+    "$numberInt": "1"
+   },
+   "self": true,
+   "lastHeartbeatMessage": ""
+  },
+  {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "name": "m2:27017",
+   "health": {
+    "$numberInt": "0"
+   },
+   "state": {
+    "$numberInt": "8"
+   },
+   "stateStr": "(not reachable/healthy)",
+   "uptime": {
+    "$numberInt": "0"
+   },
+   "optime": {
+    "ts": {
+     "$timestamp": {
+      "t": 0,
+      "i": 0
+     }
+    },
+    "t": {
+     "$numberLong": "-1"
+    }
+   },
+   "optimeDurable": {
+    "ts": {
+     "$timestamp": {
+      "t": 0,
+      "i": 0
+     }
+    },
+    "t": {
+     "$numberLong": "-1"
+    }
+   },
+   "optimeWritten": {
+    "ts": {
+     "$timestamp": {
+      "t": 0,
+      "i": 0
+     }
+    },
+    "t": {
+     "$numberLong": "-1"
+    }
+   },
+   "optimeDate": {
+    "$date": {
+     "$numberLong": "0"
+    }
+   },
+   "optimeDurableDate": {
+    "$date": {
+     "$numberLong": "0"
+    }
+   },
+   "optimeWrittenDate": {
+    "$date": {
+     "$numberLong": "0"
+    }
+   },
+   "lastAppliedWallTime": {
+    "$date": {
+     "$numberLong": "1792434611580"
+    }
+   },
+   "lastDurableWallTime": {
+    "$date": {
+     "$numberLong": "1792434611580"
+    }
+   },
+   "lastWrittenWallTime": {
+    "$date": {
+     "$numberLong": "1792434611580"
+    }
+   },
+   "lastHeartbeat": {
+    "$date": {
+     "$numberLong": "1792434632835"
+    }
+   },
+   "lastHeartbeatRecv": {
+    "$date": {
+     "$numberLong": "1792434610471"
+    }
+   },
+   "pingMs": {
+    "$numberLong": "0"
+   },
+   "lastHeartbeatMessage": "Error connecting to m2:27017 :: caused by :: Could not find address for m2:27017: SocketException: onInvoke :: caused by :: Host not found (authoritative)",
+   "syncSourceHost": "",
+   "syncSourceId": {
+    "$numberInt": "-1"
+   },
+   "infoMessage": "",
+   "configVersion": {
+    "$numberInt": "1"
+   },
+   "configTerm": {
+    "$numberInt": "1"
+   }
+  },
+  {
+   "_id": {
+    "$numberInt": "2"
+   },
+   "name": "m3:27017",
+   "health": {
+    "$numberInt": "0"
+   },
+   "state": {
+    "$numberInt": "8"
+   },
+   "stateStr": "(not reachable/healthy)",
+   "uptime": {
+    "$numberInt": "0"
+   },
+   "optime": {
+    "ts": {
+     "$timestamp": {
+      "t": 0,
+      "i": 0
+     }
+    },
+    "t": {
+     "$numberLong": "-1"
+    }
+   },
+   "optimeDurable": {
+    "ts": {
+     "$timestamp": {
+      "t": 0,
+      "i": 0
+     }
+    },
+    "t": {
+     "$numberLong": "-1"
+    }
+   },
+   "optimeWritten": {
+    "ts": {
+     "$timestamp": {
+      "t": 0,
+      "i": 0
+     }
+    },
+    "t": {
+     "$numberLong": "-1"
+    }
+   },
+   "optimeDate": {
+    "$date": {
+     "$numberLong": "0"
+    }
+   },
+   "optimeDurableDate": {
+    "$date": {
+     "$numberLong": "0"
+    }
+   },
+   "optimeWrittenDate": {
+    "$date": {
+     "$numberLong": "0"
+    }
+   },
+   "lastAppliedWallTime": {
+    "$date": {
+     "$numberLong": "1792434571700"
+    }
+   },
+   "lastDurableWallTime": {
+    "$date": {
+     "$numberLong": "1792434571700"
+    }
+   },
+   "lastWrittenWallTime": {
+    "$date": {
+     "$numberLong": "1792434571700"
+    }
+   },
+   "lastHeartbeat": {
+    "$date": {
+     "$numberLong": "1792434632731"
+    }
+   },
+   "lastHeartbeatRecv": {
+    "$date": {
+     "$numberLong": "1792434584454"
+    }
+   },
+   "pingMs": {
+    "$numberLong": "0"
+   },
+   "lastHeartbeatMessage": "Error connecting to m3:27017 :: caused by :: Could not find address for m3:27017: SocketException: onInvoke :: caused by :: Host not found (authoritative)",
+   "syncSourceHost": "",
+   "syncSourceId": {
+    "$numberInt": "-1"
+   },
+   "infoMessage": "",
+   "configVersion": {
+    "$numberInt": "1"
+   },
+   "configTerm": {
+    "$numberInt": "1"
+   }
+  }
+ ],
+ "ok": {
+  "$numberInt": "1"
+ },
+ "$clusterTime": {
+  "clusterTime": {
+   "$timestamp": {
+    "t": 1792434621,
+    "i": 1
+   }
+  },
+  "signature": {
+   "hash": {
+    "$binary": {
+     "base64": "AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+     "subType": "00"
+    }
+   },
+   "keyId": {
+    "$numberLong": "0"
+   }
+  }
+ },
+ "operationTime": {
+  "$timestamp": {
+   "t": 1792434621,
+   "i": 1
+  }
+ }
+}

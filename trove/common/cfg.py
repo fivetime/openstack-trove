@@ -983,6 +983,46 @@ def _with_cluster_probe_and_entry(opts, deprecated_prefix=None,
     return [opt for opt in opts if opt.name not in names] + cluster
 
 
+# A cluster that heals itself (the datastore fails over and catches up on
+# its own) with a watch on each member: the guest agent tells the control
+# plane what the member sees of its cluster, and the task manager records
+# the cluster's health (HEALTHY, DEGRADED, DOWN) for the API to show.
+def _with_cluster_watch(opts, probe_timeout=20):
+    """The options of the watch on each member of a datastore's clusters
+    (``trove.guestagent.common.cluster_probe.ClusterWatch``).
+    """
+    watch = [
+        cfg.IntOpt('cluster_probe_interval', default=30, min=0,
+                   help='Seconds between two looks of the guest agent at '
+                        'what the member sees of its cluster. 0 turns the '
+                        'watch off.'),
+        cfg.IntOpt('cluster_probe_timeout', default=probe_timeout, min=1,
+                   help='Seconds a look may take before the member\'s '
+                        'state counts as unknown.'),
+        cfg.BoolOpt('cluster_events', default=True,
+                    help='Tell the control plane, through the conductor, '
+                         'when the member sees its cluster short of '
+                         'members or not serving, and again every '
+                         'cluster_event_interval seconds while it lasts, '
+                         'and when it is whole again. Off: the task manager '
+                         'only finds out by its scan.'),
+        cfg.IntOpt('cluster_event_interval', default=300, min=1,
+                   help='Seconds between two reports while the member sees '
+                        'its cluster not whole, so that a lost report heals '
+                        'itself.'),
+        cfg.IntOpt('cluster_event_min_interval', default=5, min=0,
+                   help='At most one report per this many seconds.'),
+        cfg.IntOpt('cluster_health_timeout', default=30, min=1,
+                   help='Seconds the task manager waits for a member to '
+                        'tell what it sees of its cluster.'),
+        cfg.IntOpt('cluster_health_interval', default=120, min=10,
+                   help='Seconds between two looks of the task manager at '
+                        'a cluster that is not healthy, until it is.'),
+    ]
+    names = {opt.name for opt in watch}
+    return [opt for opt in opts if opt.name not in names] + watch
+
+
 def _with_cluster_strategy(opts, package, class_prefix, min_members=3,
                            tcp_ports=(), root_controller=None):
     """The options that make a datastore's clusters available: the
@@ -1286,6 +1326,9 @@ def _redis_cluster_opts():
 redis_opts += _redis_cluster_opts()
 valkey_opts += _redis_cluster_opts()
 keydb_opts += _redis_cluster_opts()
+redis_opts = _with_cluster_watch(redis_opts, probe_timeout=10)
+valkey_opts = _with_cluster_watch(valkey_opts, probe_timeout=10)
+keydb_opts = _with_cluster_watch(keydb_opts, probe_timeout=10)
 
 # Cassandra
 cassandra_group = cfg.OptGroup(
@@ -1392,6 +1435,7 @@ cassandra_opts = [
              'cassandra datastore with version 5.0'
     ),
 ]
+cassandra_opts = _with_cluster_watch(cassandra_opts, probe_timeout=30)
 
 # Couchbase
 couchbase_group = cfg.OptGroup(
@@ -1576,6 +1620,7 @@ mongodb_opts = [
              'mongodb datastore with version 8.2'
     ),
 ]
+mongodb_opts = _with_cluster_watch(mongodb_opts, probe_timeout=10)
 
 # PostgreSQL
 postgresql_group = cfg.OptGroup(
@@ -1916,6 +1961,7 @@ vertica_opts = [
         help='Whether the database instances reach the S3 service over '
              'HTTPS. As the S3 service URL says if not set.'),
 ]
+vertica_opts = _with_cluster_watch(vertica_opts, probe_timeout=20)
 
 # DB2
 db2_group = cfg.OptGroup(

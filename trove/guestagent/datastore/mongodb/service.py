@@ -22,12 +22,14 @@ import pymongo
 from pymongo import errors as pymongo_errors
 
 from trove.common import cfg
+from trove.common import cluster_health
 from trove.common import constants
 from trove.common.db.mongodb import models
 from trove.common import exception
 from trove.common.i18n import _
 from trove.common import stream_codecs
 from trove.common import utils
+from trove.guestagent.common import cluster_probe
 from trove.guestagent.common import configuration
 from trove.guestagent.common import guestagent_utils
 from trove.guestagent.common import operating_system
@@ -73,6 +75,7 @@ INSTANCE_TYPE_QUERY_ROUTER = 'query_router'
 RS_HEALTHY_STATES = (1, 2)
 RS_PRIMARY = 1
 RS_RECOVERING = 3
+RS_ARBITER = 7
 # The change of the configuration that keeps the oplog retention.
 CNF_OPLOG = 'oplog'
 # A member logs this (MongoDB log id 5579708) each time it turns down a
@@ -150,6 +153,49 @@ class MongoDBApp(service.BaseDbApp):
     @property
     def replica_set_name(self):
         return self.get_config_value('replication.replSetName')
+
+    # The cluster watch (trove.guestagent.common.cluster_probe)
+
+    def is_watched_member(self):
+        """A member of a replica set of the cluster: of a shard, or a
+        config server; a query router is none.
+        """
+        return bool(self.replica_set_name) and not self.is_query_router
+
+    def member_view(self):
+        status = self.adm.get_repl_status()
+        me = next(m for m in status['members'] if m.get('self'))
+        return cluster_probe.MemberView(
+            me['stateStr'], me['stateStr'], me['state'] == RS_PRIMARY,
+            me['state'] not in RS_HEALTHY_STATES)
+
+    def cluster_health(self):
+        """What this member sees of its replica set: down when a shard's
+        set has no primary (the shard takes no writes), degraded while a
+        member is unreachable or not a primary or secondary, or a config
+        server set has no primary (no chunk moves or metadata changes;
+        reads and writes go on).
+        """
+        status = self.adm.get_repl_status()
+        members = status['members']
+        me = next((m['name'] for m in members if m.get('self')), None)
+        out = [m['name'] for m in members
+               if m.get('health') != 1 or
+               m['state'] not in RS_HEALTHY_STATES + (RS_ARBITER,)]
+        primary = any(m['state'] == RS_PRIMARY and m.get('health') == 1
+                      for m in members)
+        name = status.get('set')
+        if not primary:
+            status = (cluster_health.DEGRADED if self.is_config_server
+                      else cluster_health.DOWN)
+            return cluster_health.view(
+                status, out, 'replica set %s has no primary' % name, me=me)
+        if out:
+            return cluster_health.view(
+                cluster_health.DEGRADED, out,
+                'replica set %s: %s out' % (name, ', '.join(sorted(out))),
+                me=me)
+        return cluster_health.view(cluster_health.HEALTHY, me=me)
 
     @property
     def oplog_min_retention_hours(self):

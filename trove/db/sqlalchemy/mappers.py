@@ -98,6 +98,9 @@ def map(engine, models):
     mapper_registry.map_imperatively(models['clusters'],
                                      Table('clusters', meta,
                                            autoload_with=engine))
+    mapper_registry.map_imperatively(models['cluster_health'],
+                                     Table('cluster_health', meta,
+                                           autoload_with=engine))
     mapper_registry.map_imperatively(
         models['datastore_configuration_parameters'],
         Table('datastore_configuration_parameters', meta,

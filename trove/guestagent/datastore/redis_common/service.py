@@ -20,8 +20,10 @@ from oslo_utils import netutils
 import time
 from valkey.exceptions import ConnectionError
 from valkey import Valkey
-from trove.common import cfg, constants, exception, stream_codecs, utils
+from trove.common import cfg, cluster_health, constants, exception, \
+    stream_codecs, utils
 from trove.common.db.redis_common import models
+from trove.guestagent.common import cluster_probe
 from trove.guestagent.common import configuration, guestagent_utils, \
     operating_system
 from trove.guestagent.datastore.redis_common import manager
@@ -423,6 +425,43 @@ class RedisApp(service.BaseDbApp):
 
     # Cluster
 
+    def is_cluster_member(self):
+        return self.get_configuration_property('cluster-enabled') == 'yes'
+
+    def member_view(self):
+        """For the cluster watch: the cluster state this node sees and
+        its role now.
+        """
+        info = self.adm.cluster_info()
+        me = [n for n in self.adm.cluster_nodes() if 'myself' in n['flags']]
+        role = me[0]['role'] if me else None
+        return cluster_probe.MemberView(info.get('cluster_state'), role,
+                                        role == 'master', False)
+
+    def cluster_health(self):
+        """What this node sees of the cluster: down when the cluster
+        state is fail (some hash slot has no master serving it), degraded
+        while a node is failing (``fail``, ``fail?``: a master failed over
+        or about to be, a replica gone).
+        """
+        info = self.adm.cluster_info()
+        nodes = self.adm.cluster_nodes()
+        me = [n['address'] for n in nodes if 'myself' in n['flags']]
+        me = me[0] if me else None
+        failing = [n['address'] for n in nodes
+                   if {'fail', 'fail?', 'noaddr'} & set(n['flags'])]
+        if info.get('cluster_state') != 'ok':
+            return cluster_health.view(
+                cluster_health.DOWN, failing,
+                'cluster_state %s, %s of 16384 slots served' % (
+                    info.get('cluster_state'), info.get('cluster_slots_ok')),
+                me=me)
+        if failing:
+            return cluster_health.view(
+                cluster_health.DEGRADED, failing,
+                'failing: %s' % ', '.join(sorted(failing)), me=me)
+        return cluster_health.view(cluster_health.HEALTHY, me=me)
+
     def enable_cluster(self):
         """Start the server as a cluster node. Takes effect on start."""
         self.configuration_manager.apply_system_override({
@@ -778,8 +817,9 @@ class RedisAdmin(object):
 
     def cluster_nodes(self):
         """The nodes this one knows: [{'id', 'address', 'role',
-        'master_id', 'has_slots'}], 'role' being master or replica as
-        they are now, which a failover changes.
+        'master_id', 'has_slots', 'flags'}], 'role' being master or
+        replica as they are now, which a failover changes, and 'flags'
+        the node's flags (``myself``, ``fail``, ``fail?``...).
         """
         nodes = []
         for address, node in self.connection.cluster('NODES').items():
@@ -793,6 +833,7 @@ class RedisAdmin(object):
                 'role': 'replica' if 'slave' in flags else 'master',
                 'master_id': None if master_id in (None, '-') else master_id,
                 'has_slots': bool(node.get('slots')),
+                'flags': [f for f in flags.split(',') if f],
             })
         return nodes
 

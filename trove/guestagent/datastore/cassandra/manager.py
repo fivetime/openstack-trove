@@ -14,6 +14,7 @@ from oslo_log import log as logging
 
 from trove.common import cfg
 from trove.common.notification import EndNotification
+from trove.guestagent.common import cluster_member
 from trove.guestagent.datastore.cassandra import service
 from trove.guestagent.datastore import manager
 from trove.guestagent.datastore import service as base_service
@@ -23,13 +24,14 @@ LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
 
 
-class Manager(manager.Manager):
+class Manager(cluster_member.ClusterWatchMixin, manager.Manager):
 
     def __init__(self):
         super(Manager, self).__init__('cassandra')
         self.status = base_service.BaseDbStatus(self.docker_client)
         self.app = service.CassandraApp(self.status, self.docker_client)
         self.adm = self.app.adm
+        self.init_cluster_watch()
 
     @property
     def configuration_manager(self):

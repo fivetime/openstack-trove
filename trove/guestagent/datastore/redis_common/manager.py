@@ -17,6 +17,7 @@ from trove.common import cfg
 from trove.common import exception
 from trove.common.notification import EndNotification
 from trove.common import ssl
+from trove.guestagent.common import cluster_member
 from trove.guestagent.common import operating_system
 from trove.guestagent.datastore import manager
 from trove.guestagent.datastore import service as base_service
@@ -28,7 +29,7 @@ REPLICATION_USER = 'replicator'
 CLUSTER_ADMIN_USER = 'clusteradmin'
 
 
-class RedisManager(manager.Manager):
+class RedisManager(cluster_member.ClusterWatchMixin, manager.Manager):
     DATASTORE_NAME = None
     APP_CLASS = None
 
@@ -46,6 +47,7 @@ class RedisManager(manager.Manager):
         self.status = base_service.BaseDbStatus(self.docker_client)
         self.app = self.APP_CLASS(self.status, self.docker_client)
         self.adm = self.app.adm
+        self.init_cluster_watch()
 
     @property
     def configuration_manager(self):

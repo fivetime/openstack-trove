@@ -18,6 +18,7 @@ import tempfile
 from unittest import mock
 
 from oslo_utils import importutils
+from valkey._parsers import helpers as parsers
 
 from trove.common import cfg
 from trove.common import configurations
@@ -282,9 +283,53 @@ class TestRedisClusterApp(trove_testtools.TestCase):
         nodes = sorted(admin.cluster_nodes(), key=lambda n: n['id'])
         self.assertEqual(
             [{'id': 'm1', 'address': '172.31.79.11', 'role': 'master',
-              'master_id': None, 'has_slots': True},
+              'master_id': None, 'has_slots': True,
+              'flags': ['myself', 'master']},
              {'id': 'r1', 'address': '172.31.79.12', 'role': 'replica',
-              'master_id': 'm1', 'has_slots': False}], nodes)
+              'master_id': 'm1', 'has_slots': False, 'flags': ['slave']}],
+            nodes)
+
+    def _seen(self, state):
+        # CLUSTER INFO and CLUSTER NODES of a Valkey 9 cluster of three
+        # masters with a replica each, as one node printed them (2026-10-19):
+        # all up; a master stopped and its replica failed over; then that
+        # replica, now a master without one, stopped too. Parsed as
+        # valkey-py parses them.
+        here = os.path.join(os.path.dirname(__file__), '..', 'redis_common',
+                            'cluster')
+        with open(os.path.join(here, 'info-%s.txt' % state)) as f:
+            info = parsers.parse_cluster_info(f.read())
+        with open(os.path.join(here, 'nodes-%s.txt' % state)) as f:
+            nodes = parsers.parse_cluster_nodes(f.read())
+        admin = common_service.RedisAdmin()
+        admin._connection = mock.Mock()
+        admin._connection.cluster.side_effect = (
+            lambda what: {'INFO': info, 'NODES': nodes}[what])
+        self.app.adm = admin
+
+    def test_a_healthy_cluster(self):
+        self._seen('healthy')
+        health = self.app.cluster_health()
+        self.assertEqual('HEALTHY', health['status'])
+        self.assertEqual('172.31.250.51', health['me'])
+        view = self.app.member_view()
+        self.assertEqual(('ok', 'master', True, False),
+                         (view.state, view.role, view.writable, view.down))
+
+    def test_a_master_failed_over(self):
+        self._seen('failover')
+        health = self.app.cluster_health()
+        self.assertEqual('DEGRADED', health['status'])
+        self.assertEqual(['172.31.250.53'], health['out'])
+        self.assertEqual('failing: 172.31.250.53', health['reason'])
+
+    def test_slots_without_a_master(self):
+        self._seen('down')
+        health = self.app.cluster_health()
+        self.assertEqual('DOWN', health['status'])
+        self.assertEqual(['172.31.250.53', '172.31.250.54'], health['out'])
+        self.assertEqual('cluster_state fail, 10923 of 16384 slots served',
+                         health['reason'])
 
     def test_cluster_cli_password_in_environment(self):
         self.container.exec_run.return_value = (0, b'[OK] All good')

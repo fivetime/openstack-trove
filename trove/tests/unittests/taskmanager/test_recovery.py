@@ -20,8 +20,11 @@ from unittest import mock
 from oslo_utils import timeutils
 
 from trove.cluster.models import DBCluster
+from trove.cluster.models import DBClusterHealth
 from trove.cluster.tasks import ClusterTasks
+from trove.common import cluster_health
 from trove.common import exception
+from trove.common.strategies.cluster.experimental.common import health
 from trove.common import utils
 from trove.instance.models import DBInstance
 from trove.instance.models import InstanceServiceStatus
@@ -276,7 +279,12 @@ class SuspectClustersTest(trove_testtools.TestCase):
         return cluster.id
 
     def test_the_suspects(self):
+        # Without its health recorded a cluster is a suspect: looked at
+        # once, by the scan.
+        unseen = self._cluster()
         fresh = self._cluster()
+        health.record(fresh, cluster_health.view(cluster_health.HEALTHY))
+        self.made.append(DBClusterHealth.find_by(id=fresh))
         stale = self._cluster(heartbeats=(0, 200, 0))
         recovering = self._cluster(task=ClusterTasks.RECOVERING_CLUSTER)
         busy = self._cluster(task=ClusterTasks.GROWING_CLUSTER,
@@ -285,6 +293,7 @@ class SuspectClustersTest(trove_testtools.TestCase):
         stale_before = timeutils.utcnow() - datetime.timedelta(seconds=90)
         rows = recovery.suspect_clusters(stale_before)
         found = {row[0]: row for row in rows}
+        self.assertIn(unseen, found)
         self.assertIn(stale, found)
         self.assertIn(recovering, found)
         self.assertNotIn(fresh, found)

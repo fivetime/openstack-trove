@@ -44,6 +44,7 @@ from trove.cluster import models as cluster_models
 from trove.cluster.tasks import ClusterTasks
 from trove.common import cfg
 from trove.common import clients
+from trove.common.strategies.cluster.experimental.common import health
 from trove.instance.models import DBInstance
 from trove.instance.models import InstanceServiceStatus
 from trove.instance import tasks as inst_tasks
@@ -65,6 +66,9 @@ class ClusterRecovery(object):
       takes the cluster's recovery task first; ``_follow`` frees it.
     * ``_settled(views)``: whether a cluster under recovery is back; the
       task is freed then, or after ``cluster_recovery_timeout``.
+    * ``_member_out(answer)``, ``_serving(answers)``, optional: whether a
+      member that answered is out of the cluster, and whether any member
+      serves, for the health a look records (``common.health``).
     """
 
     def __init__(self, manager, guest_factory=None):
@@ -139,6 +143,20 @@ class ClusterRecovery(object):
     def _needs_look(self, answers):
         raise NotImplementedError()
 
+    def _member_out(self, answer):
+        return False
+
+    def _serving(self, answers):
+        return bool(answers)
+
+    def _record_health(self, cluster_id, members, views):
+        try:
+            health.from_views(cluster_id, members, views, self._member_out,
+                              self._serving)
+        except Exception:
+            LOG.exception("Cluster %s: its health was not recorded.",
+                          cluster_id)
+
     def _decide(self, context, db_cluster, members, views):
         raise NotImplementedError()
 
@@ -187,6 +205,7 @@ class ClusterRecovery(object):
         if any(self._member_busy(member) for member in members):
             return
         views = self._views(context, members)
+        self._record_health(cluster_id, members, views)
         answers = [answer for _m, answer in views if answer]
         if not self._needs_look(answers):
             self.waiting_since.pop(cluster_id, None)
@@ -210,7 +229,9 @@ class ClusterRecovery(object):
         cluster_id = db_cluster.id
         now = time.monotonic()
         since = self._forming_since(cluster_id, db_cluster, now)
-        views = self._views(context, self._members(context, cluster_id))
+        members = self._members(context, cluster_id)
+        views = self._views(context, members)
+        self._record_health(cluster_id, members, views)
         if self._settled(views):
             LOG.info("Cluster %s is back.", cluster_id)
         elif now - since < self.conf.cluster_recovery_timeout:

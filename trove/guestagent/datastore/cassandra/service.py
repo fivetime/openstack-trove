@@ -13,6 +13,7 @@
 import json
 import os
 import re
+import time
 
 import bcrypt
 import docker
@@ -20,12 +21,14 @@ from oslo_log import log as logging
 from oslo_utils import netutils
 
 from trove.common import cfg
+from trove.common import cluster_health
 from trove.common import constants
 from trove.common.db.cassandra import models
 from trove.common import exception
 from trove.common.i18n import _
 from trove.common import stream_codecs
 from trove.common import utils
+from trove.guestagent.common import cluster_probe
 from trove.guestagent.common import configuration
 from trove.guestagent.common import guestagent_utils
 from trove.guestagent.common import operating_system
@@ -35,6 +38,11 @@ from trove.guestagent.utils import docker as docker_util
 from trove.instance import service_status
 
 LOG = logging.getLogger(__name__)
+# What a line of nodetool status about a node starts with: Up or Down,
+# then Normal, Leaving, Joining or Moving.
+NODE_STATES = ('UN', 'UL', 'UJ', 'UM', 'DN', 'DL', 'DJ', 'DM')
+# Seconds a listing of the ring serves again.
+RING_CACHE = 5
 CONF = cfg.CONF
 
 # The directory of the guest with the files Trove writes. It is not mounted
@@ -510,9 +518,62 @@ class CassandraApp(service.BaseDbApp):
         """The nodes of the ring, from the lines of the status listing that
         start with the state of a node.
         """
-        return len([line for line in self.nodetool('status').splitlines()
-                    if line[:2] in ('UN', 'UL', 'UJ', 'UM',
-                                    'DN', 'DL', 'DJ', 'DM')])
+        return len(self.ring())
+
+    def ring(self, status=None):
+        """The nodes of the ring as this one sees them: [(state, address)],
+        the state as nodetool status gives it (UN: up and normal, DN:
+        down, UJ: joining...), from the lines that start with one.
+        """
+        if status is None:
+            # nodetool starts a JVM: one listing serves a look of the
+            # cluster watch (its member view, then its health).
+            cached = getattr(self, '_ring_cache', None)
+            if cached and time.monotonic() - cached[0] < RING_CACHE:
+                return cached[1]
+            nodes = self.ring(self.nodetool('status'))
+            self._ring_cache = (time.monotonic(), nodes)
+            return nodes
+        nodes = []
+        for line in status.splitlines():
+            if line[:2] in NODE_STATES:
+                fields = line.split()
+                if len(fields) > 1:
+                    nodes.append((line[:2], fields[1]))
+        return nodes
+
+    # The cluster watch (trove.guestagent.common.cluster_probe)
+
+    def is_watched_member(self):
+        return self.is_cluster_member
+
+    def member_view(self):
+        state = dict((a, st) for st, a in self.ring()).get(self.address)
+        return cluster_probe.MemberView(state, None, state == 'UN',
+                                        not state or state[0] != 'U')
+
+    def cluster_health(self):
+        """What this node sees of the ring: down when most nodes are down
+        (with three replicas, a quorum of some ranges is gone), degraded
+        while any node is not up and normal.
+        """
+        nodes = self.ring()
+        me = self.address
+        out = sorted(a for st, a in nodes if st != 'UN')
+        down = [a for st, a in nodes if st[0] == 'D']
+        if not nodes:
+            return cluster_health.view(cluster_health.DOWN, (),
+                                       'no node in the ring', me=me)
+        if len(down) > len(nodes) - (len(nodes) // 2 + 1):
+            return cluster_health.view(
+                cluster_health.DOWN, out, '%d of %d nodes down: %s' % (
+                    len(down), len(nodes), ', '.join(sorted(down))), me=me)
+        if out:
+            return cluster_health.view(
+                cluster_health.DEGRADED, out, 'not up and normal: %s' % (
+                    ', '.join('%s %s' % (a, st) for st, a in sorted(
+                        nodes, key=lambda n: n[1]) if st != 'UN')), me=me)
+        return cluster_health.view(cluster_health.HEALTHY, me=me)
 
     def repair_auth(self):
         """Bring the replicas of the roles up to date. Every node does it

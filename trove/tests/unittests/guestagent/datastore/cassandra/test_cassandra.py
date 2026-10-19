@@ -649,6 +649,61 @@ class TestCassandraAppLifecycle(CassandraGuestTestCase):
         mock_write.assert_not_called()
 
 
+class TestCassandraClusterHealth(CassandraGuestTestCase):
+    """What a node sees of the ring, from nodetool status of Cassandra 5.0
+    (2026-10-19, two nodes): both up, then the other one stopped.
+    """
+
+    def _app_seeing(self, state, address='172.31.250.66'):
+        app = self._app()
+        path = os.path.join(os.path.dirname(__file__), 'ring',
+                            'status-%s.txt' % state)
+        with open(path) as f:
+            app.nodetool = mock.Mock(return_value=f.read())
+        # The address the setUp patched in.
+        vars(cassandra_service.CassandraApp)['address'].return_value = address
+        return app
+
+    def test_a_ring_all_up(self):
+        app = self._app_seeing('healthy')
+        self.assertEqual({'status': 'HEALTHY', 'out': [], 'reason': None,
+                          'me': '172.31.250.66'}, app.cluster_health())
+        view = app.member_view()
+        self.assertEqual(('UN', True, False),
+                         (view.state, view.writable, view.down))
+        # One listing serves the member view and the health.
+        app.nodetool.assert_called_once_with('status')
+        self.assertEqual(2, app.count_nodes())
+
+    def test_half_the_ring_down(self):
+        # Two nodes, one down: no quorum of two replicas.
+        health = self._app_seeing('down').cluster_health()
+        self.assertEqual('DOWN', health['status'])
+        self.assertEqual(['172.31.250.67'], health['out'])
+        self.assertEqual('1 of 2 nodes down: 172.31.250.67',
+                         health['reason'])
+
+    def test_a_node_down_in_a_bigger_ring(self):
+        app = self._app_seeing('down')
+        with open(os.path.join(os.path.dirname(__file__), 'ring',
+                               'status-down.txt')) as f:
+            listing = f.read()
+        # A third node up, its line as nodetool prints one.
+        listing = listing.replace(
+            'UN  172.31.250.66', 'UN  172.31.250.68  119.81 KiB  16      '
+            '100.0%            60494c01-5ce4-493e-b2ab-708f65c728ff  '
+            'rack1\nUN  172.31.250.66')
+        app.nodetool.return_value = listing
+        health = app.cluster_health()
+        self.assertEqual('DEGRADED', health['status'])
+        self.assertEqual('not up and normal: 172.31.250.67 DN',
+                         health['reason'])
+
+    def test_the_node_itself_down(self):
+        view = self._app_seeing('down', address='172.31.250.67').member_view()
+        self.assertTrue(view.down)
+
+
 class TestCassandraAdmin(CassandraGuestTestCase):
 
     def _adm(self, clustered=False):

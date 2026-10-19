@@ -919,6 +919,61 @@ class TestVerticaServerWatch(VerticaGuestTestCase):
             '/etc/vertica-trove/server_stopped', force=True, as_root=True)
 
 
+class TestVerticaClusterHealth(VerticaGuestTestCase):
+    """What a node sees of the database, through vsql as the admin runs
+    it (the fields of a row separated by 0x1f).
+    """
+
+    def _app_seeing(self, nodes, tolerance, address='10.0.0.1'):
+        app = self._app()
+        answers = {
+            'SELECT node_address, node_state FROM nodes ORDER BY 1':
+                ''.join('%s\x1f%s\n' % n for n in nodes),
+            'SELECT designed_fault_tolerance, current_fault_tolerance '
+            'FROM system': '%s\x1f%s\n' % tolerance,
+        }
+        mock.patch.object(
+            vertica_service.VerticaApp, 'execute',
+            side_effect=lambda command, **kw: answers[command[-1]]).start()
+        mock.patch.object(vertica_service.VerticaApp, 'address',
+                          new_callable=mock.PropertyMock,
+                          return_value=address).start()
+        self.addCleanup(mock.patch.stopall)
+        return app
+
+    def test_every_node_up(self):
+        app = self._app_seeing(
+            [('10.0.0.1', 'UP'), ('10.0.0.2', 'UP'), ('10.0.0.3', 'UP')],
+            (1, 1))
+        self.assertEqual({'status': 'HEALTHY', 'out': [], 'reason': None,
+                          'me': '10.0.0.1'}, app.cluster_health())
+        view = app.member_view()
+        self.assertEqual(('UP', True, False),
+                         (view.state, view.writable, view.down))
+
+    def test_a_node_down(self):
+        app = self._app_seeing(
+            [('10.0.0.1', 'UP'), ('10.0.0.2', 'DOWN'), ('10.0.0.3', 'UP')],
+            (1, 0))
+        health = app.cluster_health()
+        self.assertEqual('DEGRADED', health['status'])
+        self.assertEqual(['10.0.0.2'], health['out'])
+        self.assertEqual('not up: 10.0.0.2 DOWN; fault tolerance 0 of 1',
+                         health['reason'])
+
+    def test_the_node_itself_recovering(self):
+        app = self._app_seeing(
+            [('10.0.0.1', 'RECOVERING'), ('10.0.0.2', 'UP'),
+             ('10.0.0.3', 'UP')], (1, 0))
+        self.assertTrue(app.member_view().down)
+
+    def test_watched_once_the_database_exists(self):
+        app = self._app()
+        with mock.patch.object(vertica_service.VerticaApp, 'database_exists',
+                               return_value=True):
+            self.assertTrue(app.is_watched_member())
+
+
 class TestVerticaAdmin(VerticaGuestTestCase):
 
     def _adm(self):

@@ -43,10 +43,12 @@ from sqlalchemy import or_
 from sqlalchemy.sql import expression
 
 from trove.cluster.models import DBCluster
+from trove.cluster.models import DBClusterHealth
 from trove.cluster.tasks import ClusterTasks
 from trove.common import cfg
 from trove.common import coordination
 from trove.common import exception
+from trove.common.strategies.cluster.experimental.common import health
 from trove.common.strategies.cluster import strategy
 from trove.datastore import models as datastore_models
 from trove.instance.models import DBInstance
@@ -82,8 +84,8 @@ def suspect_clusters(stale_before=None):
     alone: (cluster id, task id, datastore version id, the oldest
     heartbeat of their members) of every cluster that is not deleted
     and has no task but a recovery, with a member whose heartbeat is
-    older than ``stale_before`` or a recovery under way; every such
-    cluster when ``stale_before`` is None.
+    older than ``stale_before``, a recovery under way or no health
+    recorded yet; every such cluster when ``stale_before`` is None.
     """
     oldest = func.min(InstanceServiceStatus.updated_at)
     with DBCluster.query() as query:
@@ -95,6 +97,8 @@ def suspect_clusters(stale_before=None):
         ).join(
             InstanceServiceStatus,
             InstanceServiceStatus.instance_id == DBInstance.id
+        ).outerjoin(
+            DBClusterHealth, DBClusterHealth.id == DBCluster.id
         ).filter(
             DBCluster.deleted == expression.false(),
             DBInstance.deleted == expression.false(),
@@ -105,7 +109,8 @@ def suspect_clusters(stale_before=None):
         if stale_before is not None:
             rows = rows.having(or_(
                 oldest < stale_before,
-                DBCluster.task_id == ClusterTasks.RECOVERING_CLUSTER.code))
+                DBCluster.task_id == ClusterTasks.RECOVERING_CLUSTER.code,
+                func.count(DBClusterHealth.id) == 0))
         return rows.all()
 
 
@@ -363,7 +368,13 @@ class RecoveryHub(object):
         if manager not in self.recoveries:
             strat = strategy.load_taskmanager_strategy(manager)
             make = getattr(strat, 'cluster_recovery', None)
-            self.recoveries[manager] = make(manager) if make else None
+            if make:
+                self.recoveries[manager] = make(manager)
+            elif hasattr(CONF.get(manager), 'cluster_health_interval'):
+                # Clusters that heal themselves: their health only.
+                self.recoveries[manager] = health.HealthWatch(manager)
+            else:
+                self.recoveries[manager] = None
         return self.recoveries[manager]
 
 

@@ -13,9 +13,13 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import json
+
 from oslo_log import log as logging
 
+from trove.cluster.models import DBClusterHealth
 from trove.common import cfg
+from trove.common import cluster_health
 from trove.common.strategies.cluster import strategy
 from trove.common.views import create_links
 from trove.instance.views import InstanceDetailView
@@ -44,7 +48,8 @@ class ClusterView(object):
             "links": self._build_links(),
             "datastore": {"type": self.cluster.datastore.name,
                           "version": self.cluster.datastore_version.name},
-            "instances": instances
+            "instances": instances,
+            "health": self._build_health(),
         }
         if ip_list:
             cluster_dict["ip"] = ip_list
@@ -59,6 +64,22 @@ class ClusterView(object):
             cluster_dict['configuration'] = self.cluster.configuration_id
         LOG.debug(cluster_dict)
         return {"cluster": cluster_dict}
+
+    def _build_health(self):
+        """The health the task manager recorded
+        (``trove.common.cluster_health``): UNKNOWN until it looked.
+        """
+        row = getattr(self.cluster, 'health', None)
+        if not isinstance(row, DBClusterHealth):
+            return {'status': cluster_health.UNKNOWN}
+        try:
+            detail = json.loads(row.detail or '{}')
+        except ValueError:
+            detail = {}
+        return {'status': row.status,
+                'members_out': detail.get('out') or [],
+                'reason': detail.get('reason'),
+                'since': row.since}
 
     def _build_links(self):
         return create_links("clusters", self.req, self.cluster.id)
@@ -123,8 +144,16 @@ class ClustersView(object):
         self.req = req
 
     def data(self):
+        # The health of every cluster listed, at once.
+        ids = [cluster.id for cluster in self.clusters]
+        rows = {}
+        if ids:
+            with DBClusterHealth.query() as query:
+                rows = {row.id: row for row in query.filter(
+                    DBClusterHealth.id.in_(ids)).all()}
         data = []
         for cluster in self.clusters:
+            cluster.health = rows.get(cluster.id)
             data.append(self.data_for_cluster(cluster))
         return {'clusters': data}
 

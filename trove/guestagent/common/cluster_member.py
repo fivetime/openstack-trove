@@ -90,3 +90,37 @@ class ClusterMemberMixin(object):
 
     def get_member_role(self, context):
         return self.app.get_member_role()
+
+
+class ClusterWatchMixin(object):
+    """The cluster calls of a datastore whose clusters heal themselves:
+    the watch that tells the control plane what the member sees of its
+    cluster, and the call the task manager asks it with. Listed before the
+    manager class it extends.
+    """
+
+    cluster_watch = None
+
+    def init_cluster_watch(self):
+        """Start the watch; a manager without one is still a manager."""
+        try:
+            self.cluster_watch = cluster_probe.ClusterWatch(self.app)
+            self.cluster_watch.start()
+        except Exception:
+            LOG.exception("The cluster watch could not be set up.")
+
+    def cluster_complete(self, context):
+        """Every member has joined: the watch tells from now on."""
+        super(ClusterWatchMixin, self).cluster_complete(context)
+        if self.cluster_watch:
+            self.cluster_watch.enable_complete()
+
+    def get_cluster_health(self, context):
+        """What the member sees of its cluster, for the task manager; a
+        member whose database does not answer is down.
+        """
+        try:
+            return self.app.cluster_health()
+        except Exception as err:
+            LOG.warning("Cannot tell the health of the cluster: %s", err)
+            return {'down': True, 'reason': 'the database does not answer'}

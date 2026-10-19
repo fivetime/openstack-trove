@@ -17,6 +17,7 @@ from oslo_service import periodic_task
 
 from trove.common import cfg
 from trove.common.notification import EndNotification
+from trove.guestagent.common import cluster_member
 from trove.guestagent.datastore import manager
 from trove.guestagent.datastore.mongodb import service
 from trove.guestagent.datastore import service as base_service
@@ -26,7 +27,7 @@ LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
 
 
-class Manager(manager.Manager):
+class Manager(cluster_member.ClusterWatchMixin, manager.Manager):
 
     def __init__(self):
         super(Manager, self).__init__('mongodb')
@@ -35,6 +36,7 @@ class Manager(manager.Manager):
         self.adm = self.app.adm
         # When this member was first found too stale to catch up.
         self._stale_since = None
+        self.init_cluster_watch()
 
     @property
     def configuration_manager(self):
