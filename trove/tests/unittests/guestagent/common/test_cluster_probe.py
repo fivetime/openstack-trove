@@ -773,3 +773,12 @@ class TestWatchedManagers(trove_testtools.TestCase):
         watch.return_value.enable_complete.assert_called_once_with()
         self.assertEqual(ch.view(ch.HEALTHY),
                          manager.get_cluster_health(None))
+        # A member that watches nothing (a MongoDB query router) tells
+        # nothing; seen down on 2026-10-19 before.
+        manager.app.is_watched_member.return_value = False
+        self.assertIsNone(manager.get_cluster_health(None))
+        manager.app.cluster_health.assert_called_once_with()
+        # A member whose database does not answer is down.
+        manager.app.is_watched_member.return_value = True
+        manager.app.cluster_health.side_effect = RuntimeError('no')
+        self.assertTrue(manager.get_cluster_health(None)['down'])

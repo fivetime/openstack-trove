@@ -952,13 +952,20 @@ class TestVerticaClusterHealth(VerticaGuestTestCase):
                          (view.state, view.writable, view.down))
 
     def test_a_node_down(self):
-        app = self._app_seeing(
-            [('10.0.0.1', 'UP'), ('10.0.0.2', 'DOWN'), ('10.0.0.3', 'UP')],
-            (1, 0))
+        # What vsql printed on a member of a Trove Vertica 25.4 cluster of
+        # three with one powered off (2026-10-19).
+        here = os.path.join(os.path.dirname(__file__), 'health')
+        with open(os.path.join(here, 'nodes-down.txt')) as f:
+            # Not split(): 0x1f counts as white space.
+            nodes = [tuple(line.split('\x1f'))
+                     for line in f.read().splitlines()]
+        with open(os.path.join(here, 'system-down.txt')) as f:
+            tolerance = tuple(f.read().splitlines()[0].split('\x1f'))
+        app = self._app_seeing(nodes, tolerance, address='192.168.1.12')
         health = app.cluster_health()
         self.assertEqual('DEGRADED', health['status'])
-        self.assertEqual(['10.0.0.2'], health['out'])
-        self.assertEqual('not up: 10.0.0.2 DOWN; fault tolerance 0 of 1',
+        self.assertEqual(['192.168.1.151'], health['out'])
+        self.assertEqual('not up: 192.168.1.151 DOWN; fault tolerance 0 of 1',
                          health['reason'])
 
     def test_the_node_itself_recovering(self):

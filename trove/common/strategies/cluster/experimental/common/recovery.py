@@ -44,6 +44,7 @@ from trove.cluster import models as cluster_models
 from trove.cluster.tasks import ClusterTasks
 from trove.common import cfg
 from trove.common import clients
+from trove.common import cluster_health
 from trove.common.strategies.cluster.experimental.common import health
 from trove.instance.models import DBInstance
 from trove.instance.models import InstanceServiceStatus
@@ -82,6 +83,9 @@ class ClusterRecovery(object):
         # How soon a waiting cluster is to be looked at again (seconds),
         # when the wait ends before the next interval.
         self.next_look = {}
+        # The clusters last found not healthy: a member that comes back
+        # says nothing, so they are looked at again until they are.
+        self.unhealthy = set()
         self.guest_factory = guest_factory or self._guest
 
     def _guest(self, context, member):
@@ -151,8 +155,12 @@ class ClusterRecovery(object):
 
     def _record_health(self, cluster_id, members, views):
         try:
-            health.from_views(cluster_id, members, views, self._member_out,
-                              self._serving)
+            found = health.from_views(cluster_id, members, views,
+                                      self._member_out, self._serving)
+            if found['status'] == cluster_health.HEALTHY:
+                self.unhealthy.discard(cluster_id)
+            else:
+                self.unhealthy.add(cluster_id)
         except Exception:
             LOG.exception("Cluster %s: its health was not recorded.",
                           cluster_id)
@@ -176,7 +184,8 @@ class ClusterRecovery(object):
         and so is to be looked at again by itself.
         """
         return (cluster_id in self.waiting_since or
-                cluster_id in self.forming_since)
+                cluster_id in self.forming_since or
+                cluster_id in self.unhealthy)
 
     def look_again_in(self, cluster_id):
         """How many seconds until the cluster is to be looked at again:

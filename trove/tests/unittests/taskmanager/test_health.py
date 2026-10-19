@@ -217,6 +217,10 @@ class TestRecoveredHealth(HealthTestBase):
         self.assertEqual(ch.DEGRADED, status)
         self.assertEqual(['c-member-2', 'c-member-3'], detail['out'])
 
+        # Looked at again until healthy: a member that comes back says
+        # nothing (seen on 2026-10-19 before).
+        self.assertTrue(galera.still_watching(cluster.id))
+
         # No member in a primary component: down.
         views = [(m, {'in_group': False}) for m in members]
         galera._record_health(cluster.id, members, views)
@@ -224,16 +228,29 @@ class TestRecoveredHealth(HealthTestBase):
         self.assertEqual(ch.DOWN, status)
         self.assertTrue(detail['reason'].startswith('no member serves'))
 
+        views = [(m, {'in_group': True}) for m in members]
+        galera._record_health(cluster.id, members, views)
+        self.assertEqual(ch.HEALTHY, self._recorded(cluster.id)[0])
+        self.assertFalse(galera.still_watching(cluster.id))
+
     def test_the_scan_looks_at_a_cluster_not_looked_at_yet(self):
         new, _m = self._cluster()
         seen, _m = self._cluster()
         health.record(seen.id, ch.combine([('c-member-1',
                                             ch.view(ch.HEALTHY))], []))
         self.made.append(DBClusterHealth.find_by(id=seen.id))
+        # Not healthy: looked at again by the scan, whatever a task
+        # manager started meanwhile remembers.
+        short, _m = self._cluster()
+        health.record(short.id, ch.combine([('c-member-1',
+                                             ch.view(ch.HEALTHY))],
+                                           ['c-member-2']))
+        self.made.append(DBClusterHealth.find_by(id=short.id))
         found = {row[0] for row in recovery.suspect_clusters(
             timeutils.utcnow() - datetime.timedelta(seconds=90))}
         self.assertIn(new.id, found)
         self.assertNotIn(seen.id, found)
+        self.assertIn(short.id, found)
 
 
 class TestHealthView(HealthTestBase):

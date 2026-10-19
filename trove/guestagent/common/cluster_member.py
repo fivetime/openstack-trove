@@ -119,6 +119,10 @@ class ClusterWatchMixin(object):
         """What the member sees of its cluster, for the task manager; a
         member whose database does not answer is down.
         """
+        watched = getattr(self.app, 'is_watched_member', None)
+        if watched is not None and not watched():
+            # A member that watches nothing (a MongoDB query router).
+            return None
         try:
             return self.app.cluster_health()
         except Exception as err:

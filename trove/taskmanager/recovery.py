@@ -46,6 +46,7 @@ from trove.cluster.models import DBCluster
 from trove.cluster.models import DBClusterHealth
 from trove.cluster.tasks import ClusterTasks
 from trove.common import cfg
+from trove.common import cluster_health
 from trove.common import coordination
 from trove.common import exception
 from trove.common.strategies.cluster.experimental.common import health
@@ -84,8 +85,10 @@ def suspect_clusters(stale_before=None):
     alone: (cluster id, task id, datastore version id, the oldest
     heartbeat of their members) of every cluster that is not deleted
     and has no task but a recovery, with a member whose heartbeat is
-    older than ``stale_before``, a recovery under way or no health
-    recorded yet; every such cluster when ``stale_before`` is None.
+    older than ``stale_before``, a recovery under way, or a health that
+    is not recorded yet or not healthy (a task manager started again
+    does not remember what it was watching); every such cluster when
+    ``stale_before`` is None.
     """
     oldest = func.min(InstanceServiceStatus.updated_at)
     with DBCluster.query() as query:
@@ -110,7 +113,8 @@ def suspect_clusters(stale_before=None):
             rows = rows.having(or_(
                 oldest < stale_before,
                 DBCluster.task_id == ClusterTasks.RECOVERING_CLUSTER.code,
-                func.count(DBClusterHealth.id) == 0))
+                func.count(DBClusterHealth.id) == 0,
+                func.max(DBClusterHealth.status) != cluster_health.HEALTHY))
         return rows.all()
 
 
