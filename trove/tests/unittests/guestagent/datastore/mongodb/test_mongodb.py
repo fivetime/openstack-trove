@@ -626,6 +626,22 @@ class TestMongoDBAdmin(MongoDBGuestTestCase):
             client.admin.system.users.find_one.assert_called_with(
                 {'user': 'root', 'db': 'admin'})
 
+    def test_root_enabled_again_gets_a_new_password(self):
+        # admin.root is on the default ignore_users of [mongodb]: the
+        # lookup that skips such users must not decide this.
+        self.assertIn('admin.root', CONF.mongodb.ignore_users)
+        adm, client = self._adm()
+        # The record mongod 8.2 keeps for it (credentials left out).
+        client.admin.system.users.find_one.return_value = {
+            '_id': 'admin.root', 'user': 'root', 'db': 'admin',
+            'roles': [{'role': 'root', 'db': 'admin'}]}
+        with mock.patch.object(adm, '_client', return_value=client):
+            root = adm.enable_root('newpw')
+        client['admin'].command.assert_called_once_with(
+            'updateUser', 'root', pwd='newpw',
+            roles=[{'db': 'admin', 'role': 'root'}])
+        self.assertEqual('newpw', root['_password'])
+
     def test_databases(self):
         adm, client = self._adm()
         client.list_database_names.return_value = ['admin', 'config',

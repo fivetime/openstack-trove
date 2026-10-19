@@ -1,0 +1,9 @@
+---
+fixes:
+  - |
+    Enabling root a second time on a ``mongodb`` instance or cluster failed
+    with ``User "root@admin" already exists`` and returned no password: the
+    check for an existing root user went through the lookup that skips the
+    users on ``[mongodb] ignore_users``, ``admin.root`` among them, so it
+    always tried to create the user. It now gives the existing user a new
+    password, as for the other datastores.

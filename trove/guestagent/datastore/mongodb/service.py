@@ -793,24 +793,33 @@ class MongoDBAdmin(object):
             LOG.warning('Changing user host is not supported.')
 
     def enable_root(self, password=None):
-        """Create the user 'admin.root' with the role 'root'."""
+        """Create the user 'admin.root' with the role 'root', or give it
+        a new password when it exists.
+        """
         if not password:
             password = utils.generate_random_password()
         root_user = models.MongoDBUser.root(password=password)
         root_user.roles = {'db': 'admin', 'role': 'root'}
         root_user.check_create()
         with self._client() as client:
-            if self._get_user_record(root_user.name, client=client):
+            # Not _get_user_record: admin.root is on ignore_users, which
+            # it always reports missing, so a second enable tried to
+            # create the user again and failed.
+            if self._root_exists(client):
                 self._update_user_with_client(root_user, client,
                                               password=password)
             else:
                 self._create_user_with_client(root_user, client)
         return root_user.serialize()
 
+    @staticmethod
+    def _root_exists(client):
+        return bool(client.admin.system.users.find_one(
+            {'user': 'root', 'db': 'admin'}))
+
     def is_root_enabled(self):
         with self._client() as client:
-            return bool(client.admin.system.users.find_one(
-                {'user': 'root', 'db': 'admin'}))
+            return self._root_exists(client)
 
     def grant_access(self, username, databases):
         """Add the readWrite role on each database to the user."""
