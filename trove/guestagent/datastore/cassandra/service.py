@@ -12,8 +12,10 @@
 
 import json
 import os
+import re
 
 import bcrypt
+import docker
 from oslo_log import log as logging
 from oslo_utils import netutils
 
@@ -70,6 +72,17 @@ CNF_RESTORE = 'restore'
 # The replicas of the keyspace with the roles and of a keyspace created
 # through Trove on a cluster: all members, up to this many.
 MAX_REPLICATION_FACTOR = 3
+
+# The repair scheduler inside the server (CEP-37, in 6.0 and backported to
+# 5.0.8): the nodes of a cluster take turns repairing their ranges, with
+# the history in system_distributed, and need no one else to schedule them.
+# An older server refuses to start with auto_repair in cassandra.yaml. The
+# start option creates the tables of the scheduler; it is not to be taken
+# away once given, so a member whose server has the scheduler always starts
+# with it, and auto_repair turns the scheduling itself on or off.
+AUTO_REPAIR_SINCE = (5, 0, 8)
+AUTO_REPAIR_OPTION = '-Dcassandra.autorepair.enable=true'
+AUTO_REPAIR_CHANGE_ID = 'auto_repair'
 
 
 class CassandraApp(service.BaseDbApp):
@@ -297,6 +310,55 @@ class CassandraApp(service.BaseDbApp):
             service_status.ServiceStatuses.HEALTHY,
             CONF.restore_usage_timeout, update_db)
 
+    def server_version(self, image):
+        """The version of Cassandra in the image, from its environment
+        (CASSANDRA_VERSION of the official image), pulling the image when
+        it is not here yet; None when the image does not say.
+        """
+        try:
+            img = self.docker_client.images.get(image)
+        except docker.errors.ImageNotFound:
+            LOG.info("Pulling the image %s.", image)
+            img = self.docker_client.images.pull(image)
+        for variable in img.attrs.get('Config', {}).get('Env') or []:
+            name, _, value = variable.partition('=')
+            if name == 'CASSANDRA_VERSION':
+                match = re.match(r'(\d+)\.(\d+)\.(\d+)', value)
+                if match:
+                    return tuple(int(part) for part in match.groups())
+        return None
+
+    def configure_auto_repair(self, image):
+        """The repair scheduler of a member of a cluster, in
+        cassandra.yaml; the start options it needs. A single instance has
+        nothing to repair.
+        """
+        if not self.is_cluster_member:
+            return ''
+        version = self.server_version(image)
+        if version is None or version < AUTO_REPAIR_SINCE:
+            LOG.warning("Cassandra %s has no repair scheduler: the cluster "
+                        "is not repaired unless someone runs nodetool "
+                        "repair.", '.'.join(map(str, version or ())) or
+                        'of an unknown version')
+            self.configuration_manager.remove_system_override(
+                change_id=AUTO_REPAIR_CHANGE_ID)
+            return ''
+        conf = CONF.get(CONF.datastore_manager)
+        self.configuration_manager.apply_system_override({
+            'auto_repair': {
+                'enabled': conf.auto_repair,
+                'repair_type_overrides': {
+                    'full': {
+                        'enabled': conf.auto_repair,
+                        'min_repair_interval':
+                            f'{conf.auto_repair_interval}s',
+                    },
+                },
+            },
+        }, change_id=AUTO_REPAIR_CHANGE_ID)
+        return AUTO_REPAIR_OPTION
+
     def start_db(self, update_db=False, ds_version=None, command=None,
                  extra_volumes=None):
         """Start and wait for the database service."""
@@ -308,12 +370,13 @@ class CassandraApp(service.BaseDbApp):
             # The entrypoint of the image rewrites the seeds and the
             # addresses in the configuration every time it starts the
             # command 'cassandra'. Given a path it starts it untouched.
-            command = (
+            command = ' '.join(filter(None, [
                 '/opt/cassandra/bin/cassandra -f '
                 f'-Dcassandra.config=file://{CONTAINER_CONF_DIR}/'
                 f'{CONFIG_FILE_NAME} '
                 '-Dcassandra-rackdc.properties='
-                f'file://{CONTAINER_CONF_DIR}/{TOPOLOGY_FILE_NAME}')
+                f'file://{CONTAINER_CONF_DIR}/{TOPOLOGY_FILE_NAME}',
+                self.configure_auto_repair(image)]))
 
         self._ensure_directories()
 

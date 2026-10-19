@@ -14,3 +14,4 @@
    troubleshooting
    network_isolation
    object_storage
+   cluster_self_maintenance

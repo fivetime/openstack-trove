@@ -1,0 +1,420 @@
+{
+ "set": "rs",
+ "date": {
+  "$date": {
+   "$numberLong": "1792383459814"
+  }
+ },
+ "myState": {
+  "$numberInt": "3"
+ },
+ "term": {
+  "$numberLong": "1"
+ },
+ "tooStale": true,
+ "syncSourceHost": "",
+ "syncSourceId": {
+  "$numberInt": "-1"
+ },
+ "heartbeatIntervalMillis": {
+  "$numberLong": "2000"
+ },
+ "majorityVoteCount": {
+  "$numberInt": "2"
+ },
+ "writeMajorityCount": {
+  "$numberInt": "2"
+ },
+ "votingMembersCount": {
+  "$numberInt": "3"
+ },
+ "writableVotingMembersCount": {
+  "$numberInt": "3"
+ },
+ "optimes": {
+  "lastCommittedOpTime": {
+   "ts": {
+    "$timestamp": {
+     "t": 1792383452,
+     "i": 20
+    }
+   },
+   "t": {
+    "$numberLong": "1"
+   }
+  },
+  "lastCommittedWallTime": {
+   "$date": {
+    "$numberLong": "1792383452131"
+   }
+  },
+  "readConcernMajorityOpTime": {
+   "ts": {
+    "$timestamp": {
+     "t": 1792383379,
+     "i": 16
+    }
+   },
+   "t": {
+    "$numberLong": "1"
+   }
+  },
+  "appliedOpTime": {
+   "ts": {
+    "$timestamp": {
+     "t": 1792383379,
+     "i": 16
+    }
+   },
+   "t": {
+    "$numberLong": "1"
+   }
+  },
+  "durableOpTime": {
+   "ts": {
+    "$timestamp": {
+     "t": 1792383379,
+     "i": 16
+    }
+   },
+   "t": {
+    "$numberLong": "1"
+   }
+  },
+  "writtenOpTime": {
+   "ts": {
+    "$timestamp": {
+     "t": 1792383379,
+     "i": 16
+    }
+   },
+   "t": {
+    "$numberLong": "1"
+   }
+  },
+  "lastAppliedWallTime": {
+   "$date": {
+    "$numberLong": "1792383379748"
+   }
+  },
+  "lastDurableWallTime": {
+   "$date": {
+    "$numberLong": "1792383379748"
+   }
+  },
+  "lastWrittenWallTime": {
+   "$date": {
+    "$numberLong": "1792383379748"
+   }
+  }
+ },
+ "lastStableRecoveryTimestamp": {
+  "$timestamp": {
+   "t": 1792383368,
+   "i": 1
+  }
+ },
+ "members": [
+  {
+   "_id": {
+    "$numberInt": "0"
+   },
+   "name": "m1:27017",
+   "health": {
+    "$numberInt": "1"
+   },
+   "state": {
+    "$numberInt": "1"
+   },
+   "stateStr": "PRIMARY",
+   "uptime": {
+    "$numberInt": "5"
+   },
+   "optime": {
+    "ts": {
+     "$timestamp": {
+      "t": 1792383452,
+      "i": 20
+     }
+    },
+    "t": {
+     "$numberLong": "1"
+    }
+   },
+   "optimeDurable": {
+    "ts": {
+     "$timestamp": {
+      "t": 1792383452,
+      "i": 20
+     }
+    },
+    "t": {
+     "$numberLong": "1"
+    }
+   },
+   "optimeWritten": {
+    "ts": {
+     "$timestamp": {
+      "t": 1792383452,
+      "i": 20
+     }
+    },
+    "t": {
+     "$numberLong": "1"
+    }
+   },
+   "optimeDate": {
+    "$date": {
+     "$numberLong": "1792383452000"
+    }
+   },
+   "optimeDurableDate": {
+    "$date": {
+     "$numberLong": "1792383452000"
+    }
+   },
+   "optimeWrittenDate": {
+    "$date": {
+     "$numberLong": "1792383452000"
+    }
+   },
+   "lastAppliedWallTime": {
+    "$date": {
+     "$numberLong": "1792383452131"
+    }
+   },
+   "lastDurableWallTime": {
+    "$date": {
+     "$numberLong": "1792383452131"
+    }
+   },
+   "lastWrittenWallTime": {
+    "$date": {
+     "$numberLong": "1792383452131"
+    }
+   },
+   "lastHeartbeat": {
+    "$date": {
+     "$numberLong": "1792383459483"
+    }
+   },
+   "lastHeartbeatRecv": {
+    "$date": {
+     "$numberLong": "1792383458751"
+    }
+   },
+   "pingMs": {
+    "$numberLong": "0"
+   },
+   "lastHeartbeatMessage": "",
+   "syncSourceHost": "",
+   "syncSourceId": {
+    "$numberInt": "-1"
+   },
+   "infoMessage": "",
+   "electionTime": {
+    "$timestamp": {
+     "t": 1792383379,
+     "i": 1
+    }
+   },
+   "electionDate": {
+    "$date": {
+     "$numberLong": "1792383379000"
+    }
+   },
+   "configVersion": {
+    "$numberInt": "1"
+   },
+   "configTerm": {
+    "$numberInt": "1"
+   }
+  },
+  {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "name": "m2:27017",
+   "health": {
+    "$numberInt": "1"
+   },
+   "state": {
+    "$numberInt": "2"
+   },
+   "stateStr": "SECONDARY",
+   "uptime": {
+    "$numberInt": "5"
+   },
+   "optime": {
+    "ts": {
+     "$timestamp": {
+      "t": 1792383452,
+      "i": 20
+     }
+    },
+    "t": {
+     "$numberLong": "1"
+    }
+   },
+   "optimeDurable": {
+    "ts": {
+     "$timestamp": {
+      "t": 1792383452,
+      "i": 20
+     }
+    },
+    "t": {
+     "$numberLong": "1"
+    }
+   },
+   "optimeWritten": {
+    "ts": {
+     "$timestamp": {
+      "t": 1792383452,
+      "i": 20
+     }
+    },
+    "t": {
+     "$numberLong": "1"
+    }
+   },
+   "optimeDate": {
+    "$date": {
+     "$numberLong": "1792383452000"
+    }
+   },
+   "optimeDurableDate": {
+    "$date": {
+     "$numberLong": "1792383452000"
+    }
+   },
+   "optimeWrittenDate": {
+    "$date": {
+     "$numberLong": "1792383452000"
+    }
+   },
+   "lastAppliedWallTime": {
+    "$date": {
+     "$numberLong": "1792383452131"
+    }
+   },
+   "lastDurableWallTime": {
+    "$date": {
+     "$numberLong": "1792383452131"
+    }
+   },
+   "lastWrittenWallTime": {
+    "$date": {
+     "$numberLong": "1792383452131"
+    }
+   },
+   "lastHeartbeat": {
+    "$date": {
+     "$numberLong": "1792383459483"
+    }
+   },
+   "lastHeartbeatRecv": {
+    "$date": {
+     "$numberLong": "1792383457818"
+    }
+   },
+   "pingMs": {
+    "$numberLong": "0"
+   },
+   "lastHeartbeatMessage": "",
+   "syncSourceHost": "m1:27017",
+   "syncSourceId": {
+    "$numberInt": "0"
+   },
+   "infoMessage": "",
+   "configVersion": {
+    "$numberInt": "1"
+   },
+   "configTerm": {
+    "$numberInt": "1"
+   }
+  },
+  {
+   "_id": {
+    "$numberInt": "2"
+   },
+   "name": "m3:27017",
+   "health": {
+    "$numberInt": "1"
+   },
+   "state": {
+    "$numberInt": "3"
+   },
+   "stateStr": "RECOVERING",
+   "uptime": {
+    "$numberInt": "7"
+   },
+   "optime": {
+    "ts": {
+     "$timestamp": {
+      "t": 1792383379,
+      "i": 16
+     }
+    },
+    "t": {
+     "$numberLong": "1"
+    }
+   },
+   "optimeDate": {
+    "$date": {
+     "$numberLong": "1792383379000"
+    }
+   },
+   "optimeWritten": {
+    "ts": {
+     "$timestamp": {
+      "t": 1792383379,
+      "i": 16
+     }
+    },
+    "t": {
+     "$numberLong": "1"
+    }
+   },
+   "optimeWrittenDate": {
+    "$date": {
+     "$numberLong": "1792383379000"
+    }
+   },
+   "lastAppliedWallTime": {
+    "$date": {
+     "$numberLong": "1792383379748"
+    }
+   },
+   "lastDurableWallTime": {
+    "$date": {
+     "$numberLong": "1792383379748"
+    }
+   },
+   "lastWrittenWallTime": {
+    "$date": {
+     "$numberLong": "1792383379748"
+    }
+   },
+   "syncSourceHost": "",
+   "syncSourceId": {
+    "$numberInt": "-1"
+   },
+   "maintenanceMode": {
+    "$numberInt": "1"
+   },
+   "infoMessage": "",
+   "configVersion": {
+    "$numberInt": "1"
+   },
+   "configTerm": {
+    "$numberInt": "1"
+   },
+   "self": true,
+   "lastHeartbeatMessage": ""
+  }
+ ],
+ "ok": {
+  "$numberInt": "1"
+ }
+}

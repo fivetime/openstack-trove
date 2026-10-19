@@ -1,0 +1,21 @@
+{
+ "totalTimeProcessingMicros": {
+  "$numberInt": "-1"
+ },
+ "processingMethod": "empty collection",
+ "truncateMarkersCount": {
+  "$numberInt": "60"
+ },
+ "oplogMinRetentionHours": {
+  "$numberInt": "24"
+ },
+ "totalTimeTruncatingMicros": {
+  "$numberLong": "18553"
+ },
+ "truncateCount": {
+  "$numberLong": "26"
+ },
+ "interruptCount": {
+  "$numberLong": "0"
+ }
+}

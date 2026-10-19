@@ -17,6 +17,7 @@ import os
 from unittest import mock
 
 import bcrypt
+import docker
 from oslo_config import cfg as oslo_cfg
 from oslo_utils import importutils
 
@@ -329,6 +330,97 @@ class TestCassandraAppLifecycle(CassandraGuestTestCase):
         self.assertEqual({'7000/tcp': 7000, '7001/tcp': 7001,
                           '9042/tcp': 9042}, kwargs['ports'])
         self.assertIn('statusbinary', kwargs['healthcheck']['test'][1])
+
+    def _member(self, version='5.0.9', local=True):
+        app = self._app()
+        app.status.wait_for_status.return_value = True
+        app.configuration_manager.apply_system_override(
+            {'endpoint_snitch': 'GossipingPropertyFileSnitch'})
+        image = mock.Mock(attrs={'Config': {'Env': [
+            'PATH=/usr/bin', f'CASSANDRA_VERSION={version}']}})
+        if local:
+            app.docker_client.images.get.return_value = image
+        else:
+            app.docker_client.images.get.side_effect = \
+                docker.errors.ImageNotFound('no')
+            app.docker_client.images.pull.return_value = image
+        return app
+
+    @mock.patch.object(cassandra_service, 'docker_util')
+    @mock.patch.object(cassandra_service, 'operating_system')
+    def test_a_member_repairs_the_cluster_itself(self, mock_os, mock_docker):
+        app = self._member()
+
+        app.start_db(ds_version='5.0')
+
+        command = mock_docker.start_container.call_args[1]['command']
+        self.assertTrue(command.endswith(
+            ' -Dcassandra.autorepair.enable=true'))
+        self.assertIn('-Dcassandra-rackdc.properties=file:///etc/'
+                      'cassandra-trove/cassandra-rackdc.properties ', command)
+        self.assertEqual(
+            {'enabled': True, 'repair_type_overrides': {'full': {
+                'enabled': True, 'min_repair_interval': '86400s'}}},
+            app.configuration_manager.parse_configuration()['auto_repair'])
+        app.docker_client.images.get.assert_called_once_with('cassandra:5.0')
+
+    @mock.patch.object(cassandra_service, 'docker_util')
+    @mock.patch.object(cassandra_service, 'operating_system')
+    def test_the_scheduler_turned_off_keeps_its_tables(self, mock_os,
+                                                       mock_docker):
+        # The start option is not to be taken away once given.
+        self.patch_conf_property('auto_repair', False, section='cassandra')
+        app = self._member()
+
+        app.start_db(ds_version='5.0')
+
+        self.assertIn('-Dcassandra.autorepair.enable=true',
+                      mock_docker.start_container.call_args[1]['command'])
+        repair = app.configuration_manager.parse_configuration()[
+            'auto_repair']
+        self.assertFalse(repair['enabled'])
+        self.assertFalse(repair['repair_type_overrides']['full']['enabled'])
+
+    @mock.patch.object(cassandra_service, 'docker_util')
+    @mock.patch.object(cassandra_service, 'operating_system')
+    def test_an_older_server_gets_no_scheduler(self, mock_os, mock_docker):
+        # 5.0.7 refuses to start with auto_repair in cassandra.yaml.
+        app = self._member(version='5.0.7')
+        app.configuration_manager.apply_system_override(
+            {'auto_repair': {'enabled': True}}, change_id='auto_repair')
+
+        app.start_db(ds_version='5.0')
+
+        self.assertNotIn('autorepair',
+                         mock_docker.start_container.call_args[1]['command'])
+        self.assertNotIn('auto_repair',
+                         app.configuration_manager.parse_configuration())
+
+    @mock.patch.object(cassandra_service, 'docker_util')
+    @mock.patch.object(cassandra_service, 'operating_system')
+    def test_the_version_of_an_image_not_here_yet(self, mock_os, mock_docker):
+        app = self._member(local=False)
+
+        app.start_db(ds_version='5.0')
+
+        app.docker_client.images.pull.assert_called_once_with('cassandra:5.0')
+        self.assertIn('-Dcassandra.autorepair.enable=true',
+                      mock_docker.start_container.call_args[1]['command'])
+
+    @mock.patch.object(cassandra_service, 'docker_util')
+    @mock.patch.object(cassandra_service, 'operating_system')
+    def test_a_single_instance_has_nothing_to_repair(self, mock_os,
+                                                     mock_docker):
+        app = self._app()
+        app.status.wait_for_status.return_value = True
+
+        app.start_db(ds_version='5.0')
+
+        self.assertNotIn('autorepair',
+                         mock_docker.start_container.call_args[1]['command'])
+        self.assertNotIn('auto_repair',
+                         app.configuration_manager.parse_configuration())
+        app.docker_client.images.get.assert_not_called()
 
     @mock.patch.object(cassandra_service, 'docker_util')
     @mock.patch.object(cassandra_service, 'operating_system')

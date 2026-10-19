@@ -1,0 +1,513 @@
+{
+ "set": "rs",
+ "date": {
+  "$date": {
+   "$numberLong": "1792383381054"
+  }
+ },
+ "myState": {
+  "$numberInt": "2"
+ },
+ "term": {
+  "$numberLong": "1"
+ },
+ "syncSourceHost": "m1:27017",
+ "syncSourceId": {
+  "$numberInt": "0"
+ },
+ "heartbeatIntervalMillis": {
+  "$numberLong": "2000"
+ },
+ "majorityVoteCount": {
+  "$numberInt": "2"
+ },
+ "writeMajorityCount": {
+  "$numberInt": "2"
+ },
+ "votingMembersCount": {
+  "$numberInt": "3"
+ },
+ "writableVotingMembersCount": {
+  "$numberInt": "3"
+ },
+ "optimes": {
+  "lastCommittedOpTime": {
+   "ts": {
+    "$timestamp": {
+     "t": 1792383379,
+     "i": 16
+    }
+   },
+   "t": {
+    "$numberLong": "1"
+   }
+  },
+  "lastCommittedWallTime": {
+   "$date": {
+    "$numberLong": "1792383379748"
+   }
+  },
+  "readConcernMajorityOpTime": {
+   "ts": {
+    "$timestamp": {
+     "t": 1792383379,
+     "i": 16
+    }
+   },
+   "t": {
+    "$numberLong": "1"
+   }
+  },
+  "appliedOpTime": {
+   "ts": {
+    "$timestamp": {
+     "t": 1792383379,
+     "i": 16
+    }
+   },
+   "t": {
+    "$numberLong": "1"
+   }
+  },
+  "durableOpTime": {
+   "ts": {
+    "$timestamp": {
+     "t": 1792383379,
+     "i": 16
+    }
+   },
+   "t": {
+    "$numberLong": "1"
+   }
+  },
+  "writtenOpTime": {
+   "ts": {
+    "$timestamp": {
+     "t": 1792383379,
+     "i": 16
+    }
+   },
+   "t": {
+    "$numberLong": "1"
+   }
+  },
+  "lastAppliedWallTime": {
+   "$date": {
+    "$numberLong": "1792383379748"
+   }
+  },
+  "lastDurableWallTime": {
+   "$date": {
+    "$numberLong": "1792383379748"
+   }
+  },
+  "lastWrittenWallTime": {
+   "$date": {
+    "$numberLong": "1792383379748"
+   }
+  }
+ },
+ "lastStableRecoveryTimestamp": {
+  "$timestamp": {
+   "t": 1792383368,
+   "i": 1
+  }
+ },
+ "electionParticipantMetrics": {
+  "votedForCandidate": true,
+  "electionTerm": {
+   "$numberLong": "1"
+  },
+  "lastVoteDate": {
+   "$date": {
+    "$numberLong": "1792383379543"
+   }
+  },
+  "electionCandidateMemberId": {
+   "$numberInt": "0"
+  },
+  "voteReason": "",
+  "lastWrittenOpTimeAtElection": {
+   "ts": {
+    "$timestamp": {
+     "t": 1792383368,
+     "i": 1
+    }
+   },
+   "t": {
+    "$numberLong": "-1"
+   }
+  },
+  "maxWrittenOpTimeInSet": {
+   "ts": {
+    "$timestamp": {
+     "t": 1792383368,
+     "i": 1
+    }
+   },
+   "t": {
+    "$numberLong": "-1"
+   }
+  },
+  "lastAppliedOpTimeAtElection": {
+   "ts": {
+    "$timestamp": {
+     "t": 1792383368,
+     "i": 1
+    }
+   },
+   "t": {
+    "$numberLong": "-1"
+   }
+  },
+  "maxAppliedOpTimeInSet": {
+   "ts": {
+    "$timestamp": {
+     "t": 1792383368,
+     "i": 1
+    }
+   },
+   "t": {
+    "$numberLong": "-1"
+   }
+  },
+  "priorityAtElection": {
+   "$numberInt": "1"
+  },
+  "newTermStartDate": {
+   "$date": {
+    "$numberLong": "1792383379608"
+   }
+  },
+  "newTermAppliedDate": {
+   "$date": {
+    "$numberLong": "1792383380133"
+   }
+  }
+ },
+ "members": [
+  {
+   "_id": {
+    "$numberInt": "0"
+   },
+   "name": "m1:27017",
+   "health": {
+    "$numberInt": "1"
+   },
+   "state": {
+    "$numberInt": "1"
+   },
+   "stateStr": "PRIMARY",
+   "uptime": {
+    "$numberInt": "11"
+   },
+   "optime": {
+    "ts": {
+     "$timestamp": {
+      "t": 1792383379,
+      "i": 16
+     }
+    },
+    "t": {
+     "$numberLong": "1"
+    }
+   },
+   "optimeDurable": {
+    "ts": {
+     "$timestamp": {
+      "t": 1792383379,
+      "i": 16
+     }
+    },
+    "t": {
+     "$numberLong": "1"
+    }
+   },
+   "optimeWritten": {
+    "ts": {
+     "$timestamp": {
+      "t": 1792383379,
+      "i": 16
+     }
+    },
+    "t": {
+     "$numberLong": "1"
+    }
+   },
+   "optimeDate": {
+    "$date": {
+     "$numberLong": "1792383379000"
+    }
+   },
+   "optimeDurableDate": {
+    "$date": {
+     "$numberLong": "1792383379000"
+    }
+   },
+   "optimeWrittenDate": {
+    "$date": {
+     "$numberLong": "1792383379000"
+    }
+   },
+   "lastAppliedWallTime": {
+    "$date": {
+     "$numberLong": "1792383379748"
+    }
+   },
+   "lastDurableWallTime": {
+    "$date": {
+     "$numberLong": "1792383379748"
+    }
+   },
+   "lastWrittenWallTime": {
+    "$date": {
+     "$numberLong": "1792383379748"
+    }
+   },
+   "lastHeartbeat": {
+    "$date": {
+     "$numberLong": "1792383380568"
+    }
+   },
+   "lastHeartbeatRecv": {
+    "$date": {
+     "$numberLong": "1792383379565"
+    }
+   },
+   "pingMs": {
+    "$numberLong": "0"
+   },
+   "lastHeartbeatMessage": "",
+   "syncSourceHost": "",
+   "syncSourceId": {
+    "$numberInt": "-1"
+   },
+   "infoMessage": "",
+   "electionTime": {
+    "$timestamp": {
+     "t": 1792383379,
+     "i": 1
+    }
+   },
+   "electionDate": {
+    "$date": {
+     "$numberLong": "1792383379000"
+    }
+   },
+   "configVersion": {
+    "$numberInt": "1"
+   },
+   "configTerm": {
+    "$numberInt": "1"
+   }
+  },
+  {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "name": "m2:27017",
+   "health": {
+    "$numberInt": "1"
+   },
+   "state": {
+    "$numberInt": "2"
+   },
+   "stateStr": "SECONDARY",
+   "uptime": {
+    "$numberInt": "11"
+   },
+   "optime": {
+    "ts": {
+     "$timestamp": {
+      "t": 1792383379,
+      "i": 16
+     }
+    },
+    "t": {
+     "$numberLong": "1"
+    }
+   },
+   "optimeDurable": {
+    "ts": {
+     "$timestamp": {
+      "t": 1792383379,
+      "i": 16
+     }
+    },
+    "t": {
+     "$numberLong": "1"
+    }
+   },
+   "optimeWritten": {
+    "ts": {
+     "$timestamp": {
+      "t": 1792383379,
+      "i": 16
+     }
+    },
+    "t": {
+     "$numberLong": "1"
+    }
+   },
+   "optimeDate": {
+    "$date": {
+     "$numberLong": "1792383379000"
+    }
+   },
+   "optimeDurableDate": {
+    "$date": {
+     "$numberLong": "1792383379000"
+    }
+   },
+   "optimeWrittenDate": {
+    "$date": {
+     "$numberLong": "1792383379000"
+    }
+   },
+   "lastAppliedWallTime": {
+    "$date": {
+     "$numberLong": "1792383379748"
+    }
+   },
+   "lastDurableWallTime": {
+    "$date": {
+     "$numberLong": "1792383379748"
+    }
+   },
+   "lastWrittenWallTime": {
+    "$date": {
+     "$numberLong": "1792383379748"
+    }
+   },
+   "lastHeartbeat": {
+    "$date": {
+     "$numberLong": "1792383380568"
+    }
+   },
+   "lastHeartbeatRecv": {
+    "$date": {
+     "$numberLong": "1792383380567"
+    }
+   },
+   "pingMs": {
+    "$numberLong": "0"
+   },
+   "lastHeartbeatMessage": "",
+   "syncSourceHost": "m1:27017",
+   "syncSourceId": {
+    "$numberInt": "0"
+   },
+   "infoMessage": "",
+   "configVersion": {
+    "$numberInt": "1"
+   },
+   "configTerm": {
+    "$numberInt": "1"
+   }
+  },
+  {
+   "_id": {
+    "$numberInt": "2"
+   },
+   "name": "m3:27017",
+   "health": {
+    "$numberInt": "1"
+   },
+   "state": {
+    "$numberInt": "2"
+   },
+   "stateStr": "SECONDARY",
+   "uptime": {
+    "$numberInt": "29"
+   },
+   "optime": {
+    "ts": {
+     "$timestamp": {
+      "t": 1792383379,
+      "i": 16
+     }
+    },
+    "t": {
+     "$numberLong": "1"
+    }
+   },
+   "optimeDate": {
+    "$date": {
+     "$numberLong": "1792383379000"
+    }
+   },
+   "optimeWritten": {
+    "ts": {
+     "$timestamp": {
+      "t": 1792383379,
+      "i": 16
+     }
+    },
+    "t": {
+     "$numberLong": "1"
+    }
+   },
+   "optimeWrittenDate": {
+    "$date": {
+     "$numberLong": "1792383379000"
+    }
+   },
+   "lastAppliedWallTime": {
+    "$date": {
+     "$numberLong": "1792383379748"
+    }
+   },
+   "lastDurableWallTime": {
+    "$date": {
+     "$numberLong": "1792383379748"
+    }
+   },
+   "lastWrittenWallTime": {
+    "$date": {
+     "$numberLong": "1792383379748"
+    }
+   },
+   "syncSourceHost": "m1:27017",
+   "syncSourceId": {
+    "$numberInt": "0"
+   },
+   "infoMessage": "",
+   "configVersion": {
+    "$numberInt": "1"
+   },
+   "configTerm": {
+    "$numberInt": "1"
+   },
+   "self": true,
+   "lastHeartbeatMessage": ""
+  }
+ ],
+ "ok": {
+  "$numberInt": "1"
+ },
+ "$clusterTime": {
+  "clusterTime": {
+   "$timestamp": {
+    "t": 1792383379,
+    "i": 16
+   }
+  },
+  "signature": {
+   "hash": {
+    "$binary": {
+     "base64": "AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+     "subType": "00"
+    }
+   },
+   "keyId": {
+    "$numberLong": "0"
+   }
+  }
+ },
+ "operationTime": {
+  "$timestamp": {
+   "t": 1792383379,
+   "i": 16
+  }
+ }
+}

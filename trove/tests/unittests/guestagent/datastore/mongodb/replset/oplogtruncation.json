@@ -1,0 +1,18 @@
+{
+ "totalTimeProcessingMicros": {
+  "$numberInt": "-1"
+ },
+ "processingMethod": "empty collection",
+ "truncateMarkersCount": {
+  "$numberInt": "0"
+ },
+ "totalTimeTruncatingMicros": {
+  "$numberLong": "0"
+ },
+ "truncateCount": {
+  "$numberLong": "0"
+ },
+ "interruptCount": {
+  "$numberLong": "0"
+ }
+}

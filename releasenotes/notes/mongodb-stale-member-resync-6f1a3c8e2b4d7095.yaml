@@ -1,0 +1,19 @@
+---
+features:
+  - |
+    A replica set member of a ``mongodb`` cluster (a shard or config
+    server) that was down for longer than the oplog of the others covers,
+    and so can never catch up, syncs again from the others by itself: it
+    stops, empties its data directory and starts again, the way MongoDB
+    documents to resync a stale member. It does so only while the set has
+    a primary and the oplog of every member it could sync from starts after
+    the last write it applied, and after it has been found so for
+    ``[mongodb] resync_stale_after`` seconds (default 300).
+    ``[mongodb] resync_stale_members`` (default ``true``) turns it off.
+  - |
+    ``[mongodb] oplog_min_retention_hours`` (default 0, MongoDB's fixed
+    oplog size) sets ``storage.oplogMinRetentionHours`` on the replica set
+    members of a cluster, in their configuration and on the running
+    servers: a member down for less than that many hours catches up by
+    itself. The oplog grows past its size on the data volumes when it has
+    to.

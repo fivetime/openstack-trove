@@ -16,6 +16,7 @@ import json
 import os
 from unittest import mock
 
+from bson import json_util
 from oslo_config import cfg as oslo_cfg
 from oslo_utils import importutils
 
@@ -72,6 +73,12 @@ class FakeConfigurationManager(object):
 
     def apply_user_override(self, options, change_id='overrides'):
         self._merge(options, self.config)
+
+    def remove_system_override(self, change_id='overrides'):
+        # Only the oplog retention is removed by the code under test.
+        if change_id == mongodb_service.CNF_OPLOG:
+            self.config.get('storage', {}).pop('oplogMinRetentionHours',
+                                               None)
 
     def parse_configuration(self):
         return self.config
@@ -675,6 +682,164 @@ class TestMongoDBAdmin(MongoDBGuestTestCase):
         self.assertEqual(2, healthy)
 
 
+def _replset(name):
+    """What MongoDB 8.2 answered, in a replica set of three where m3 was
+    down while m1 took more writes than its oplog of 990 MB holds
+    (replSetGetStatus of m3, and the oldest entry of m1's oplog).
+    """
+    path = os.path.join(os.path.dirname(__file__), 'replset', name + '.json')
+    with open(path) as f:
+        return json_util.loads(f.read())
+
+
+class TestMongoDBStaleMember(MongoDBGuestTestCase):
+
+    def _adm(self, status, oldest=None):
+        adm = mongodb_service.MongoDBAdmin(_app(_render()))
+        adm.get_repl_status = mock.Mock(return_value=status)
+        adm.oldest_oplog_entry = mock.Mock(
+            return_value=_replset('oldest-m1')['ts'] if oldest is None
+            else oldest)
+        return adm
+
+    def test_a_stale_member_is_found_by_what_it_means(self):
+        # replSetGetStatus says nothing of it: no infoMessage, no
+        # lastHeartbeatMessage; "Too stale to catch up" is in the log only.
+        status = _replset('status-stale')
+        me = [m for m in status['members'] if m.get('self')][0]
+        self.assertEqual('RECOVERING', me['stateStr'])
+        self.assertEqual('', me.get('infoMessage', ''))
+        adm = self._adm(status)
+
+        reason = adm.staleness()
+
+        self.assertIn('m1:27017, m2:27017', reason)
+        self.assertEqual(['m1:27017', 'm2:27017'],
+                         [c[0][0] for c in
+                          adm.oldest_oplog_entry.call_args_list])
+
+    def test_a_member_one_source_can_still_feed_is_not_stale(self):
+        status = _replset('status-stale')
+        adm = self._adm(status,
+                        oldest=status['optimes']['appliedOpTime']['ts'])
+        self.assertIsNone(adm.staleness())
+
+    def test_nothing_is_done_without_a_primary(self):
+        status = _replset('status-stale')
+        for member in status['members']:
+            if member['state'] == 1:
+                member['state'], member['stateStr'] = 2, 'SECONDARY'
+        adm = self._adm(status)
+        self.assertIsNone(adm.staleness())
+        adm.oldest_oplog_entry.assert_not_called()
+
+    def test_a_secondary_is_not_stale(self):
+        adm = self._adm(_replset('status-secondary'))
+        self.assertIsNone(adm.staleness())
+        adm.oldest_oplog_entry.assert_not_called()
+
+    @mock.patch.object(mongodb_service.pymongo, 'MongoClient')
+    def test_the_oldest_entry_of_another_member(self, mock_client):
+        adm = mongodb_service.MongoDBAdmin(_app(_render()))
+        client = mock.MagicMock()
+        mock_client.return_value.__enter__.return_value = client
+        client.local.__getitem__.return_value.find_one.return_value = \
+            _replset('oldest-m1')
+        with mock.patch.object(mongodb_service.MongoDBApp, 'admin_password',
+                               new_callable=mock.PropertyMock,
+                               return_value='pw'):
+            ts = adm.oldest_oplog_entry('m1:27017')
+        self.assertEqual(_replset('oldest-m1')['ts'], ts)
+        kwargs = mock_client.call_args[1]
+        self.assertEqual('m1:27017', kwargs['host'])
+        self.assertTrue(kwargs['directConnection'])
+        self.assertEqual('os_admin', kwargs['username'])
+        client.local.__getitem__.assert_called_once_with('oplog.rs')
+        self.assertEqual([('$natural', 1)], client.local.__getitem__.
+                         return_value.find_one.call_args[1]['sort'])
+
+    def test_the_retention_as_the_server_reports_it(self):
+        # Not in serverStatus at all until it is set.
+        adm = mongodb_service.MongoDBAdmin(_app(_render()))
+        for name, hours in (('oplogtruncation', 0),
+                            ('oplogtruncation-24', 24)):
+            with mock.patch.object(adm, '_run', return_value={
+                    'oplogTruncation': _replset(name)}):
+                self.assertEqual(hours, adm.oplog_min_retention_hours())
+        with mock.patch.object(adm, '_run') as run:
+            adm.set_oplog_min_retention_hours(24)
+        run.assert_called_once_with('replSetResizeOplog',
+                                    minRetentionHours=24)
+
+    def _member(self):
+        app = _app(_render())
+        app.apply_initial_guestagent_configuration(
+            {'instance_type': 'member', 'replica_set_name': 'rs1'})
+        app.adm = mock.Mock()
+        return app
+
+    def test_a_member_keeps_its_oplog_retention(self):
+        self.patch_conf_property('oplog_min_retention_hours', 24,
+                                 section='mongodb')
+        app = self._member()
+        app.adm.oplog_min_retention_hours.return_value = 0
+
+        app.keep_oplog_retention()
+
+        self.assertEqual(24, app.get_config_value(
+            'storage.oplogMinRetentionHours'))
+        app.adm.set_oplog_min_retention_hours.assert_called_once_with(24)
+
+        app.adm.reset_mock()
+        app.adm.oplog_min_retention_hours.return_value = 24
+        app.keep_oplog_retention()
+        app.adm.set_oplog_min_retention_hours.assert_not_called()
+
+    def test_no_retention_by_default(self):
+        app = self._member()
+        app.adm.oplog_min_retention_hours.return_value = 0
+        app.keep_oplog_retention()
+        self.assertIsNone(app.get_config_value(
+            'storage.oplogMinRetentionHours'))
+        app.adm.set_oplog_min_retention_hours.assert_not_called()
+
+    @mock.patch.object(mongodb_service, 'docker_util')
+    @mock.patch.object(mongodb_service, 'operating_system')
+    def test_a_member_starts_with_its_retention(self, mock_os, mock_docker):
+        self.patch_conf_property('oplog_min_retention_hours', 24,
+                                 section='mongodb')
+        app = self._member()
+        app.status.wait_for_status.return_value = True
+        app.start_db(ds_version='8.2')
+        self.assertEqual(24, app.get_config_value(
+            'storage.oplogMinRetentionHours'))
+
+        single = _app(_render())
+        single.apply_initial_guestagent_configuration(None)
+        single.status.wait_for_status.return_value = True
+        single.start_db(ds_version='8.2')
+        # A standalone server has no oplog.
+        self.assertIsNone(single.get_config_value(
+            'storage.oplogMinRetentionHours'))
+
+    @mock.patch.object(mongodb_service, 'docker_util')
+    @mock.patch.object(mongodb_service, 'operating_system')
+    def test_resync_starts_from_an_empty_data_directory(self, mock_os,
+                                                        mock_docker):
+        app = self._member()
+        order = mock.Mock()
+        for name in ('stop_db', 'start_db'):
+            setattr(app, name, getattr(order, name))
+        order.attach_mock(mock_os.remove, 'remove')
+
+        app.resync()
+
+        self.assertEqual(['stop_db', 'remove', 'start_db'],
+                         [c[0] for c in order.mock_calls])
+        self.assertEqual('/var/lib/mongodb/data',
+                         mock_os.remove.call_args[0][0])
+
+
 class TestMongoDBManager(MongoDBGuestTestCase):
 
     def _manager(self):
@@ -775,3 +940,74 @@ class TestMongoDBManager(MongoDBGuestTestCase):
         manager.app.store_admin_password.assert_called_once_with('pw2')
         manager.create_admin_user(context, 'pw3')
         manager.app.secure.assert_called_once_with('pw3')
+
+
+class TestMongoDBReplicaSetMaintenance(MongoDBGuestTestCase):
+    """maintain_replica_set, the periodic task of a replica set member."""
+
+    _manager = TestMongoDBManager._manager
+
+    def _member_manager(self, staleness=None):
+        manager = self._manager()
+        manager.status.is_installed = True
+        manager.app.replica_set_name = 'rs1'
+        manager.adm.staleness.return_value = staleness
+        return manager
+
+    def test_a_stale_member_resyncs_after_a_while(self):
+        manager = self._member_manager('older than the oplog of m1, m2')
+        clock = [1000.0]
+        with mock.patch.object(mongodb_manager.time, 'monotonic',
+                               side_effect=lambda: clock[0]):
+            manager.maintain_replica_set(None)
+            manager.app.resync.assert_not_called()
+            clock[0] += 299
+            manager.maintain_replica_set(None)
+            manager.app.resync.assert_not_called()
+            clock[0] += 1
+            manager.maintain_replica_set(None)
+        manager.app.resync.assert_called_once_with()
+        manager.app.keep_oplog_retention.assert_called()
+
+    def test_a_member_that_catches_up_meanwhile_is_left(self):
+        manager = self._member_manager('stale')
+        clock = [1000.0]
+        with mock.patch.object(mongodb_manager.time, 'monotonic',
+                               side_effect=lambda: clock[0]):
+            manager.maintain_replica_set(None)
+            manager.adm.staleness.return_value = None
+            clock[0] += 200
+            manager.maintain_replica_set(None)
+            manager.adm.staleness.return_value = 'stale'
+            clock[0] += 200
+            manager.maintain_replica_set(None)
+        # Found stale again 200 s ago, not 400.
+        manager.app.resync.assert_not_called()
+
+    def test_resync_turned_off(self):
+        manager = self._member_manager('stale')
+        # After the manager: registering its options clears what CONF
+        # keeps of a group, and a patch with it.
+        self.patch_conf_property('resync_stale_members', False,
+                                 section='mongodb')
+        manager.maintain_replica_set(None)
+        manager.adm.staleness.assert_not_called()
+        manager.app.keep_oplog_retention.assert_called_once_with()
+
+    def test_not_for_a_query_router_or_a_single_instance(self):
+        manager = self._member_manager('stale')
+        manager.app.is_query_router = True
+        manager.maintain_replica_set(None)
+        manager.app.replica_set_name = None
+        manager.app.is_query_router = False
+        manager.maintain_replica_set(None)
+        manager.adm.staleness.assert_not_called()
+        manager.app.keep_oplog_retention.assert_not_called()
+
+    def test_a_member_without_its_admin_user_yet(self):
+        manager = self._member_manager('stale')
+        manager.app.keep_oplog_retention.side_effect = \
+            mongodb_service.pymongo_errors.OperationFailure('auth')
+        manager.maintain_replica_set(None)
+        manager.adm.staleness.assert_not_called()
+        manager.app.resync.assert_not_called()

@@ -10,7 +10,10 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import time
+
 from oslo_log import log as logging
+from oslo_service import periodic_task
 
 from trove.common import cfg
 from trove.common.notification import EndNotification
@@ -30,10 +33,46 @@ class Manager(manager.Manager):
         self.status = base_service.BaseDbStatus(self.docker_client)
         self.app = service.MongoDBApp(self.status, self.docker_client)
         self.adm = self.app.adm
+        # When this member was first found too stale to catch up.
+        self._stale_since = None
 
     @property
     def configuration_manager(self):
         return self.app.configuration_manager
+
+    @periodic_task.periodic_task(spacing=60)
+    def maintain_replica_set(self, context):
+        """A replica set member keeps its oplog retention, and syncs
+        again from the others once it has been too stale to catch up for
+        resync_stale_after seconds (resync_stale_members).
+        """
+        if (not self.status.is_installed or not self.app.replica_set_name
+                or self.app.is_query_router):
+            return
+        conf = CONF.get(CONF.datastore_manager)
+        try:
+            self.app.keep_oplog_retention()
+            reason = (self.adm.staleness() if conf.resync_stale_members
+                      else None)
+        except Exception as e:
+            # Before the member has its admin user, or while the set is
+            # being changed: nothing to do now.
+            LOG.debug("Replica set maintenance skipped: %s", e)
+            return
+        if reason is None:
+            self._stale_since = None
+            return
+        now = time.monotonic()
+        if self._stale_since is None:
+            self._stale_since = now
+            LOG.warning("This member is too stale to catch up: %s. It "
+                        "syncs again from the others in %s seconds unless "
+                        "that changes.", reason, conf.resync_stale_after)
+            return
+        if now - self._stale_since < conf.resync_stale_after:
+            return
+        self._stale_since = None
+        self.app.resync()
 
     def do_prepare(self, context, packages, databases, memory_mb, users,
                    device_path, mount_point, backup_info,

@@ -1354,6 +1354,19 @@ cassandra_opts = [
     cfg.IntOpt('node_sync_time', default=60,
                help='Time (in seconds) given to a node after a state change '
                'to finish rejoining the cluster.'),
+    cfg.BoolOpt('auto_repair', default=True,
+                help='Whether the members of a cluster repair it '
+                     'themselves, with the repair scheduler of Cassandra '
+                     '5.0.8 and later (auto_repair in cassandra.yaml): '
+                     'without repairs a node that was down for longer than '
+                     'the hint window keeps stale data, and deleted data '
+                     'can come back after gc_grace_seconds. Older servers '
+                     'have no scheduler and are left as they are.'),
+    cfg.IntOpt('auto_repair_interval', default=86400, min=3600,
+               help='Seconds between two full repairs of a node by the '
+                    'repair scheduler (its min_repair_interval). Keep it '
+                    'well below gc_grace_seconds of the tables, 10 days '
+                    'unless changed.'),
     cfg.StrOpt(
         'docker_image', default='cassandra',
         help='Database docker image.'
@@ -1503,6 +1516,25 @@ mongodb_opts = [
                 help='Port for mongod and mongos instances.'),
     cfg.PortOpt('configsvr_port', default=27019,
                 help='Port for instances running as config servers.'),
+    cfg.FloatOpt('oplog_min_retention_hours', default=0, min=0,
+                 help='Hours of writes the oplog of a replica set member '
+                      '(a shard or config server) keeps at least, growing '
+                      'past its size when it has to '
+                      '(storage.oplogMinRetentionHours): a member down for '
+                      'less than that catches up by itself. 0 keeps '
+                      'MongoDB\'s own behaviour, an oplog of a fixed size. '
+                      'The oplog takes room on the data volume of each '
+                      'member while it keeps the writes.'),
+    cfg.BoolOpt('resync_stale_members', default=True,
+                help='Whether a replica set member that fell behind the '
+                     'oplog of every other member, and so can never catch '
+                     'up (RECOVERING, too stale), empties its data '
+                     'directory and syncs again from the others, the way '
+                     'MongoDB documents to resync a stale member. Only '
+                     'done while the set has a primary.'),
+    cfg.IntOpt('resync_stale_after', default=300, min=60,
+               help='Seconds a member has been found too stale before it '
+                    'resyncs (resync_stale_members).'),
     cfg.ListOpt('ignore_dbs', default=['admin', 'local', 'config'],
                 help='Databases to exclude when listing databases.'),
     cfg.ListOpt('ignore_users', default=['admin.os_admin', 'admin.root'],

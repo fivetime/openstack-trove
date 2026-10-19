@@ -68,6 +68,10 @@ INSTANCE_TYPE_QUERY_ROUTER = 'query_router'
 
 # Replica set member states that count as healthy: PRIMARY and SECONDARY.
 RS_HEALTHY_STATES = (1, 2)
+RS_PRIMARY = 1
+RS_RECOVERING = 3
+# The change of the configuration that keeps the oplog retention.
+CNF_OPLOG = 'oplog'
 
 
 def socket_path(port):
@@ -137,6 +141,43 @@ class MongoDBApp(service.BaseDbApp):
     @property
     def replica_set_name(self):
         return self.get_config_value('replication.replSetName')
+
+    @property
+    def oplog_min_retention_hours(self):
+        return CONF.get(CONF.datastore_manager).oplog_min_retention_hours
+
+    def _configure_oplog_retention(self):
+        hours = self.oplog_min_retention_hours
+        if (self.get_config_value('storage.oplogMinRetentionHours') or
+                0) == hours:
+            return
+        if hours:
+            self.configuration_manager.apply_system_override(
+                {'storage': {'oplogMinRetentionHours': hours}}, CNF_OPLOG)
+        else:
+            self.configuration_manager.remove_system_override(CNF_OPLOG)
+
+    def keep_oplog_retention(self):
+        """The oplog retention of a replica set member, in its
+        configuration for the next start, and on the running server.
+        """
+        self._configure_oplog_retention()
+        hours = self.oplog_min_retention_hours
+        if self.adm.oplog_min_retention_hours() != hours:
+            LOG.info("Keeping at least %s hours of the oplog.", hours)
+            self.adm.set_oplog_min_retention_hours(hours)
+
+    def resync(self):
+        """Sync this member again from the others, from an empty data
+        directory: what MongoDB documents for a member too stale to catch
+        up. Its data is behind the others' and has nothing they lack.
+        """
+        LOG.warning("This member is too stale to catch up: emptying %s "
+                    "and syncing it again from the others.", self.datadir)
+        self.stop_db()
+        operating_system.remove(self.datadir, force=True, recursive=True,
+                                as_root=True)
+        self.start_db()
 
     @property
     def port(self):
@@ -331,6 +372,8 @@ class MongoDBApp(service.BaseDbApp):
         if not command:
             binary = 'mongos' if self.is_query_router else 'mongod'
             command = f'{binary} --config {CONFIG_FILE}'
+            if self.replica_set_name and not self.is_query_router:
+                self._configure_oplog_retention()
 
         self._ensure_directories()
 
@@ -823,6 +866,56 @@ class MongoDBAdmin(object):
 
     def get_repl_status(self):
         return self._run('replSetGetStatus')
+
+    def oplog_min_retention_hours(self):
+        return self._run('serverStatus').get('oplogTruncation', {}).get(
+            'oplogMinRetentionHours', 0)
+
+    def set_oplog_min_retention_hours(self, hours):
+        self._run('replSetResizeOplog', minRetentionHours=hours)
+
+    def _member_client(self, host):
+        return pymongo.MongoClient(
+            host=host, directConnection=True,
+            serverSelectionTimeoutMS=10000, username=ADMIN_USER,
+            password=self.app.admin_password, authSource='admin')
+
+    def oldest_oplog_entry(self, host):
+        """The time of the oldest write the oplog of a member still
+        has, the earliest a member syncing from it can have.
+        """
+        with self._member_client(host) as client:
+            entry = client.local['oplog.rs'].find_one(
+                {}, {'ts': 1}, sort=[('$natural', 1)])
+        return entry['ts'] if entry else None
+
+    def staleness(self):
+        """Why this member can never catch up, or None.
+
+        A member that was down for longer than the oplog of the others
+        covers stays RECOVERING ("Too stale to catch up", in its log only;
+        replSetGetStatus says nothing of it). It is found here by what it
+        means: the member is RECOVERING, the set has a primary, and the
+        oplog of every member it could sync from starts after the last
+        write it applied. Anything that cannot be asked counts as not
+        stale.
+        """
+        status = self.get_repl_status()
+        me = next(m for m in status['members'] if m.get('self'))
+        if me['state'] != RS_RECOVERING:
+            return None
+        sources = [m for m in status['members']
+                   if not m.get('self') and m.get('health') == 1 and
+                   m['state'] in RS_HEALTHY_STATES]
+        if not any(m['state'] == RS_PRIMARY for m in sources):
+            return None
+        applied = status['optimes']['appliedOpTime']['ts']
+        for member in sources:
+            oldest = self.oldest_oplog_entry(member['name'])
+            if oldest is None or oldest <= applied:
+                return None
+        return ("its last applied write %s is older than the oplog of %s"
+                % (applied, ', '.join(m['name'] for m in sources)))
 
     def is_primary(self):
         """Whether this member is the primary of its replica set.

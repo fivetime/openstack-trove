@@ -1,0 +1,14 @@
+---
+features:
+  - |
+    The members of a ``cassandra`` cluster repair it themselves, with the
+    repair scheduler of Cassandra 5.0.8 and later: the guest agent turns on
+    full repairs in ``cassandra.yaml`` (``auto_repair``) and starts the
+    server with ``-Dcassandra.autorepair.enable=true``. Without repairs a
+    node that was down for longer than the hint window keeps stale data,
+    and deleted data can come back after ``gc_grace_seconds``; Trove only
+    repaired ``system_auth`` once, when a cluster was created. The new
+    options ``[cassandra] auto_repair`` (default ``true``) and
+    ``auto_repair_interval`` (default 86400 seconds) control it. Older
+    servers, which refuse to start with ``auto_repair`` in their
+    configuration, are left as they were.
