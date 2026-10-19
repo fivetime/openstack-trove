@@ -549,3 +549,37 @@ The table below lists microversions that enable specific features used by Trove:
 +---------------------+-------------------------------------------+
 | 2.57                | Support for updating user data on rebuild |
 +---------------------+-------------------------------------------+
+
+
+Restarting task managers
+~~~~~~~~~~~~~~~~~~~~~~~~
+A task manager acknowledges a request before it carries it out and keeps
+the progress of a task (a build waiting for its servers, the steps of a
+cluster left) in memory only.
+
+A task manager told to stop (``SIGTERM``, as in a rolling upgrade) takes no
+more requests and finishes the ones under way before it exits, for up to
+``[DEFAULT] graceful_shutdown_timeout`` seconds; the other task managers
+take the new requests meanwhile. Give it as long as a build of an instance
+or a cluster takes, and let whatever stops the process wait longer than
+that (the termination grace period of a Kubernetes pod).
+
+A task manager that dies leaves its tasks to the others: each task records
+the task manager process carrying it out, and with a ``[coordination]
+backend_url`` each task manager holds a lock named after its process, which
+the backend frees once the process is gone. Every
+``abandoned_task_check_interval`` seconds a task manager gives up the tasks
+of the processes that are gone, so that the instances and clusters can be
+deleted or the action tried again:
+
+* the build of an instance ends in error (``Build error: the task manager
+  building it stopped.``);
+* the build of a cluster fails its members, a grow or an added shard the
+  members still building, and the cluster's task is cleared;
+* a delete is left as it is, to be asked again;
+* any other task is cleared: check the instance before going on (a resize,
+  a promotion may have stopped half way).
+
+The instance gets a fault that says which. Nothing is resumed. Without a
+``[coordination]`` backend only a task manager started again on the same
+host takes over the tasks of the one before it.

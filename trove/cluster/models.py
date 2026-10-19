@@ -63,7 +63,8 @@ def persisted_models():
 class DBCluster(dbmodels.DatabaseModelBase):
     _data_fields = ['created', 'updated', 'name', 'task_id',
                     'tenant_id', 'datastore_version_id', 'deleted',
-                    'deleted_at', 'configuration_id', 'properties']
+                    'deleted_at', 'configuration_id', 'properties',
+                    'task_owner']
     _table_name = 'clusters'
 
     def __init__(self, task_status, **kwargs):

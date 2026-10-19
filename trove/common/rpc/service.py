@@ -98,5 +98,23 @@ class RpcService(service.Service):
         except Exception:
             LOG.info("Failed to stop RPC server before shutdown. ")
             pass
+        # A message is acknowledged before it is handled: a handler cut
+        # short is lost for good (a task left on its instance or cluster).
+        # Taking no more, finish those under way; the service launcher
+        # ends the wait after graceful_shutdown_timeout.
+        try:
+            LOG.info("Waiting for the requests under way to %s to finish.",
+                     self.topic)
+            self.rpcserver.wait()
+            LOG.info("The requests under way to %s finished.", self.topic)
+        except Exception:
+            LOG.exception("Failed to wait for the requests under way to "
+                          "%s.", self.topic)
+        stopped = getattr(self.manager_impl, 'service_stopped', None)
+        if stopped is not None:
+            try:
+                stopped()
+            except Exception:
+                LOG.exception("Failed to stop %s cleanly.", self.topic)
 
         super(RpcService, self).stop()

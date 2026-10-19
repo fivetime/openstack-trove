@@ -2130,7 +2130,7 @@ class DBInstance(dbmodels.DatabaseModelBase):
                     'configuration_id', 'slave_of_id', 'cluster_id',
                     'shard_id', 'type', 'region_id', 'encrypted_key', 'access',
                     'ssl_mode', 'ssl_ref', 'message_partition',
-                    'properties']
+                    'properties', 'task_owner']
     _table_name = 'instances'
 
     def __init__(self, task_status, **kwargs):

@@ -208,6 +208,9 @@ class ClusterTasks(Cluster):
                 db_instance.set_task_status(
                     status or InstanceTasks.BUILDING_ERROR_SERVER)
                 db_instance.save()
+        # The cluster's task too: the API deletes a cluster only without
+        # one, and a build that failed or timed out never cleared it.
+        self.reset_task()
 
     @classmethod
     def get_ip(cls, instance):

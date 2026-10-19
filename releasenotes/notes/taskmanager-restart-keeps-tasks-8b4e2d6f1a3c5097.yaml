@@ -1,0 +1,34 @@
+---
+fixes:
+  - |
+    A task manager that was told to stop (a rolling upgrade) dropped the
+    tasks it was carrying out: an RPC message is acknowledged before it is
+    handled, so the instance or cluster stayed in its task for good, and
+    the API refused to delete it (a cluster in ``BUILDING`` needed
+    ``reset status`` first). A task manager now stops taking requests and
+    finishes those under way before it exits, for up to
+    ``[DEFAULT] graceful_shutdown_timeout``; the pod's termination grace
+    period must be longer (``pod.lifecycle.termination_grace_period.
+    taskmanager.timeout`` of the chart).
+  - |
+    The tasks of a task manager that died (out of memory, its node lost) are
+    taken over by another one: each task records the task manager process
+    carrying it out (``instances.task_owner``, ``clusters.task_owner``), and
+    with a ``[coordination] backend_url`` every task manager holds a lock
+    named after its process, which the backend frees when the process is
+    gone. Every ``[DEFAULT] abandoned_task_check_interval`` seconds (60; 0
+    turns it off) a task manager gives up the tasks of the processes that
+    are gone: a build ends in error (``Build error: the task manager
+    building it stopped.``), a cluster build or grow fails its unformed
+    members, a delete is left to be asked again, any other task is cleared,
+    and the instance gets a fault that says which. Nothing is resumed.
+    Without a backend only a task manager started again on the same host
+    takes over the tasks of the one before it.
+  - |
+    A cluster whose build failed or timed out stayed in ``BUILDING`` (its
+    members in error) and could not be deleted without ``reset status``:
+    the failure now clears the cluster's task, for every datastore.
+upgrade:
+  - |
+    Database migration ``5d2f8a4c1e93`` adds ``task_owner`` to ``instances``
+    and ``clusters``.

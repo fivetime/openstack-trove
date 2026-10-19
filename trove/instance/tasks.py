@@ -125,6 +125,10 @@ class InstanceTasks(object):
     UPDATING_ERROR_ACCESS = InstanceTask(0x5d, 'UPDATING',
                                          'Update error: Access.',
                                          is_error=True)
+    BUILDING_ERROR_ABANDONED = InstanceTask(0x5e, 'ERROR',
+                                            'Build error: the task manager '
+                                            'building it stopped.',
+                                            is_error=True)
 
 
 # Dissuade further additions at run-time.

@@ -33,6 +33,7 @@ import trove.extensions.mgmt.instances.models as mgmtmodels
 from trove.instance.tasks import InstanceTasks
 from trove.quota.quota import QUOTAS
 from trove.taskmanager import models
+from trove.taskmanager import ownership
 from trove.taskmanager.models import FreshInstanceTasks, BuiltInstanceTasks
 from trove.taskmanager import recovery
 
@@ -53,30 +54,35 @@ class Manager(periodic_task.PeriodicTasks):
                 CONF.exists_notification_transformer,
                 context=self.admin_context)
 
+    @ownership.owning('instance')
     def resize_volume(self, context, instance_id, new_size):
         with EndNotification(context):
             instance_tasks = models.BuiltInstanceTasks.load(context,
                                                             instance_id)
             instance_tasks.resize_volume(new_size)
 
+    @ownership.owning('instance')
     def resize_flavor(self, context, instance_id, old_flavor, new_flavor):
         with EndNotification(context):
             instance_tasks = models.BuiltInstanceTasks.load(context,
                                                             instance_id)
             instance_tasks.resize_flavor(old_flavor, new_flavor)
 
+    @ownership.owning('instance')
     def reboot(self, context, instance_id):
         with EndNotification(context):
             instance_tasks = models.BuiltInstanceTasks.load(context,
                                                             instance_id)
             instance_tasks.reboot()
 
+    @ownership.owning('instance')
     def restart(self, context, instance_id):
         with EndNotification(context):
             instance_tasks = models.BuiltInstanceTasks.load(context,
                                                             instance_id)
             instance_tasks.restart()
 
+    @ownership.owning('instance')
     def detach_replica(self, context, instance_id):
         with EndNotification(context):
             slave = models.BuiltInstanceTasks.load(context, instance_id)
@@ -89,6 +95,7 @@ class Manager(periodic_task.PeriodicTasks):
             setattr(instance.db_info, 'task_status', status)
             instance.db_info.save()
 
+    @ownership.owning('instance')
     def promote_to_replica_source(self, context, instance_id):
         # TODO(atomic77) Promote and eject need to be able to handle the case
         # where a datastore like Postgresql needs to treat the slave to be
@@ -223,6 +230,7 @@ class Manager(periodic_task.PeriodicTasks):
                                " from same master") % old_master.id)
         return sorted(last_txns, key=lambda x: x[2], reverse=True)[0][0]
 
+    @ownership.owning('instance')
     def eject_replica_source(self, context, instance_id):
 
         def _eject_replica_source(old_master, replica_models):
@@ -285,16 +293,19 @@ class Manager(periodic_task.PeriodicTasks):
                                       InstanceTasks.EJECTION_ERROR)
                 raise
 
+    @ownership.owning('instance')
     def migrate(self, context, instance_id, host):
         with EndNotification(context):
             instance_tasks = models.BuiltInstanceTasks.load(context,
                                                             instance_id)
             instance_tasks.migrate(host)
 
+    @ownership.owning('instance')
     def rebuild(self, context, instance_id, image_id):
         instance_tasks = models.BuiltInstanceTasks.load(context, instance_id)
         instance_tasks.rebuild(image_id)
 
+    @ownership.owning('instance')
     def delete_instance(self, context, instance_id):
         with EndNotification(context):
             try:
@@ -432,6 +443,7 @@ class Manager(periodic_task.PeriodicTasks):
                        else CONF.usage_timeout)
             instance_tasks.wait_for_instance(timeout, flavor)
 
+    @ownership.owning('instance')
     def create_instance(self, context, instance_id, name, flavor,
                         image_id, databases, users, datastore_manager,
                         packages, volume_size, backup_id, availability_zone,
@@ -455,12 +467,14 @@ class Manager(periodic_task.PeriodicTasks):
                                   locality, access=access,
                                   ds_version=ds_version)
 
+    @ownership.owning('instance')
     def upgrade(self, context, instance_id, datastore_version_id):
         instance_tasks = models.BuiltInstanceTasks.load(context, instance_id)
         datastore_version = DatastoreVersion.load_by_uuid(datastore_version_id)
         with EndNotification(context):
             instance_tasks.upgrade(datastore_version)
 
+    @ownership.owning('instance')
     def update_access(self, context, instance_id, access):
         instance_tasks = models.BuiltInstanceTasks.load(context, instance_id)
 
@@ -471,36 +485,43 @@ class Manager(periodic_task.PeriodicTasks):
                       f"{instance_id}: {str(e)}")
             self.update_db(task_status=InstanceTasks.UPDATING_ERROR_ACCESS)
 
+    @ownership.owning('cluster')
     def create_cluster(self, context, cluster_id):
         with EndNotification(context, cluster_id=cluster_id):
             cluster_tasks = models.load_cluster_tasks(context, cluster_id)
             cluster_tasks.create_cluster(context, cluster_id)
 
+    @ownership.owning('cluster')
     def grow_cluster(self, context, cluster_id, new_instance_ids):
         with EndNotification(context, cluster_id=cluster_id,
                              instance_ids=new_instance_ids):
             cluster_tasks = models.load_cluster_tasks(context, cluster_id)
             cluster_tasks.grow_cluster(context, cluster_id, new_instance_ids)
 
+    @ownership.owning('cluster')
     def shrink_cluster(self, context, cluster_id, instance_ids):
         with EndNotification(context, cluster_id=cluster_id,
                              instance_ids=instance_ids):
             cluster_tasks = models.load_cluster_tasks(context, cluster_id)
             cluster_tasks.shrink_cluster(context, cluster_id, instance_ids)
 
+    @ownership.owning('cluster')
     def restart_cluster(self, context, cluster_id):
         cluster_tasks = models.load_cluster_tasks(context, cluster_id)
         cluster_tasks.restart_cluster(context, cluster_id)
 
+    @ownership.owning('cluster')
     def reset_communal_credential(self, context, cluster_id):
         cluster_tasks = models.load_cluster_tasks(context, cluster_id)
         cluster_tasks.reset_communal_credential(context, cluster_id)
 
+    @ownership.owning('cluster')
     def upgrade_cluster(self, context, cluster_id, datastore_version_id):
         datastore_version = DatastoreVersion.load_by_uuid(datastore_version_id)
         cluster_tasks = models.load_cluster_tasks(context, cluster_id)
         cluster_tasks.upgrade_cluster(context, cluster_id, datastore_version)
 
+    @ownership.owning('cluster')
     def delete_cluster(self, context, cluster_id):
         with EndNotification(context):
             cluster_tasks = models.load_cluster_tasks(context, cluster_id)
@@ -525,8 +546,11 @@ class Manager(periodic_task.PeriodicTasks):
     def service_started(self):
         """With cluster_recovery_slots the recovery hub starts with the
         service, to hold a slot before the first event: trove-conductor
-        sends events only to the replicas that hold one.
+        sends events only to the replicas that hold one. The lock that
+        tells the other task managers this one lives is held from the
+        start.
         """
+        ownership.liveness().start()
         if CONF.cluster_recovery_slots:
             recovery.hub(self.admin_context)
 
@@ -536,6 +560,24 @@ class Manager(periodic_task.PeriodicTasks):
         """
         if recovery.hub().started:
             recovery.hub().stop()
+
+    def service_stopped(self):
+        """After the tasks under way finished: the lock goes last, so
+        that no other task manager takes them for abandoned meanwhile.
+        """
+        ownership.liveness().stop()
+
+    if CONF.abandoned_task_check_interval:
+        @periodic_task.periodic_task(
+            spacing=CONF.abandoned_task_check_interval)
+        def take_over_abandoned_tasks(self, context):
+            """The tasks of instances and clusters whose task manager is
+            gone: given up, so that they can be deleted or tried again.
+            """
+            taken = ownership.take_over_abandoned()
+            if taken:
+                LOG.warning("Took over %d tasks of task managers that are "
+                            "gone.", taken)
 
     def cluster_event(self, context, cluster_id, instance_id, kind,
                       payload=None, sent=None):
@@ -594,4 +636,11 @@ class Manager(periodic_task.PeriodicTasks):
             raise_error('No method "%s" for task manager strategy for manager'
                         ' "%s"' % (method, manager))
 
-        return task_strategy.task_manager_manager_actions.get(method)
+        action = task_strategy.task_manager_manager_actions.get(method)
+
+        # The actions of a strategy carry out a task of a cluster.
+        def owned_action(context, *args, **kwargs):
+            cluster_id = kwargs.get('cluster_id', args[0] if args else None)
+            with ownership.owned('cluster', cluster_id):
+                return action(context, *args, **kwargs)
+        return owned_action

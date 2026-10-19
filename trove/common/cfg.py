@@ -327,6 +327,18 @@ common_opts = [
                     '(cluster_recovery_scan_interval) make unnecessary, '
                     'kept for clusters whose members do not report (guest '
                     'images from before the reports). 0 turns it off.'),
+    cfg.IntOpt('abandoned_task_check_interval', default=60, min=0,
+               help='Seconds between two looks of a task manager for the '
+                    'tasks of instances and clusters whose task manager '
+                    'died before it finished them (a task manager that '
+                    'stops on purpose finishes them first, within '
+                    'graceful_shutdown_timeout). A build of them ends in '
+                    'error, a delete is left to be asked again, any other '
+                    'task is cleared; the instance gets a fault that says '
+                    'so. With a [coordination] backend_url any task '
+                    'manager can tell; without one only a task manager '
+                    'started after the dead one on the same host. 0 turns '
+                    'it off.'),
     cfg.IntOpt('cluster_recovery_scan_interval', default=300,
                help='Seconds between two scans of the database for the '
                     'clusters that may need the task manager: a member '
