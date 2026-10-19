@@ -571,6 +571,8 @@ class DB2Admin(object):
             self.app.as_owner('db2 UPDATE DB CFG FOR %s USING LOGARCHMETH1 '
                               'DISK:%s' % (name, archive))
             self.app.as_owner('db2 BACKUP DATABASE %s TO /dev/null' % name)
+            if self.is_root_enabled():
+                self._grant(models.DB2User.root_username, name)
 
     def delete_database(self, database):
         database = models.DB2Schema.deserialize(database)
@@ -785,10 +787,14 @@ class DB2Admin(object):
 
     def enable_root(self, root_password=None):
         """Root is a user in the group of the instance owner, which has
-        the system administration authority over the instance.
+        the system administration authority over the instance, and the
+        authorities of a database user on every database: since Db2 11.1
+        SYSADM holds none inside a database, not even to create a table.
+        A database created later gets them too (create_database).
         """
         root = models.DB2User.root(password=root_password)
         self._set_system_user(root.name, root.password, admin=True)
+        self._on_every_database(self._grant, root.name)
         return root.serialize()
 
     def is_root_enabled(self):
@@ -796,7 +802,23 @@ class DB2Admin(object):
 
     def disable_root(self):
         if self.is_root_enabled():
+            self._on_every_database(self._revoke,
+                                    models.DB2User.root_username)
             self._remove_system_user(models.DB2User.root_username)
+
+    def _on_every_database(self, action, username):
+        """``action(username, database)`` on every database; one being
+        created is left to create_database.
+        """
+        for database in self._database_names():
+            try:
+                action(username, database)
+            except exception.TroveError as e:
+                if any(code in str(e) for code in UNAVAILABLE):
+                    LOG.warning("Database %s is not available for now, "
+                                "left out: %s", database, e)
+                    continue
+                raise
 
     ##########
     # Backup

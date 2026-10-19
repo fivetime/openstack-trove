@@ -1,0 +1,10 @@
+---
+fixes:
+  - |
+    The root user of a ``db2`` instance (``db2root``, in the group of the
+    instance owner) could not create a table in a database Trove created
+    (``SQL0552N``): since Db2 11.1 the system administration authority
+    holds no authority inside a database. Enabling root now grants it the
+    authorities of a database user (``DBADM, CREATETAB, BINDADD, CONNECT,
+    DATAACCESS``) on every database, a database created while root is
+    enabled grants them too, and disabling root revokes them.

@@ -481,6 +481,22 @@ class TestDB2Admin(DB2GuestTestCase):
         adm.disable_root()
         self.assertFalse(adm.is_root_enabled())
 
+    def test_root_has_the_authorities_of_a_user_on_every_database(self):
+        # Since Db2 11.1 SYSADM holds no authority inside a database: the
+        # root of an instance could not create a table (SQL0552N).
+        adm, fake, users = self._adm()
+        adm.create_database([models.DB2Schema('appdb').serialize()])
+        adm.enable_root('rootpw')
+        self.assertEqual({'APPDB'}, fake.grants['DB2ROOT'])
+        # A database created after root was enabled.
+        adm.create_database([models.DB2Schema('newdb').serialize()])
+        self.assertEqual({'APPDB', 'NEWDB'}, fake.grants['DB2ROOT'])
+        adm.disable_root()
+        self.assertEqual(set(), fake.grants['DB2ROOT'])
+        # Without root, a new database grants nothing to it.
+        adm.create_database([models.DB2Schema('lastdb').serialize()])
+        self.assertEqual(set(), fake.grants['DB2ROOT'])
+
     def test_parameters(self):
         adm, fake, _ = self._adm()
         adm.set_parameter('MAX_CONNECTIONS', 100)
