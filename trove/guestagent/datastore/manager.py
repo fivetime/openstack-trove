@@ -44,6 +44,13 @@ LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
 
 
+def heartbeat_spacing(report_interval):
+    """The spacing of update_status: a little less than two passes of
+    the periodic loop, more than its jitter (5 % of the spacing) less.
+    """
+    return 2 * report_interval - max(5, 0.1 * report_interval)
+
+
 class Manager(periodic_task.PeriodicTasks, SSLManager):
     """This is the base class for all datastore managers.  Over time, common
     functionality should be pulled back here from the existing managers.
@@ -79,6 +86,19 @@ class Manager(periodic_task.PeriodicTasks, SSLManager):
 
     def __init__(self, manager_name):
         super(Manager, self).__init__(CONF)
+        # The heartbeat (update_status) at most two passes of the periodic
+        # loop apart. Without a spacing of its own it would run every 60 s
+        # (oslo's default), and the loop runs the due tasks every
+        # report_interval (30 s): oslo puts the next run on the grid of
+        # the last one plus a jitter of up to 5 %, so it falls just after
+        # the second pass now and then and waits for the third, 90 s
+        # after the last heartbeat, which is agent_heartbeat_expiry: the
+        # instance shows ERROR for a moment, and cluster recovery looks
+        # at a member that is fine. A little less than two passes puts the
+        # grid at most two passes apart.
+        self._periodic_spacing = dict(
+            self._periodic_spacing,
+            update_status=heartbeat_spacing(CONF.report_interval))
 
         # Manager properties
         self.__manager_name = manager_name

@@ -1,0 +1,14 @@
+---
+fixes:
+  - |
+    The heartbeat of the guest agent (``update_status``) no longer comes
+    90 seconds after the last one now and then, which is
+    ``agent_heartbeat_expiry`` by default: the instance showed an
+    ``operating_status`` of ``ERROR`` for a moment, and cluster recovery
+    looked at a member that was fine. Without a spacing of its own the task
+    ran every 60 seconds, oslo's default, while the periodic loop runs every
+    ``report_interval`` (30 seconds), and oslo's jitter put the next run just
+    after the second pass of the loop now and then. Its spacing is now a
+    little less than two passes of the loop (55 seconds with the default
+    ``report_interval``), so the heartbeat comes at most two passes apart;
+    about one in seven comes one pass apart.
