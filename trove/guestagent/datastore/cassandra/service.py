@@ -91,6 +91,38 @@ MAX_REPLICATION_FACTOR = 3
 AUTO_REPAIR_SINCE = (5, 0, 8)
 AUTO_REPAIR_OPTION = '-Dcassandra.autorepair.enable=true'
 AUTO_REPAIR_CHANGE_ID = 'auto_repair'
+# How the commit log is synced to disk, a configuration parameter. Periodic
+# (the default here): a write is acknowledged before it is synced, and
+# the server syncs every commitlog_sync_period, so a node that loses power
+# loses what it acknowledged since. Batch: a write is acknowledged once
+# synced. Group: likewise, the syncs grouped every
+# commitlog_sync_group_window.
+COMMITLOG_SYNC_PERIOD_ONLY = 'periodic'
+COMMITLOG_GROUP = 'group'
+COMMITLOG_GROUP_WINDOW = '15ms'
+
+
+class CassandraYamlCodec(stream_codecs.SafeYamlCodec):
+    """cassandra.yaml as the server takes it: the server refuses to start
+    with commitlog_sync_period when the commit log is synced in batches
+    or groups, and a configuration parameter can set a value, not take
+    one away; so the period goes with any sync but periodic, and the group
+    window with any sync but group, whose window defaults to the server's
+    usual one.
+    """
+
+    def serialize(self, dict_data):
+        if isinstance(dict_data, dict) and 'commitlog_sync' in dict_data:
+            dict_data = dict(dict_data)
+            mode = dict_data['commitlog_sync']
+            if mode != COMMITLOG_SYNC_PERIOD_ONLY:
+                dict_data.pop('commitlog_sync_period', None)
+            if mode != COMMITLOG_GROUP:
+                dict_data.pop('commitlog_sync_group_window', None)
+            elif not dict_data.get('commitlog_sync_group_window'):
+                dict_data['commitlog_sync_group_window'] = (
+                    COMMITLOG_GROUP_WINDOW)
+        return super(CassandraYamlCodec, self).serialize(dict_data)
 
 
 class CassandraApp(service.BaseDbApp):
@@ -122,7 +154,7 @@ class CassandraApp(service.BaseDbApp):
             CONFIG_FILE,
             self.database_service_uid,
             self.database_service_gid,
-            stream_codecs.SafeYamlCodec(default_flow_style=False),
+            CassandraYamlCodec(default_flow_style=False),
             requires_root=True,
             override_strategy=configuration.OneFileOverrideStrategy(
                 revision_dir)

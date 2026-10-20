@@ -32,6 +32,7 @@ from trove.common import stream_codecs
 from trove.common import template
 from trove.extensions.common import models as extension_models
 from trove.guestagent import api as guest_api
+from trove.guestagent.common import guestagent_utils
 from trove.guestagent.common.operating_system import FileMode
 from trove.guestagent.datastore.cassandra import manager as cassandra_manager
 from trove.guestagent.datastore.cassandra import service as cassandra_service
@@ -195,6 +196,86 @@ class TestCassandraConfigTemplate(trove_testtools.TestCase):
                      'rpc_server_type', 'thrift_framed_transport_size_in_mb',
                      'read_request_timeout_in_ms'):
             self.assertNotIn(name, names)
+
+
+class TestCommitLogSync(trove_testtools.TestCase):
+    """cassandra.yaml with a commit log sync of the user's: Trove's
+    template merged with the user's parameters, written as the server
+    takes it (Cassandra 5.0 refuses to start with commitlog_sync_period
+    and batch or group sync; it starts with what is written here,
+    checked in containers on 2026-10-20).
+    """
+
+    def setUp(self):
+        super(TestCommitLogSync, self).setUp()
+        self.codec = cassandra_service.CassandraYamlCodec(
+            default_flow_style=False)
+
+    def _written(self, *overrides):
+        config = YAML.deserialize(_render())
+        for override in overrides:
+            config = guestagent_utils.update_dict(override, config)
+        return YAML.deserialize(self.codec.serialize(config))
+
+    def _commitlog(self, config):
+        return {k: v for k, v in config.items() if k.startswith('commitlog')}
+
+    def test_periodic_as_trove_has_it(self):
+        self.assertEqual(
+            {'commitlog_sync': 'periodic', 'commitlog_sync_period': '10000ms'},
+            self._commitlog(self._written()))
+
+    def test_batch(self):
+        self.assertEqual({'commitlog_sync': 'batch'}, self._commitlog(
+            self._written({'commitlog_sync': 'batch'})))
+
+    def test_group(self):
+        self.assertEqual(
+            {'commitlog_sync': 'group',
+             'commitlog_sync_group_window': '15ms'},
+            self._commitlog(self._written({'commitlog_sync': 'group'})))
+        self.assertEqual(
+            {'commitlog_sync': 'group',
+             'commitlog_sync_group_window': '5ms'},
+            self._commitlog(self._written(
+                {'commitlog_sync': 'group',
+                 'commitlog_sync_group_window': '5ms'})))
+
+    def test_a_shorter_period(self):
+        self.assertEqual(
+            {'commitlog_sync': 'periodic', 'commitlog_sync_period': '1000ms'},
+            self._commitlog(self._written(
+                {'commitlog_sync_period': '1000ms',
+                 'commitlog_sync_group_window': '5ms'})))
+
+    def test_an_override_alone_is_kept_as_it_is(self):
+        # The revisions of the overrides go through the codec too.
+        override = {'commitlog_sync_group_window': '5ms'}
+        self.assertEqual(override,
+                         YAML.deserialize(self.codec.serialize(override)))
+
+    def test_the_app_writes_with_it(self):
+        app = cassandra_service.CassandraApp.__new__(
+            cassandra_service.CassandraApp)
+        for name in ('database_service_uid', 'database_service_gid'):
+            mock.patch.object(cassandra_service.CassandraApp, name,
+                              new_callable=mock.PropertyMock,
+                              return_value='999').start()
+        self.addCleanup(mock.patch.stopall)
+        self.assertIsInstance(app.configuration_manager._codec,
+                              cassandra_service.CassandraYamlCodec)
+
+    def test_the_parameters(self):
+        rules_file = os.path.join(os.path.dirname(trove.__file__),
+                                  'templates', 'cassandra',
+                                  'validation-rules.json')
+        with open(rules_file) as f:
+            rules = {rule['name']: rule for rule in
+                     json.load(f)['configuration-parameters']}
+        for name in ('commitlog_sync', 'commitlog_sync_period',
+                     'commitlog_sync_group_window'):
+            self.assertEqual('string', rules[name]['type'])
+            self.assertTrue(rules[name]['restart_required'])
 
 
 class TestCassandraAppConfiguration(CassandraGuestTestCase):

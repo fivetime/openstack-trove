@@ -84,6 +84,14 @@ BUCKET_DEFAULTS = {
     'bucket_replicas': 0,
     'bucket_eviction_policy': 'valueOnly',
 }
+# The least durability of every write to every bucket: the server
+# acknowledges a write once it is in memory unless told otherwise (none),
+# so a node that loses power loses what it acknowledged and had not
+# written yet, with no bound. persistToMajority and
+# majorityAndPersistActive acknowledge it once it is on disk (on a single
+# node the majority is the node). Not a bucket default: it is kept on
+# every bucket, those there already included.
+DURABILITY_SETTING = 'durability_min_level'
 
 
 class CouchbaseApp(service.BaseDbApp):
@@ -170,6 +178,7 @@ class CouchbaseApp(service.BaseDbApp):
             compaction['parallelDBAndViewCompaction'] = 'false'
             self.adm.request('POST', '/controller/setAutoCompaction',
                              data=compaction)
+        self.adm.keep_durability(self.setting(DURABILITY_SETTING))
 
     def bucket_settings(self):
         """What a new bucket is created with."""
@@ -518,18 +527,38 @@ class CouchbaseAdmin(object):
 
     def create_database(self, databases):
         settings = self.app.bucket_settings()
+        durability = self.app.setting(DURABILITY_SETTING)
         for item in databases:
             database = models.CouchbaseSchema.deserialize(item)
             database.check_create()
             LOG.debug("Creating bucket '%s'.", database.name)
-            self.request('POST', '/pools/default/buckets', data={
+            data = {
                 'name': database.name,
                 'bucketType': 'couchbase',
                 'ramQuota': settings['bucket_ramsize'],
                 'replicaNumber': settings['bucket_replicas'],
                 'evictionPolicy': settings['bucket_eviction_policy'],
                 'flushEnabled': 1,
-            })
+            }
+            if durability:
+                data['durabilityMinLevel'] = durability
+            self.request('POST', '/pools/default/buckets', data=data)
+
+    def keep_durability(self, level):
+        """Every bucket with the least durability of the configuration;
+        a bucket keeps its own when the configuration has none.
+        """
+        if not level:
+            return
+        ignored = cfg.get_ignored_dbs()
+        for bucket in self.request('GET', '/pools/default/buckets')[1]:
+            if (bucket['name'] in ignored or
+                    bucket.get('durabilityMinLevel') == level):
+                continue
+            LOG.info("Bucket '%s': the least durability is %s now.",
+                     bucket['name'], level)
+            self.request('POST', self._bucket_path(bucket['name']),
+                         data={'durabilityMinLevel': level})
 
     def delete_database(self, database):
         """The server drops the roles of the users on a deleted bucket."""

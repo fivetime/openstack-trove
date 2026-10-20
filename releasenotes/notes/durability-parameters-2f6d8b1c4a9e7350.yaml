@@ -1,0 +1,16 @@
+---
+features:
+  - |
+    Configuration groups can ask for acknowledged writes to be on disk on
+    the datastores whose default may lose them on power loss: Cassandra
+    ``commitlog_sync`` (``periodic``, ``batch``, ``group``),
+    ``commitlog_sync_period`` and ``commitlog_sync_group_window``
+    (cassandra.yaml is written without ``commitlog_sync_period`` for a
+    sync other than periodic, which the server refuses with it); MongoDB
+    ``storage.journal.commitIntervalMs`` (1 to 500); Couchbase
+    ``durability_min_level`` (``none``, ``majority``,
+    ``majorityAndPersistActive``, ``persistToMajority``), kept on every
+    bucket and given to new ones. Redis, Valkey and KeyDB had
+    ``appendfsync`` already. The new user guide page "Acknowledged writes
+    and losing power" says what each datastore loses by default and what
+    to set.

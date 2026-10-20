@@ -299,6 +299,26 @@ class TestMongoDBAppConfiguration(MongoDBGuestTestCase):
         self.assertEqual(500, config['net']['maxIncomingConnections'])
         self.assertNotIn('systemLog.verbosity', config)
 
+    def test_the_journal_commit_interval(self):
+        # Acknowledged writes a standalone server can lose on power loss:
+        # up to the interval (100 ms by default); 8.2 takes it from the
+        # file (checked on 2026-10-20: getParameter journalCommitInterval).
+        rules_file = os.path.join(os.path.dirname(trove.__file__),
+                                  'templates', 'mongodb',
+                                  'validation-rules.json')
+        with open(rules_file) as f:
+            rule = {r['name']: r for r in json.load(f)[
+                'configuration-parameters']}[
+                    'storage.journal.commitIntervalMs']
+        self.assertEqual((1, 500, 'integer', True),
+                         (rule['min'], rule['max'], rule['type'],
+                          rule['restart_required']))
+        app = _app(_render())
+        app.update_overrides({'storage.journal.commitIntervalMs': 5})
+        self.assertEqual(
+            5, app.configuration_manager.config['storage']['journal'][
+                'commitIntervalMs'])
+
     def test_real_configuration_manager_writes_yaml(self):
         app = mongodb_service.MongoDBApp(mock.Mock(), mock.Mock())
         with mock.patch.object(configuration.OneFileOverrideStrategy,

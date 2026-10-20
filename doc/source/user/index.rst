@@ -16,6 +16,7 @@ handling complex administrative tasks.
    manage-db-and-users-in-valkey-and-keydb.rst
    backup-db.rst
    manage-db-config.rst
+   durability.rst
    set-up-replication.rst
    upgrade-datastore.rst
    set-up-clustering.rst

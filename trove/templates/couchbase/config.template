@@ -16,3 +16,6 @@ bucket_eviction_policy=valueOnly
 # and its views.
 compaction_database_threshold=30
 compaction_view_threshold=30
+# The least durability of every write to every bucket (none, majority,
+# majorityAndPersistActive, persistToMajority) is left unset: the server's
+# none, which acknowledges a write once it is in memory.

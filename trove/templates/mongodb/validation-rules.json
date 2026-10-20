@@ -140,6 +140,13 @@
             "type": "integer"
         },
         {
+            "name": "storage.journal.commitIntervalMs",
+            "restart_required": true,
+            "min": 1,
+            "max": 500,
+            "type": "integer"
+        },
+        {
             "name": "storage.wiredTiger.engineConfig.cacheSizeGB",
             "restart_required": true,
             "min": 0,

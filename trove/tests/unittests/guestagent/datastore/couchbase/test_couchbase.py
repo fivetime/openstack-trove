@@ -93,6 +93,17 @@ class FakeServer(object):
                                        % (method, path, code, result))
         return code, result
 
+    # What Couchbase Server 7.6.2 answers a durability it does not know.
+    DURABILITY_ERROR = {'errors': {'durability_min_level': (
+        "Durability minimum level must be one of 'none', 'majority', "
+        "'majorityAndPersistActive', or 'persistToMajority'")}}
+
+    @staticmethod
+    def _durable(data):
+        return data.get('durabilityMinLevel', 'none') in (
+            'none', 'majority', 'majorityAndPersistActive',
+            'persistToMajority')
+
     def _handle(self, method, path, data, files):
         if path == '/pools':
             return 200, {'isEnterprise': False}
@@ -125,13 +136,25 @@ class FakeServer(object):
             if method == 'POST':
                 if data['name'] in self.buckets:
                     return 400, {'errors': {'name': 'exists'}}
+                if not self._durable(data):
+                    return 400, self.DURABILITY_ERROR
                 self.buckets[data['name']] = dict(data)
                 return 202, None
-            return 200, [{'name': name} for name in sorted(self.buckets)]
+            # The server lists every bucket with its least durability,
+            # none unless it was given one.
+            return 200, [{'name': name, 'durabilityMinLevel':
+                          self.buckets[name].get('durabilityMinLevel',
+                                                 'none')}
+                         for name in sorted(self.buckets)]
         if path.startswith('/pools/default/buckets/'):
             name = path.rsplit('/', 1)[1]
             if name not in self.buckets:
                 return 404, 'not found'
+            if method == 'POST':
+                if not self._durable(data):
+                    return 400, self.DURABILITY_ERROR
+                self.buckets[name].update(data)
+                return 200, None
             del self.buckets[name]
             for user in self.users.values():
                 user['roles'] = [role for role in user['roles']
@@ -355,6 +378,51 @@ class TestCouchbaseApp(CouchbaseGuestTestCase):
             {'bucket_ramsize': '200', 'bucket_replicas': 0,
              'bucket_eviction_policy': 'valueOnly'},
             app.bucket_settings())
+
+    def test_every_bucket_keeps_the_least_durability(self):
+        app = self._app({'durability_min_level': 'persistToMajority'})
+        server = FakeServer()
+        server.buckets = {'b1': {'name': 'b1'},
+                          'b2': {'name': 'b2',
+                                 'durabilityMinLevel': 'persistToMajority'}}
+        app.adm.request = server.request
+
+        app.apply_settings()
+
+        self.assertEqual(
+            ['persistToMajority', 'persistToMajority'],
+            [b['durabilityMinLevel'] for _n, b in
+             sorted(server.buckets.items())])
+        # Only the bucket that had another one is told.
+        edits = [call[1] for call in server.calls
+                 if call[0] == 'POST' and call[1].startswith(
+                     '/pools/default/buckets/')]
+        self.assertEqual(['/pools/default/buckets/b1'], edits)
+
+        # A new bucket is created with it.
+        app.adm.create_database([models.CouchbaseSchema('b3').serialize()])
+        self.assertEqual('persistToMajority',
+                         server.buckets['b3']['durabilityMinLevel'])
+
+    def test_no_durability_leaves_the_buckets_be(self):
+        app = self._app({})
+        server = FakeServer()
+        server.buckets = {'b1': {'name': 'b1', 'durabilityMinLevel':
+                                 'majority'}}
+        app.adm.request = server.request
+        app.apply_settings()
+        app.adm.create_database([models.CouchbaseSchema('b2').serialize()])
+        self.assertEqual('majority',
+                         server.buckets['b1']['durabilityMinLevel'])
+        self.assertNotIn('durabilityMinLevel', server.buckets['b2'])
+
+    def test_a_durability_the_server_does_not_know_is_an_error(self):
+        app = self._app({'durability_min_level': 'onDisk'})
+        server = FakeServer()
+        server.buckets = {'b1': {'name': 'b1'}}
+        app.adm.request = server.request
+        self.assertRaisesRegex(exception.TroveError, 'Durability minimum',
+                               app.apply_settings)
 
     def test_execute(self):
         app = self._app()

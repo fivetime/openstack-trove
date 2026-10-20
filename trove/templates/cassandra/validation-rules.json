@@ -50,6 +50,21 @@
             "type": "boolean"
         },
         {
+            "name": "commitlog_sync",
+            "restart_required": true,
+            "type": "string"
+        },
+        {
+            "name": "commitlog_sync_period",
+            "restart_required": true,
+            "type": "string"
+        },
+        {
+            "name": "commitlog_sync_group_window",
+            "restart_required": true,
+            "type": "string"
+        },
+        {
             "name": "key_cache_keys_to_save",
             "restart_required": true,
             "min": 0,

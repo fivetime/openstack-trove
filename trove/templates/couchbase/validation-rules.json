@@ -31,6 +31,11 @@
             "type": "string"
         },
         {
+            "name": "durability_min_level",
+            "restart_required": false,
+            "type": "string"
+        },
+        {
             "name": "compaction_database_threshold",
             "restart_required": false,
             "min": 2,
