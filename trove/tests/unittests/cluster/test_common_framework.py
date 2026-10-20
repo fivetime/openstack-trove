@@ -83,7 +83,10 @@ class TopologyTest(trove_testtools.TestCase):
         cluster = self._create({'topology': 'sentinel',
                                 'replication_mode': 'sync'})
         self.assertEqual('sentinel', cluster.topology)
-        self.assertEqual([{'replication_mode': 'sync'}],
+        # Given to the topology's class, to keep before the task manager
+        # is asked (this fake does not: the dispatcher does it after).
+        self.assertEqual([{'replication_mode': 'sync',
+                           'topology': 'sentinel'}],
                          self.sentinel.created)
         # Added to what the topology keeps itself.
         self.assertEqual({'other': 1, 'topology': 'sentinel'},

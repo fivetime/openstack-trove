@@ -1,0 +1,33 @@
+---
+features:
+  - |
+    Redis, Valkey and KeyDB clusters can be of the sentinel topology
+    (``--extended-properties topology=sentinel``): a primary with
+    replicas and a sentinel beside each in the database container, which
+    elect a new primary when it is gone. The cluster has an endpoint to
+    the primary (port 6379), one to the replicas that keep up (6380) and
+    one to the sentinels (26379), on one load balancer;
+    ``replication_mode`` is ``sync`` (the default: a primary no replica
+    follows refuses writes) or ``async``. The sentinels answer where the
+    primary is without a password and cannot be reconfigured from
+    outside. Its health, the role of each member and the notification
+    of a change come as for every cluster. Growing and shrinking such a
+    cluster is not supported yet. The default topology, ``cluster`` (a
+    Redis Cluster), is as it was.
+  - |
+    The common cluster framework has three more pieces any datastore can
+    use: topologies (``common.topology``: a datastore whose clusters come
+    in more than one shape picks the classes of the cluster's), further
+    load balancer endpoints by name
+    (``cluster_load_balancer_extra_ports``) and processes side by side in
+    the database container (``guestagent.common.sidecar``); the cluster
+    probe's entry (the ready ports) is apart from its recovery
+    (``ClusterEntry``).
+upgrade:
+  - |
+    The members of Redis, Valkey and KeyDB clusters are watched every 3
+    seconds instead of 30 (``cluster_probe_interval``), and their security
+    groups open 26379, 6380 and 6381 to each other besides 16379
+    (``cluster_tcp_ports``). The datastores have the cluster entry's
+    options, among them ``cluster_load_balancer`` (true), which only a
+    cluster of the sentinel topology uses.

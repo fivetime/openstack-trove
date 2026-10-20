@@ -1367,6 +1367,12 @@ def _redis_cluster_opts():
                    'redis.guestagent.RedisGuestAgentStrategy',
                    help='Class that implements datastore-specific Guest '
                         'Agent API logic.'),
+        # A Redis Cluster counts its members by its masters and replicas
+        # (replica_groups); a cluster of the sentinel topology needs a
+        # majority of its sentinels to agree on a primary.
+        cfg.IntOpt('min_cluster_member_count', default=3,
+                   help='Minimum number of members in a cluster of the '
+                        'sentinel topology.'),
     ]
 
 

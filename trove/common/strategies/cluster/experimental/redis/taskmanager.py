@@ -18,6 +18,11 @@ from trove.common import cfg
 from trove.common.exception import TroveError
 from trove.common.i18n import _
 from trove.common.strategies.cluster import base
+from trove.common.strategies.cluster.experimental.common import topology
+from trove.common.strategies.cluster.experimental.redis import (
+    sentinel_api)
+from trove.common.strategies.cluster.experimental.redis import (
+    sentinel_taskmanager)
 from trove.common import utils
 from trove.instance.models import DBInstance
 from trove.instance.models import Instance
@@ -38,7 +43,7 @@ class RedisTaskManagerStrategy(base.BaseTaskManagerStrategy):
 
     @property
     def task_manager_cluster_tasks_class(self):
-        return RedisClusterTasks
+        return CLUSTER_TASKS
 
 
 class RedisClusterTasks(task_models.ClusterTasks):
@@ -305,3 +310,9 @@ class RedisClusterTasks(task_models.ClusterTasks):
 class RedisTaskManagerAPI(task_api.API):
 
     pass
+
+
+CLUSTER_TASKS = topology.clusters(
+    {'cluster': RedisClusterTasks,
+     sentinel_api.TOPOLOGY: sentinel_taskmanager.RedisSentinelClusterTasks},
+    'cluster')

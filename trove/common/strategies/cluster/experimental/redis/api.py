@@ -25,6 +25,9 @@ from trove.common import server_group as srv_grp
 from trove.common.strategies.cluster import base
 from trove.common.strategies.cluster.experimental.common import (
     api as common_api)
+from trove.common.strategies.cluster.experimental.common import topology
+from trove.common.strategies.cluster.experimental.redis import (
+    sentinel_api)
 from trove.common import utils
 from trove.extensions.mgmt.clusters.views import MgmtClusterView
 from trove.instance import models as inst_models
@@ -35,18 +38,21 @@ CONF = cfg.CONF
 
 
 class RedisAPIStrategy(base.BaseAPIStrategy):
+    """A Redis family cluster is a Redis Cluster (the topology ``cluster``,
+    the default) or a primary with replicas and sentinels (``sentinel``).
+    """
 
     @property
     def cluster_class(self):
-        return RedisCluster
+        return CLUSTERS
 
     @property
     def cluster_view_class(self):
-        return RedisClusterView
+        return VIEWS
 
     @property
     def mgmt_cluster_view_class(self):
-        return RedisMgmtClusterView
+        return MGMT_VIEWS
 
 
 def replica_groups(num_instances, replicas_per_master, existing_masters=0):
@@ -261,6 +267,10 @@ class RedisMemberRolesMixin(common_api.MemberRolesMixin):
     def _role_name(self, answer):
         return answer.get('role') or 'unknown'
 
+    def _endpoints(self):
+        # A Redis Cluster's clients reach every node: no load balancer.
+        return {}
+
 
 class RedisClusterView(RedisMemberRolesMixin, ClusterView):
 
@@ -272,3 +282,16 @@ class RedisMgmtClusterView(RedisMemberRolesMixin, MgmtClusterView):
 
     def build_instances(self):
         return self._build_instances(MEMBER_TYPES, MEMBER_TYPES)
+
+
+CLUSTERS = topology.clusters(
+    {'cluster': RedisCluster,
+     sentinel_api.TOPOLOGY: sentinel_api.RedisSentinelCluster}, 'cluster')
+VIEWS = topology.views(
+    {'cluster': RedisClusterView,
+     sentinel_api.TOPOLOGY: sentinel_api.RedisSentinelClusterView},
+    'cluster')
+MGMT_VIEWS = topology.views(
+    {'cluster': RedisMgmtClusterView,
+     sentinel_api.TOPOLOGY: sentinel_api.RedisSentinelMgmtClusterView},
+    'cluster')

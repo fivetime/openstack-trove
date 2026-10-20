@@ -29,6 +29,7 @@ from trove.common import exception
 from trove.common.i18n import _
 from trove.common import loadbalancer
 from trove.common import server_group as srv_grp
+from trove.common.strategies.cluster.experimental.common import topology
 from trove.instance.models import DBInstance
 from trove.instance.models import Instance
 from trove.quota.quota import check_quotas
@@ -111,7 +112,19 @@ class HomogeneousCluster(ClusterModeMixin, cluster_models.Cluster):
     """A cluster of members that are all alike, created with at least
     ``min_cluster_member_count`` of them, grown and shrunk by members, and
     restarted, upgraded and reconfigured one member after another.
+
+    ``KEPT_PROPERTIES``: the extended properties the cluster keeps in its
+    properties, for its task manager and its later actions; its topology
+    (``common.topology``) is kept too.
     """
+
+    KEPT_PROPERTIES = ()
+
+    @classmethod
+    def _kept_properties(cls, extended_properties):
+        props = extended_properties or {}
+        keys = (topology.TOPOLOGY,) + tuple(cls.KEPT_PROPERTIES)
+        return {key: props[key] for key in keys if key in props}
 
     @staticmethod
     def _validate_cluster_instances(context, instances, datastore,
@@ -173,6 +186,9 @@ class HomogeneousCluster(ClusterModeMixin, cluster_models.Cluster):
             datastore_version_id=datastore_version.id,
             task_status=ClusterTasks.BUILDING_INITIAL,
             configuration_id=configuration)
+        kept = cls._kept_properties(extended_properties)
+        if kept:
+            db_info.save_properties(kept)
 
         cls._create_instances(context, db_info, datastore, datastore_version,
                               instances, extended_properties, locality,

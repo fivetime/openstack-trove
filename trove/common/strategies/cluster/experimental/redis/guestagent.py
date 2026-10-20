@@ -111,3 +111,19 @@ class RedisGuestAgentAPI(guest_api.API):
         LOG.debug("Notifying cluster install completion.")
         return self._call("cluster_complete", self.agent_high_timeout,
                           version=guest_api.API.API_BASE_VERSION)
+
+    # The sentinel topology
+
+    def sentinel_install(self, config):
+        """Join a cluster of the sentinel topology: the member is started
+        again with its sentinel and, a replica, syncs with its primary.
+        """
+        LOG.debug("Joining the sentinel cluster.")
+        return self._call("sentinel_install", CONF.cluster_usage_timeout,
+                          version=guest_api.API.API_BASE_VERSION,
+                          config=config)
+
+    def sentinel_reset(self):
+        LOG.debug("Resetting the member's sentinel.")
+        return self._call("sentinel_reset", self.agent_high_timeout,
+                          version=guest_api.API.API_BASE_VERSION)

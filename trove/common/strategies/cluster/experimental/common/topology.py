@@ -19,10 +19,12 @@ strategy's ``cluster_class``, ``cluster_view_class`` and
 ``task_manager_cluster_tasks_class``. A datastore with topologies gives
 each of these as a dispatcher (``clusters``, ``views``) over a class per
 topology. A new cluster takes its topology from the extended property
-``topology`` (the default when it has none), which the dispatcher keeps
-in the cluster's properties; a cluster loaded later takes the one it
-keeps. A cluster from before the datastore had topologies keeps none and
-is of the default topology: nothing changes for it.
+``topology`` (the default when it has none); the class of a topology but
+the default gets it among the extended properties and keeps it in the
+cluster's properties before it asks the task manager to build the
+cluster (``HomogeneousCluster`` does). A cluster loaded later takes the
+one it keeps. A cluster from before the datastore had topologies keeps
+none and is of the default topology: nothing changes for it.
 """
 
 from trove.common import exception
@@ -32,10 +34,14 @@ TOPOLOGY = 'topology'
 
 
 def topology_of(db_info, default):
-    """The topology a cluster was created with."""
+    """The topology a cluster was created with; the default for one that
+    keeps no properties, or none of ours.
+    """
     get = getattr(db_info, 'get_properties', None)
-    properties = (get() if get is not None else None) or {}
-    return properties.get(TOPOLOGY) or default
+    properties = get() if get is not None else None
+    topology = (properties.get(TOPOLOGY)
+                if isinstance(properties, dict) else None)
+    return topology if isinstance(topology, str) and topology else default
 
 
 def _pick(classes, topology):
@@ -67,11 +73,16 @@ def clusters(classes, default):
             props = dict(extended_properties or {})
             topology = props.pop(TOPOLOGY, None) or cls.DEFAULT
             clazz = _pick(cls.TOPOLOGIES, topology)
+            if topology != cls.DEFAULT:
+                # The task manager loads the cluster as soon as it is
+                # asked to build it: the topology's class keeps it before
+                # (common.api.HomogeneousCluster does).
+                props[TOPOLOGY] = topology
             cluster = clazz.create(context, name, datastore,
                                    datastore_version, instances, props,
                                    locality, configuration, image_id)
-            if topology != cls.DEFAULT:
-                kept = cluster.db_info.get_properties()
+            kept = cluster.db_info.get_properties()
+            if topology != cls.DEFAULT and kept.get(TOPOLOGY) != topology:
                 kept[TOPOLOGY] = topology
                 cluster.db_info.save_properties(kept)
             return cluster
