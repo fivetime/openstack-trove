@@ -33,6 +33,7 @@ from oslo_log import log as logging
 from sqlalchemy.sql.expression import text
 
 from trove.common import cfg
+from trove.common import cluster_health
 from trove.common import exception
 from trove.common.i18n import _
 from trove.guestagent.common import cluster_probe
@@ -70,6 +71,8 @@ LAST_STANDING_OPTION = 'cluster_last_standing'
 OUT_OF_GROUP = ('OFFLINE', 'ERROR')
 MEMBERS_QUERY = ("SELECT MEMBER_ID, MEMBER_STATE FROM "
                  "performance_schema.replication_group_members")
+GROUP_QUERY = ("SELECT MEMBER_HOST, MEMBER_STATE, MEMBER_ROLE FROM "
+               "performance_schema.replication_group_members")
 MEMBER_STATE = ("SELECT MEMBER_STATE, MEMBER_ROLE FROM "
                 "performance_schema.replication_group_members "
                 "WHERE MEMBER_ID = @@server_uuid")
@@ -335,6 +338,33 @@ class GroupReplicationAppMixin(galera_service.GaleraAppMixin):
         except Exception as err:
             LOG.debug("No group view for the event: %s", err)
         return answer
+
+    def cluster_health(self):
+        """What the member sees of its group: the members the
+        configuration names that are not ONLINE in it are out, and the
+        group is down when it has lost the majority of its members (it
+        takes no writes then). A member not ONLINE sees itself out.
+        """
+        me = self._self_ip()
+        states = {host: state for host, state, _role in
+                  self.execute_sql(GROUP_QUERY)}
+        state = states.get(me)
+        if state != 'ONLINE':
+            return cluster_health.view(
+                cluster_health.DEGRADED, [me],
+                'recovering into the group' if state == 'RECOVERING'
+                else 'out of the group', me)
+        out = [ip for ip in self._seed_ips() if states.get(ip) != 'ONLINE']
+        reachable = sum(1 for s in states.values() if s in IN_GROUP)
+        if 2 * reachable <= len(states):
+            return cluster_health.view(
+                cluster_health.DOWN,
+                out + [h for h, s in states.items() if s not in IN_GROUP],
+                'the group has lost the majority of its members', me)
+        if out:
+            return cluster_health.view(
+                cluster_health.DEGRADED, out, 'not ONLINE in the group', me)
+        return cluster_health.view(cluster_health.HEALTHY, me=me)
 
     def _note_last_standing(self, alone):
         marked = self.configuration_manager.has_system_override(CNF_LAST)

@@ -49,6 +49,7 @@ from oslo_utils import encodeutils
 from oslo_utils import netutils
 
 from trove.common import cfg
+from trove.common import cluster_health
 from trove.common import constants
 from trove.common.db.postgresql import models
 from trove.common import exception
@@ -812,6 +813,30 @@ class PostgresqlClusterAppMixin(object):
                              'lease_ttl': self._lease_ttl,
                              'writable': bool(view.writable)},
                       resend_after=resend)
+
+    def cluster_health(self):
+        """What the member sees of its cluster. The primary sees its
+        standbys: a member of the cluster that does not stream from it
+        is out. A standby sees only itself: out while it does not
+        stream.
+        """
+        me = self._self_ip()
+        if self.adm.query("SELECT pg_is_in_recovery()")[0][0]:
+            receiver = self._receiver()
+            if receiver and receiver['status'] == STREAMING:
+                return cluster_health.view(cluster_health.HEALTHY, me=me)
+            return cluster_health.view(cluster_health.DEGRADED, [me],
+                                       'not streaming', me)
+        members = self._read_cluster().get('members') or {}
+        standbys = self._standbys_of_primary()
+        out = [ip for member_id, ip in members.items()
+               if member_id != self.self_id and
+               (standbys.get(member_id) or {}).get('state') != STREAMING]
+        if out:
+            return cluster_health.view(
+                cluster_health.DEGRADED, out,
+                'not streaming from the primary', me)
+        return cluster_health.view(cluster_health.HEALTHY, me=me)
 
     # Failing over: what the task manager has the members do
 

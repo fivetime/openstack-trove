@@ -220,6 +220,9 @@ class TestRecoveredHealth(HealthTestBase):
         # Looked at again until healthy: a member that comes back says
         # nothing (seen on 2026-10-19 before).
         self.assertTrue(galera.still_watching(cluster.id))
+        # As often as the health of [mariadb] says, not every recovery
+        # interval.
+        self.assertEqual(120, galera.look_again_in(cluster.id))
 
         # No member in a primary component: down.
         views = [(m, {'in_group': False}) for m in members]

@@ -37,8 +37,8 @@ class ProbeTestBase(trove_testtools.TestCase):
         self.app.is_cluster_complete.return_value = False
         self.app.member_view.return_value = _view('ONLINE', 'PRIMARY')
         self.app.was_last_standing.return_value = False
-        # What the apps of the datastores that recover their clusters do
-        # not have.
+        # Not what these tests are about: a MagicMock has every
+        # attribute (TestClusterWatch has the health).
         del self.app.cluster_health
         del self.app.is_watched_member
         self.conf = mock.Mock(cluster_probe_interval=3,
@@ -722,12 +722,69 @@ class TestClusterWatch(trove_testtools.TestCase):
         self.assertEqual('the member does not answer',
                          self.cast.call_args[1]['payload']['reason'])
 
+    def test_a_member_where_it_should_be_tells_of_a_member_gone(self):
+        # The datastore's word is normal (a Galera member synced in the
+        # primary component): what it sees of its cluster speaks then.
+        self.app.cluster_signal = lambda view: probe.NORMAL
+        self.watch.enable_complete()
+        self._tick(1000)
+        self.cast.assert_not_called()
+        self.app.health = ch.view(ch.DEGRADED, ['10.0.0.3'],
+                                  'not in the primary component',
+                                  me='10.0.0.1')
+        self._tick(1030)
+        self.assertEqual(probe.ABNORMAL, self.cast.call_args[0][1])
+        self.assertEqual('the cluster is DEGRADED: not in the primary '
+                         'component',
+                         self.cast.call_args[1]['payload']['reason'])
+        self.app.health = ch.view(ch.HEALTHY, me='10.0.0.1')
+        self._tick(1060)
+        self.assertEqual(probe.NORMAL_KIND, self.cast.call_args[0][1])
+
+    def test_the_datastores_own_word_comes_first(self):
+        self.app.cluster_signal = lambda view: probe.ClusterSignal(
+            True, probe.ABNORMAL, 'fenced')
+        self.app.health = ch.view(ch.DEGRADED, ['10.0.0.3'], 'gone')
+        self.watch.enable_complete()
+        self._tick(1000)
+        self.assertEqual('fenced',
+                         self.cast.call_args[1]['payload']['reason'])
+
     def test_leaving_says_nothing(self):
         self.watch.enable_complete()
         self.watch.disable()
         self.app.health = ch.view(ch.DOWN, [], 'cluster_state fail')
         self._tick(1000)
         self.cast.assert_not_called()
+
+
+class TestProbedManagersTellTheirHealth(trove_testtools.TestCase):
+    """The task manager asks a member of a cluster the probe watches
+    (Group Replication) what it sees.
+    """
+
+    def _manager(self, app):
+        from trove.guestagent.common import cluster_member
+
+        class Manager(cluster_member.ClusterMemberMixin):
+            pass
+        manager = Manager()
+        manager.app = app
+        return manager
+
+    def test_asked(self):
+        app = mock.Mock(spec=['cluster_health'])
+        app.cluster_health.return_value = ch.view(ch.HEALTHY, me='10.0.0.1')
+        self.assertEqual(ch.view(ch.HEALTHY, me='10.0.0.1'),
+                         self._manager(app).get_cluster_health(None))
+        app.cluster_health.side_effect = RuntimeError('gone')
+        self.assertEqual(
+            {'down': True, 'reason': 'the database does not answer'},
+            self._manager(app).get_cluster_health(None))
+
+    def test_an_app_that_tells_nothing(self):
+        self.assertIsNone(self._manager(mock.Mock(spec=[]))
+                          .get_cluster_health(None))
 
 
 class TestWatchedManagers(trove_testtools.TestCase):

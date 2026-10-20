@@ -1,0 +1,9 @@
+wsrep_local_state_uuid	589c20c6-cc18-11f1-a276-27053f6dcc23
+wsrep_last_committed	3
+wsrep_local_state_comment	Initialized
+wsrep_incoming_addresses	172.31.250.98:3306
+wsrep_cluster_conf_id	18446744073709551615
+wsrep_cluster_size	1
+wsrep_cluster_state_uuid	589c20c6-cc18-11f1-a276-27053f6dcc23
+wsrep_cluster_status	non-Primary
+wsrep_ready	OFF

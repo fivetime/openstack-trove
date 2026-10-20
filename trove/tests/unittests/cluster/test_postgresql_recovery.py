@@ -377,6 +377,8 @@ class RecoveryTestBase(trove_testtools.TestCase):
             cluster_failover_max_lag_bytes=MiB,
             cluster_standby_rebuild_after=600, cluster_wal_timeout=10,
             cluster_lease_ttl=60, cluster_fence_grace=15)
+        # As [postgresql]: no health options, the recovery's interval.
+        del self.recovery.conf.cluster_health_interval
         # A member this replica does not reach is down for the whole
         # control plane (its heartbeat is stale), unless a test says.
         self.stale = mock.patch.object(

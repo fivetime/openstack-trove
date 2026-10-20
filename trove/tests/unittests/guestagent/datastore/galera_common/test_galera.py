@@ -11,11 +11,13 @@
 #    under the License.
 
 import inspect
+import os
 from unittest import mock
 
 import docker
 
 from trove.common import cfg
+from trove.common import cluster_health as ch
 from trove.common import exception
 from trove.common.strategies.cluster.experimental.galera_common import (
     guestagent as galera_guest_api)
@@ -986,6 +988,68 @@ class TestClusterSignal(TestMemberView):
         self.status.update(wsrep_local_state_comment='Synced')
         self.assertEqual(cluster_probe.NORMAL, self._signal())
         self.assertIsNone(self.app._unsynced_since)
+
+
+def _wsrep(name):
+    """The wsrep status a member of a 3 member MariaDB 11.4 cluster
+    answered (172.31.250.98, .99 and .100; captured from containers).
+    """
+    path = os.path.join(os.path.dirname(__file__), 'wsrep', name + '.txt')
+    with open(path) as f:
+        return galera_service._parse_status(f.read())
+
+
+class TestClusterHealth(trove_testtools.TestCase):
+    """What a Galera member sees of its cluster, as 172.31.250.98."""
+
+    def setUp(self):
+        super(TestClusterHealth, self).setUp()
+        self.app = FakeApp()
+        sections = {
+            'mysqld': {'wsrep_node_address': '172.31.250.98',
+                       'wsrep_cluster_address':
+                           '"gcomm://172.31.250.98,172.31.250.99,'
+                           '172.31.250.100"'},
+            'trove': {}}
+        self.app.configuration_manager.get_value.side_effect = (
+            lambda section: sections.get(section))
+
+    def _health(self, name):
+        status = _wsrep(name)
+        self.app.execute_sql = mock.Mock(
+            return_value=list(status.items()))
+        # The probe reads the status for the member's view first.
+        self.app.member_view()
+        return self.app.cluster_health()
+
+    def test_every_member_in_the_primary_component(self):
+        self.assertEqual(ch.view(ch.HEALTHY, me='172.31.250.98'),
+                         self._health('status-all-up'))
+
+    def test_a_member_gone(self):
+        self.assertEqual(
+            ch.view(ch.DEGRADED, ['172.31.250.100'],
+                    'not in the primary component', '172.31.250.98'),
+            self._health('status-member-down'))
+
+    def test_the_last_one_standing(self):
+        # The others stopped cleanly: a primary component of one.
+        self.assertEqual(
+            ch.view(ch.DEGRADED, ['172.31.250.99', '172.31.250.100'],
+                    'not in the primary component', '172.31.250.98'),
+            self._health('status-alone'))
+
+    def test_out_of_a_primary_component(self):
+        # The other two killed: no quorum, this member sees itself out.
+        self.assertEqual(
+            ch.view(ch.DEGRADED, ['172.31.250.98'],
+                    'out of the primary component', '172.31.250.98'),
+            self._health('status-non-primary'))
+
+    def test_the_server_does_not_answer(self):
+        self.app.execute_sql = mock.Mock(side_effect=Exception('gone'))
+        self.app.member_view()
+        self.assertRaises(exception.TroveError, self.app.cluster_health)
 
 
 class TestClientCommands(trove_testtools.TestCase):

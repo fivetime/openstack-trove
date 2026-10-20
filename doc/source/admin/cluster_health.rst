@@ -22,7 +22,8 @@ of a cluster, as the task manager last found it::
   Redis cluster with hash slots no master serves, a MongoDB shard without
   a primary, a Cassandra ring with most of its nodes down, a PostgreSQL
   cluster without a writable primary, a Galera cluster without a primary
-  component.
+  component, a Group Replication group that lost the majority of its
+  members.
 ``UNKNOWN``
   Not looked at yet: a new cluster, until the task manager's next scan.
 
@@ -47,10 +48,28 @@ not healthy is looked at again every ``cluster_health_interval`` seconds
 until it is. Members named by their address in what the others see are
 shown by their Trove names once the task manager has learnt them.
 
+MySQL and Percona Server Group Replication groups heal themselves too
+(their members rejoin or form the group again on their own, through the
+cluster probe), and are watched the same way: a member reads
+``performance_schema.replication_group_members``; a member named in the
+configuration that is not ``ONLINE`` is out, and the group is down when
+the members it can still reach are no majority of it.
+
 PostgreSQL and Galera clusters get their health from the views their
 recovery asks for anyway: a member out of the cluster (a PostgreSQL
 member that is neither the primary nor a standby streaming from it, a
 Galera member out of the primary component) is out.
+
+The members of these clusters, and of Group Replication groups, also
+tell when they see a member gone while they themselves are where they
+should be: a Galera member sees the members the configuration names that
+are not in its primary component (``wsrep_incoming_addresses``), a
+PostgreSQL primary the members not streaming from it
+(``pg_stat_replication``). Without that the task manager would find out
+only once the heartbeat of the member gone is stale and its scan comes
+by (``agent_heartbeat_expiry`` and ``cluster_recovery_scan_interval``,
+some five minutes); with it, within the probe's interval. A PostgreSQL
+standby sees only itself.
 
 The task manager's scan (``cluster_recovery_scan_interval``) also looks
 at the clusters whose health is not recorded yet, and at those with a
@@ -64,7 +83,8 @@ Options
 ~~~~~~~
 
 In the section of each of these datastores (``[redis]``, ``[valkey]``,
-``[keydb]``, ``[mongodb]``, ``[cassandra]``, ``[vertica]``):
+``[keydb]``, ``[mongodb]``, ``[cassandra]``, ``[vertica]``; ``[mysql]``
+and ``[percona]`` have the last two, their probe has its own options):
 
 ``cluster_probe_interval`` (``30``)
   Seconds between two looks of the guest agent; ``0`` turns the watch

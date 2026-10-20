@@ -10,10 +10,12 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+import os
 from unittest import mock
 
 from oslo_utils import importutils
 
+from trove.common import cluster_health as ch
 from trove.common import constants
 from trove.common import exception
 from trove.guestagent.common import cluster_probe
@@ -406,3 +408,69 @@ class TestGroupReplicationApp(trove_testtools.TestCase):
         self._states((None, None))
         self.assertEqual({'state': None, 'role': None, 'writable': False},
                          self.app.get_member_role())
+
+
+def _group(name):
+    """performance_schema.replication_group_members (GROUP_QUERY) as a
+    member of a MySQL 8.4 single-primary group of three answered
+    (172.31.250.114, .115 and .116; captured from containers).
+    """
+    path = os.path.join(os.path.dirname(__file__), 'group', name + '.txt')
+    with open(path) as f:
+        return [tuple(line.split('\t')) for line in f.read().splitlines()]
+
+
+class TestGroupHealth(trove_testtools.TestCase):
+    """What a Group Replication member sees of its group."""
+
+    SEEDS = ('"172.31.250.114:33061,172.31.250.115:33061,'
+             '172.31.250.116:33061"')
+
+    def setUp(self):
+        super(TestGroupHealth, self).setUp()
+        patcher = mock.patch.object(
+            mysql_service.GroupReplicationMySqlApp, '__init__',
+            return_value=None)
+        patcher.start()
+        self.addCleanup(mock.patch.stopall)
+        self.app = mysql_service.GroupReplicationMySqlApp()
+        self.configuration = {
+            'report_host': '172.31.250.114',
+            'group_replication_group_seeds': self.SEEDS}
+        mock.patch.object(
+            mysql_service.GroupReplicationMySqlApp, 'cluster_configuration',
+            new_callable=mock.PropertyMock,
+            side_effect=lambda: self.configuration).start()
+
+    def _health(self, name, me='172.31.250.114'):
+        self.configuration['report_host'] = me
+        rows = _group(name)
+        self.app.execute_sql = mock.Mock(
+            side_effect=lambda stmt: rows if stmt == gr_service.GROUP_QUERY
+            else self.fail(stmt))
+        return self.app.cluster_health()
+
+    def test_every_member_online(self):
+        self.assertEqual(ch.view(ch.HEALTHY, me='172.31.250.114'),
+                         self._health('all-up'))
+
+    def test_a_member_left_or_was_expelled(self):
+        for name in ('member-left', 'member-expelled'):
+            self.assertEqual(
+                ch.view(ch.DEGRADED, ['172.31.250.116'],
+                        'not ONLINE in the group', '172.31.250.114'),
+                self._health(name), name)
+
+    def test_the_group_lost_its_majority(self):
+        # Of the two left, the other is unreachable: no writes.
+        self.assertEqual(
+            ch.view(ch.DOWN, ['172.31.250.115', '172.31.250.116'],
+                    'the group has lost the majority of its members',
+                    '172.31.250.114'),
+            self._health('majority-lost'))
+
+    def test_a_member_out_of_the_group_sees_itself_out(self):
+        self.assertEqual(
+            ch.view(ch.DEGRADED, ['172.31.250.116'], 'out of the group',
+                    '172.31.250.116'),
+            self._health('self-offline', me='172.31.250.116'))

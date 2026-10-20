@@ -31,6 +31,7 @@ from sqlalchemy import exc
 from sqlalchemy.sql.expression import text
 
 from trove.common import cfg
+from trove.common import cluster_health
 from trove.common import constants
 from trove.common import exception
 from trove.common.i18n import _
@@ -541,6 +542,28 @@ class GaleraAppMixin(object):
         return signal(True, cluster_probe.ABNORMAL,
                       'not synced for %d seconds: %s' % (for_seconds, state),
                       extra={'state': state})
+
+    def cluster_health(self):
+        """What the member sees of its cluster, from the wsrep status
+        member_view read: the members the configuration names that are
+        not in its primary component are out; a member out of a primary
+        component sees itself out.
+        """
+        status = self._last_status
+        if status is None:
+            raise exception.TroveError(_("No wsrep status."))
+        me = self._self_ip()
+        if status.get('wsrep_cluster_status') != PRIMARY:
+            return cluster_health.view(
+                cluster_health.DEGRADED, [me],
+                'out of the primary component', me)
+        present = {ip for ip, _port in self._incoming(status)}
+        out = [ip for ip in self._seed_ips() if ip not in present]
+        if out:
+            return cluster_health.view(
+                cluster_health.DEGRADED, out,
+                'not in the primary component', me)
+        return cluster_health.view(cluster_health.HEALTHY, me=me)
 
     # Recovery, after every member went down. A member that comes up and
     # finds no primary component waits for one, with its database port

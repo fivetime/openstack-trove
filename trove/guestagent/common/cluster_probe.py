@@ -37,6 +37,10 @@ small set of methods:
   cluster is abnormal.
 * ``cluster_event_view(view)``, optional: what to attach to an event;
   without it, ``recovery_view()`` when the app has one.
+* ``cluster_health()``, optional: what the member sees of its cluster
+  (below); a member that is where it should be tells it when it sees a
+  member gone, for the task manager to look at the cluster then rather
+  than when the heartbeat of the member gone is stale.
 
 The probe runs every few seconds, apart from the guest agent's periodic
 tasks, which run every report interval: a failover has to show on the
@@ -399,18 +403,21 @@ class ClusterWatch(object):
     def _signal(self, view):
         """What the member says of its cluster state: the datastore's
         word, or else abnormal when the member does not answer or is out
-        of the cluster.
+        of the cluster; a member where it should be is abnormal still
+        when it sees its cluster not healthy (a member gone), which the
+        others are told of no other way.
         """
         hook = getattr(self.app, 'cluster_signal', None)
-        if hook is not None:
-            signal = hook(view)
-            if signal is not None:
-                return signal
-        if view.state is None:
-            return ClusterSignal(True, ABNORMAL, 'the member does not answer')
-        if view.down:
-            return ClusterSignal(True, ABNORMAL,
-                                 'out of the cluster: %s' % view.state)
+        signal = hook(view) if hook is not None else None
+        if signal is None:
+            if view.state is None:
+                return ClusterSignal(True, ABNORMAL,
+                                     'the member does not answer')
+            if view.down:
+                return ClusterSignal(True, ABNORMAL,
+                                     'out of the cluster: %s' % view.state)
+        elif signal.abnormal or signal.kind != NORMAL_KIND:
+            return signal
         health = self.health or {}
         if health.get('status') not in (None, cluster_health.HEALTHY):
             return ClusterSignal(True, ABNORMAL, 'the cluster is %s: %s' % (

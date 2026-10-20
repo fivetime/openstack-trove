@@ -25,6 +25,24 @@ from trove.guestagent.common import cluster_probe
 LOG = logging.getLogger(__name__)
 
 
+def health_of(app):
+    """What the member sees of its cluster, for the task manager; a
+    member whose database does not answer is down.
+    """
+    watched = getattr(app, 'is_watched_member', None)
+    if watched is not None and not watched():
+        # A member that watches nothing (a MongoDB query router).
+        return None
+    tell = getattr(app, 'cluster_health', None)
+    if tell is None:
+        return None
+    try:
+        return tell()
+    except Exception as err:
+        LOG.warning("Cannot tell the health of the cluster: %s", err)
+        return {'down': True, 'reason': 'the database does not answer'}
+
+
 class ClusterMemberMixin(object):
 
     cluster_probe = None
@@ -91,6 +109,9 @@ class ClusterMemberMixin(object):
     def get_member_role(self, context):
         return self.app.get_member_role()
 
+    def get_cluster_health(self, context):
+        return health_of(self.app)
+
 
 class ClusterWatchMixin(object):
     """The cluster calls of a datastore whose clusters heal themselves:
@@ -116,15 +137,4 @@ class ClusterWatchMixin(object):
             self.cluster_watch.enable_complete()
 
     def get_cluster_health(self, context):
-        """What the member sees of its cluster, for the task manager; a
-        member whose database does not answer is down.
-        """
-        watched = getattr(self.app, 'is_watched_member', None)
-        if watched is not None and not watched():
-            # A member that watches nothing (a MongoDB query router).
-            return None
-        try:
-            return self.app.cluster_health()
-        except Exception as err:
-            LOG.warning("Cannot tell the health of the cluster: %s", err)
-            return {'down': True, 'reason': 'the database does not answer'}
+        return health_of(self.app)

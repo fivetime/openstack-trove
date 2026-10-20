@@ -193,6 +193,13 @@ class ClusterRecovery(object):
         after the recovery interval.
         """
         interval = self.conf.cluster_recovery_interval
+        if (cluster_id in self.unhealthy and
+                cluster_id not in self.waiting_since and
+                cluster_id not in self.forming_since):
+            # Only not healthy: looked at as often as the datastore's
+            # health asks, when it has the option.
+            interval = getattr(self.conf, 'cluster_health_interval',
+                               interval)
         soon = self.next_look.pop(cluster_id, None)
         if soon is None:
             return interval

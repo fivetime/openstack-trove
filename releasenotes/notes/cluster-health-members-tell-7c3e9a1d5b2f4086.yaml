@@ -1,0 +1,18 @@
+---
+features:
+  - |
+    Group Replication clusters (MySQL, Percona Server) have a health too:
+    the task manager asks the members (``get_cluster_health``), which read
+    ``performance_schema.replication_group_members``; a member the
+    configuration names that is not ``ONLINE`` is out, and the group is
+    ``DOWN`` when it lost the majority of its members. New options
+    ``cluster_health_timeout`` (30) and ``cluster_health_interval`` (120)
+    in ``[mysql]`` and ``[percona]``.
+  - |
+    The members of Galera, PostgreSQL and Group Replication clusters tell
+    the task manager when they see a member gone while they themselves are
+    where they should be (a Galera member: a member of the configuration
+    not in its primary component; a PostgreSQL primary: a member not
+    streaming from it). Their clusters show ``DEGRADED`` within the
+    probe's interval, not once the heartbeat of the member gone is stale
+    and the scan comes by (some five minutes).

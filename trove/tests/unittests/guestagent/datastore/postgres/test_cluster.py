@@ -10,9 +10,11 @@
 #    See the License for the specific language governing permissions and
 #    limitations under the License.
 
+import os
 from unittest import mock
 
 from trove.common import cfg
+from trove.common import cluster_health as ch
 from trove.common import exception
 from trove.guestagent.common import cluster_probe
 from trove.guestagent.datastore.postgres import cluster
@@ -334,6 +336,70 @@ class MemberViewTest(ClusterAppTestBase):
             {'state': 'standby', 'role': 'STREAMING', 'writable': False,
              'readable': True, 'mode': 'sync'},
             self.app.get_member_role())
+
+
+def _rows(name):
+    """What a PostgreSQL 18 member answered (captured from containers:
+    the primary 172.31.250.130, standbys .131 and .132): the primary's
+    STANDBYS_QUERY, a standby's RECEIVER_QUERY.
+    """
+    path = os.path.join(os.path.dirname(__file__), 'replication',
+                        name + '.txt')
+    rows = []
+    with open(path) as f:
+        for line in f.read().splitlines():
+            fields = line.split('\t')
+            if name.startswith('standbys'):
+                rows.append((fields[0], fields[1], fields[2],
+                             int(fields[3])))
+            else:
+                rows.append((fields[0], fields[1], float(fields[2]),
+                             int(fields[3])))
+    return rows
+
+
+class ClusterHealthTest(ClusterAppTestBase):
+    """What a member of the cluster sees of it."""
+
+    A = '0b1c2d3e-0000-4000-8000-00000000000a'
+    B = '0b1c2d3e-0000-4000-8000-00000000000b'
+
+    def setUp(self):
+        super(ClusterHealthTest, self).setUp()
+        self.app.update_cluster_members(
+            {'p1': '172.31.250.130', self.A: '172.31.250.131',
+             self.B: '172.31.250.132'}, 'sync')
+
+    def _primary(self, name):
+        self.patch_conf_property('guest_id', 'p1')
+        self.app._self_ip = mock.Mock(return_value='172.31.250.130')
+        self.app.adm.query.side_effect = [[(False,)], _rows(name)]
+        return self.app.cluster_health()
+
+    def _standby(self, name):
+        self.patch_conf_property('guest_id', self.A)
+        self.app._self_ip = mock.Mock(return_value='172.31.250.131')
+        self.app.adm.query.side_effect = [[(True,)], _rows(name)]
+        return self.app.cluster_health()
+
+    def test_the_primary_sees_every_standby_streaming(self):
+        self.assertEqual(ch.view(ch.HEALTHY, me='172.31.250.130'),
+                         self._primary('standbys-all'))
+
+    def test_the_primary_sees_a_standby_gone(self):
+        self.assertEqual(
+            ch.view(ch.DEGRADED, ['172.31.250.132'],
+                    'not streaming from the primary', '172.31.250.130'),
+            self._primary('standbys-one-down'))
+
+    def test_a_standby_sees_itself(self):
+        self.assertEqual(ch.view(ch.HEALTHY, me='172.31.250.131'),
+                         self._standby('receiver-streaming'))
+        # The primary gone: no receiver.
+        self.assertEqual(
+            ch.view(ch.DEGRADED, ['172.31.250.131'], 'not streaming',
+                    '172.31.250.131'),
+            self._standby('receiver-primary-down'))
 
 
 class ReconcileTest(ClusterAppTestBase):

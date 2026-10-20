@@ -18,6 +18,7 @@ from trove.common.clients import create_nova_client
 from trove.common.exception import PollTimeOut
 from trove.common.exception import TroveError
 from trove.common.i18n import _
+from trove.common.strategies.cluster.experimental.common import health
 from trove.common.strategies.cluster.experimental.galera_common import (
     taskmanager as galera_taskmanager)
 from trove.common.strategies.cluster.experimental.group_replication import (
@@ -51,8 +52,9 @@ class GroupReplicationTaskManagerStrategy(
         return GroupReplicationClusterTasks
 
     def cluster_recovery(self, manager):
-        # The members bring the group back by themselves (the probe).
-        return None
+        # The members bring the group back by themselves (the probe); the
+        # task manager only asks them what they see, for the health.
+        return health.HealthWatch(manager)
 
 
 class GroupReplicationClusterTasks(

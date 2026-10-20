@@ -987,6 +987,20 @@ def _with_cluster_probe_and_entry(opts, deprecated_prefix=None,
 # its own) with a watch on each member: the guest agent tells the control
 # plane what the member sees of its cluster, and the task manager records
 # the cluster's health (HEALTHY, DEGRADED, DOWN) for the API to show.
+def _cluster_health_opts():
+    """How the task manager asks the members of a datastore's clusters
+    what they see of them (``common.health.HealthWatch``).
+    """
+    return [
+        cfg.IntOpt('cluster_health_timeout', default=30, min=1,
+                   help='Seconds the task manager waits for a member to '
+                        'tell what it sees of its cluster.'),
+        cfg.IntOpt('cluster_health_interval', default=120, min=10,
+                   help='Seconds between two looks of the task manager at '
+                        'a cluster that is not healthy, until it is.'),
+    ]
+
+
 def _with_cluster_watch(opts, probe_timeout=20):
     """The options of the watch on each member of a datastore's clusters
     (``trove.guestagent.common.cluster_probe.ClusterWatch``).
@@ -1012,13 +1026,7 @@ def _with_cluster_watch(opts, probe_timeout=20):
                         'itself.'),
         cfg.IntOpt('cluster_event_min_interval', default=5, min=0,
                    help='At most one report per this many seconds.'),
-        cfg.IntOpt('cluster_health_timeout', default=30, min=1,
-                   help='Seconds the task manager waits for a member to '
-                        'tell what it sees of its cluster.'),
-        cfg.IntOpt('cluster_health_interval', default=120, min=10,
-                   help='Seconds between two looks of the task manager at '
-                        'a cluster that is not healthy, until it is.'),
-    ]
+    ] + _cluster_health_opts()
     names = {opt.name for opt in watch}
     return [opt for opt in opts if opt.name not in names] + watch
 
@@ -1090,7 +1098,7 @@ def _with_group_replication(opts):
         cfg.ListOpt('ignore_users',
                     default=['os_admin', 'root', 'clusterrepuser'],
                     help='Users to exclude when listing users.'),
-    ]
+    ] + _cluster_health_opts()
     names = {opt.name for opt in group_replication}
     return [opt for opt in opts if opt.name not in names] + group_replication
 
@@ -1117,7 +1125,7 @@ def _with_galera_cluster(opts):
                    default='trove.extensions.mysql.service.'
                    'ClusterWriterRootController',
                    help='Root controller implementation.'),
-    ]
+    ] + _cluster_health_opts()
     names = {opt.name for opt in galera}
     return _with_cluster_probe_and_entry(
         [opt for opt in opts if opt.name not in names],

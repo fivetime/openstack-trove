@@ -19,6 +19,8 @@ from unittest import mock
 from trove.cluster.tasks import ClusterTasks
 from trove.common import cfg
 from trove.common.strategies.cluster.experimental.common import (
+    health)
+from trove.common.strategies.cluster.experimental.common import (
     recovery as common_recovery)
 from trove.common.strategies.cluster.experimental.galera_common import (
     recovery)
@@ -73,7 +75,8 @@ class GaleraRecoveryTest(trove_testtools.TestCase):
             cluster_peer_timeout=3, cluster_recovery_grace=60,
             cluster_recovery_interval=30, cluster_auto_bootstrap=True,
             cluster_bootstrap_needs_all_members=False,
-            cluster_bootstrap_jitter=0, cluster_recovery_timeout=3600)
+            cluster_bootstrap_jitter=0, cluster_recovery_timeout=3600,
+            cluster_health_interval=120)
         self.db_cluster = mock.Mock(id='c1', task_status=ClusterTasks.NONE,
                                     updated=None)
         mock.patch.object(common_recovery.cluster_models.DBCluster, 'find_by',
@@ -414,7 +417,7 @@ class RecoveryMembersTest(trove_testtools.TestCase):
 
 class RecoveryWiringTest(trove_testtools.TestCase):
 
-    def test_the_galera_strategies_have_a_recovery_and_gr_has_none(self):
+    def test_the_galera_strategies_have_a_recovery_and_gr_a_watch(self):
         for manager in ('pxc', 'mariadb'):
             strat = strategy.load_taskmanager_strategy(manager)
             self.assertIsInstance(strat, galera_taskmanager.
@@ -424,7 +427,10 @@ class RecoveryWiringTest(trove_testtools.TestCase):
         strat = strategy.load_taskmanager_strategy('mysql')
         self.assertIsInstance(
             strat, gr_taskmanager.GroupReplicationTaskManagerStrategy)
-        self.assertIsNone(strat.cluster_recovery('mysql'))
+        watch = strat.cluster_recovery('mysql')
+        self.assertIsInstance(watch, health.HealthWatch)
+        self.assertEqual((30, 120), (watch.conf.cluster_health_timeout,
+                                     watch.conf.cluster_health_interval))
         # The poll is off by default: the members report, the scan runs.
         self.assertEqual(0, CONF.cluster_recovery_check_interval)
         self.assertEqual(300, CONF.cluster_recovery_scan_interval)
