@@ -276,15 +276,20 @@ class SentinelAppMixin(object):
         info = self.adm.connection.info('replication')
         role = 'master' if info.get('role') == 'master' else 'replica'
         writable = readable = False
+        self.replaced_primary = False
         if role == 'master':
             try:
                 elected = self.sentinel_primary()
             except Exception as err:
                 LOG.debug("The sentinel does not answer: %s", err)
                 elected = None
+            me = self.get_node_ip()[0]
             replicas = int(info.get('connected_slaves') or 0)
-            writable = (elected == self.get_node_ip()[0] and
+            writable = (elected == me and
                         (self.sentinel_mode() == ASYNC or replicas > 0))
+            # Started again a primary, the sentinels having elected
+            # another meanwhile: a replica soon, when they reconfigure it.
+            self.replaced_primary = elected is not None and elected != me
         else:
             silence = info.get('master_last_io_seconds_ago')
             readable = (info.get('master_link_status') == 'up' and
@@ -292,6 +297,19 @@ class SentinelAppMixin(object):
                         int(silence) <= READ_MAX_SILENCE)
         return cluster_probe.MemberView(role, role, writable, False,
                                         readable)
+
+    def cluster_signal(self, view):
+        """A primary the sentinels have replaced is not where it should
+        be until it is a replica: told then, its cluster is looked at
+        when it is whole again (a member that starts normal says so only
+        once). Otherwise the probe's own word.
+        """
+        if getattr(self, 'replaced_primary', False) and \
+                self.is_sentinel_member():
+            return cluster_probe.ClusterSignal(
+                True, cluster_probe.ABNORMAL,
+                'a primary the sentinels replaced')
+        return None
 
     def sentinel_health(self):
         """What this member's sentinel sees of the cluster: the members

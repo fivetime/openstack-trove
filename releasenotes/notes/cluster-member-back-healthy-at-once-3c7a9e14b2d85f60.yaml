@@ -10,3 +10,9 @@ fixes:
     sends a heartbeat as soon as it serves, and a member that starts
     normal tells it once, after that heartbeat: the cluster is looked at,
     and found healthy, then.
+  - |
+    The old primary of a Redis, Valkey or KeyDB cluster of the sentinel
+    topology that comes back after the sentinels elected another starts
+    a primary still, and only then becomes a replica: it now tells it is
+    not where it should be until it is a replica, so that its cluster is
+    looked at, and found healthy, when the sentinels have reconfigured it.

@@ -827,6 +827,33 @@ class TestRedisSentinelMember(trove_testtools.TestCase):
         self.app.sentinel_primary = mock.Mock(side_effect=OSError('gone'))
         self.assertFalse(self.app.sentinel_member_view().writable)
 
+    def test_a_replaced_primary_is_not_where_it_should_be(self):
+        # The old primary started again after a power off, a primary
+        # still, the sentinels having elected another (production,
+        # 2026-10-20): abnormal until it is a replica, which it then tells.
+        self.app.is_sentinel_member = mock.Mock(return_value=True)
+        primary = {'role': 'master', 'connected_slaves': 0}
+        view = self._view(primary, elected='172.31.250.194')
+        signal = self.app.cluster_signal(view)
+        self.assertTrue(signal.abnormal)
+        self.assertEqual('abnormal', signal.kind)
+        self.assertEqual('a primary the sentinels replaced', signal.reason)
+        # A replica now: the probe's own word again.
+        replica = {'role': 'slave', 'master_link_status': 'up',
+                   'master_last_io_seconds_ago': 1}
+        self.assertIsNone(self.app.cluster_signal(self._view(replica)))
+        # The primary its sentinel elects, or one whose sentinel does not
+        # answer: nothing of its own to say either.
+        self.assertIsNone(self.app.cluster_signal(self._view(primary)))
+        self.app.adm.connection.info.return_value = primary
+        self.app.sentinel_primary = mock.Mock(side_effect=OSError('gone'))
+        self.assertIsNone(self.app.cluster_signal(
+            self.app.sentinel_member_view()))
+
+    def test_a_node_of_the_cluster_topology_has_no_word_of_its_own(self):
+        self.app.is_sentinel_member = mock.Mock(return_value=False)
+        self.assertIsNone(self.app.cluster_signal(mock.Mock()))
+
     def test_the_sentinel_comes_beside_the_server_of_the_same_image(self):
         # As docker-py gives a container's attributes (docker inspect): the
         # image as it was named when the container was made.
