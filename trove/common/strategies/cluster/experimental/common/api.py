@@ -313,6 +313,9 @@ class MemberRolesMixin(object):
         except Exception as err:
             LOG.info("Member %s did not tell its role: %s", instance.id, err)
             return 'unknown'
+        if answer is None:
+            # A member that has no role (a MongoDB query router).
+            return None
         return self._role_name(answer)
 
     def _member_roles(self, instances):
@@ -327,6 +330,6 @@ class MemberRolesMixin(object):
         if self.load_servers:
             roles = self._member_roles(self.cluster.instances)
             for instance_dict in instances:
-                if instance_dict['id'] in roles:
+                if roles.get(instance_dict['id']) is not None:
                     instance_dict['role'] = roles[instance_dict['id']]
         return instances, ip_list

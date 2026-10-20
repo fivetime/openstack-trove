@@ -28,6 +28,8 @@ from trove.common.notification import DBaaSClusterGrow
 from trove.common.notification import StartNotification
 from trove.common import server_group as srv_grp
 from trove.common.strategies.cluster import base
+from trove.common.strategies.cluster.experimental.common import (
+    api as common_api)
 from trove.common import utils
 from trove.datastore import models as datastore_models
 from trove.extensions.mgmt.clusters.views import MgmtClusterView
@@ -683,13 +685,16 @@ class MongoDbCluster(models.Cluster):
                 raise exception.LocalStorageNotSpecified(flavor=flavor_id)
 
 
-class MongoDbClusterView(ClusterView):
+class MongoDbClusterView(common_api.MemberRolesMixin, ClusterView):
+    """With the role each member of a replica set has now (primary,
+    secondary, arbiter, ...); a query router has none.
+    """
 
     def build_instances(self):
         return self._build_instances(['query_router'], ['member'])
 
 
-class MongoDbMgmtClusterView(MgmtClusterView):
+class MongoDbMgmtClusterView(common_api.MemberRolesMixin, MgmtClusterView):
 
     def build_instances(self):
         return self._build_instances(['query_router'],

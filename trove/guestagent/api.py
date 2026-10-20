@@ -326,6 +326,13 @@ class API(object):
         return self._call("is_root_enabled", self.agent_low_timeout,
                           version=version)
 
+    def get_member_role(self):
+        """The member's state and role in its cluster. For a view: a
+        member that does not answer soon counts as unknown.
+        """
+        return self._call("get_member_role", self.agent_low_timeout,
+                          version=self.API_BASE_VERSION)
+
     def get_cluster_health(self, timeout=None):
         """What a cluster member sees of its cluster
         (``trove.common.cluster_health``); a member that does not answer

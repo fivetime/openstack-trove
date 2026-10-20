@@ -559,3 +559,28 @@ class MongoDBClusterTest(trove_testtools.TestCase):
                                    cluster_id=self.cluster_id,
                                    type='config_server')
         ]
+
+
+class MongoDbClusterViewTest(trove_testtools.TestCase):
+    """The view shows the role each member of a replica set has now; a
+    query router has none.
+    """
+
+    @mock.patch.object(api.ClusterView, '_build_instances')
+    def test_roles(self, build):
+        roles = {'m1': {'state': 'SECONDARY', 'role': 'SECONDARY'},
+                 'm2': {'state': 'PRIMARY', 'role': 'PRIMARY'},
+                 'm3': {'state': 'ARBITER', 'role': 'ARBITER'},
+                 'q1': None}
+        cluster = mock.Mock()
+        cluster.datastore_version.manager = 'mongodb'
+        cluster.instances = [mock.Mock(id=i, status='ACTIVE') for i in roles]
+        cluster.get_guest = lambda instance: mock.Mock(**{
+            'get_member_role.return_value': roles[instance.id]})
+        build.return_value = ([{'id': i} for i in roles], [])
+        instances, _ips = api.MongoDbClusterView(
+            cluster, load_servers=True).build_instances()
+        self.assertEqual(
+            [('m1', 'secondary'), ('m2', 'primary'), ('m3', 'arbiter'),
+             ('q1', None)],
+            [(i['id'], i.get('role')) for i in instances])

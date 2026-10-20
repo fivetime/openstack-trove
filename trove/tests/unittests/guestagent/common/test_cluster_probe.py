@@ -787,6 +787,41 @@ class TestProbedManagersTellTheirHealth(trove_testtools.TestCase):
                           .get_cluster_health(None))
 
 
+class TestWatchedMemberRole(trove_testtools.TestCase):
+    """A member of a cluster that heals itself tells its role as its
+    database has it now.
+    """
+
+    def _manager(self, app):
+        from trove.guestagent.common import cluster_member
+
+        class Manager(cluster_member.ClusterWatchMixin):
+            pass
+        manager = Manager()
+        manager.app = app
+        return manager
+
+    def test_the_role_now(self):
+        app = _WatchedApp()
+        app.member_view = lambda: probe.MemberView('ok', 'replica', False,
+                                                   False)
+        self.assertEqual({'state': 'ok', 'role': 'replica'},
+                         self._manager(app).get_member_role(None))
+
+    def test_a_member_that_watches_nothing_has_none(self):
+        app = _WatchedApp()
+        app.is_watched_member = lambda: False
+        self.assertIsNone(self._manager(app).get_member_role(None))
+
+    def test_every_guest_client_asks_it(self):
+        from trove.guestagent import api as guest_api
+        client = guest_api.API.__new__(guest_api.API)
+        client.agent_low_timeout = 15
+        with mock.patch.object(client, '_call') as call:
+            client.get_member_role()
+        call.assert_called_once_with('get_member_role', 15, version='1.0')
+
+
 class TestWatchedManagers(trove_testtools.TestCase):
     """The managers of the datastores whose clusters heal themselves run
     the watch.

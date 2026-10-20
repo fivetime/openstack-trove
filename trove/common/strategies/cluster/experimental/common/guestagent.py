@@ -60,13 +60,6 @@ class ClusterGuestAgentAPI(guest_api.API):
         return self._call("is_writable_member", self.agent_high_timeout,
                           version=guest_api.API.API_BASE_VERSION)
 
-    def get_member_role(self):
-        """The member's state and role in the cluster. For a view: a
-        member that does not answer soon counts as unknown.
-        """
-        return self._call("get_member_role", self.agent_low_timeout,
-                          version=guest_api.API.API_BASE_VERSION)
-
     def get_recovery_view(self, timeout=None):
         """Where the member stands, for the recovery of the cluster: a
         member that does not answer in time is unreachable.

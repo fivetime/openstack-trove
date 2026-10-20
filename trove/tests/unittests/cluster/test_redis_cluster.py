@@ -257,6 +257,8 @@ class ClusterTest(trove_testtools.TestCase):
 
     def test_view_lists_the_replicas(self):
         view = redis_api.RedisClusterView.__new__(redis_api.RedisClusterView)
+        # A list: nobody is asked for a role.
+        view.load_servers = False
         with patch.object(redis_api.ClusterView, '_build_instances',
                           return_value=([], [])) as build:
             view.build_instances()
@@ -370,3 +372,37 @@ class ClusterTest(trove_testtools.TestCase):
         self.cluster.db_info.task_status = ClusterTasks.DELETING
         self.cluster.delete()
         mock_update_db.assert_called_with(task_status=ClusterTasks.DELETING)
+
+
+class RedisClusterViewTest(trove_testtools.TestCase):
+    """The view shows the role each node has now."""
+
+    @patch.object(redis_api.ClusterView, '_build_instances')
+    def test_roles_as_the_nodes_have_them(self, build):
+        roles = {
+            # Created as the master of its shard; its replica took over.
+            'i1': {'state': 'ok', 'role': 'replica'},
+            'i2': {'state': 'ok', 'role': 'master'},
+            'i3': exception.GuestTimeout(),
+            # A guest agent from before: no such call.
+            'i4': exception.GuestError(original_message='NoSuchMethod')}
+        cluster = Mock()
+        cluster.datastore_version.manager = 'redis'
+        cluster.instances = [Mock(id=i, status='ACTIVE') for i in roles]
+
+        def guest(instance):
+            g = Mock()
+            answer = roles[instance.id]
+            if isinstance(answer, Exception):
+                g.get_member_role.side_effect = answer
+            else:
+                g.get_member_role.return_value = answer
+            return g
+        cluster.get_guest = guest
+        build.return_value = ([{'id': i} for i in roles], [])
+        for view_class in (redis_api.RedisClusterView,
+                           redis_api.RedisMgmtClusterView):
+            instances, _ips = view_class(
+                cluster, load_servers=True).build_instances()
+            self.assertEqual(['replica', 'master', 'unknown', 'unknown'],
+                             [i['role'] for i in instances])

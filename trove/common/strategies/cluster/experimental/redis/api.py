@@ -23,6 +23,8 @@ from trove.common import exception
 from trove.common.i18n import _
 from trove.common import server_group as srv_grp
 from trove.common.strategies.cluster import base
+from trove.common.strategies.cluster.experimental.common import (
+    api as common_api)
 from trove.common import utils
 from trove.extensions.mgmt.clusters.views import MgmtClusterView
 from trove.instance import models as inst_models
@@ -251,13 +253,22 @@ class RedisCluster(models.Cluster):
 MEMBER_TYPES = ['member', 'replica']
 
 
-class RedisClusterView(ClusterView):
+class RedisMemberRolesMixin(common_api.MemberRolesMixin):
+    """The role each node has now: a replica that took over from its
+    master is the master, whatever it was created as.
+    """
+
+    def _role_name(self, answer):
+        return answer.get('role') or 'unknown'
+
+
+class RedisClusterView(RedisMemberRolesMixin, ClusterView):
 
     def build_instances(self):
         return self._build_instances(MEMBER_TYPES, MEMBER_TYPES)
 
 
-class RedisMgmtClusterView(MgmtClusterView):
+class RedisMgmtClusterView(RedisMemberRolesMixin, MgmtClusterView):
 
     def build_instances(self):
         return self._build_instances(MEMBER_TYPES, MEMBER_TYPES)

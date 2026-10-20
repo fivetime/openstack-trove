@@ -1,0 +1,10 @@
+---
+features:
+  - |
+    ``cluster show`` gives each member of a Redis, Valkey, KeyDB or
+    MongoDB cluster the role it has now, as Galera, Group Replication and
+    PostgreSQL members had: a Redis node is ``master`` or ``replica`` as
+    its cluster has it after a failover, not as it was created; a member
+    of a MongoDB replica set is ``primary``, ``secondary``, ``arbiter``...;
+    a query router has none. ``get_member_role`` is a call of every guest
+    client now.

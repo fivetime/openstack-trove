@@ -539,10 +539,12 @@ class TestMariaDB(trove_testtools.TestCase):
         self.assertEqual(
             {'install_cluster', 'reset_admin_password', 'cluster_complete',
              'get_cluster_context', 'write_cluster_configuration_overrides',
-             'leave_cluster', 'is_writable_member', 'get_member_role',
+             'leave_cluster', 'is_writable_member',
              'get_recovery_view', 'bootstrap_cluster'},
             cluster_calls)
-        for name in cluster_calls:
+        # Every cluster's member is asked these; a Galera member answers.
+        for name in cluster_calls | {'get_member_role',
+                                     'get_cluster_health'}:
             self.assertTrue(
                 callable(getattr(mariadb_manager.Manager, name, None)),
                 'the MariaDB manager does not implement %s' % name)

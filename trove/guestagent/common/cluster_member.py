@@ -138,3 +138,14 @@ class ClusterWatchMixin(object):
 
     def get_cluster_health(self, context):
         return health_of(self.app)
+
+    def get_member_role(self, context):
+        """The member's state and role in its cluster as its database
+        has them now (a Redis master or replica, a MongoDB primary or
+        secondary); None for a member that watches nothing.
+        """
+        watched = getattr(self.app, 'is_watched_member', None)
+        if watched is not None and not watched():
+            return None
+        view = self.app.member_view()
+        return {'state': view.state, 'role': view.role}
