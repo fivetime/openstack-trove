@@ -813,19 +813,71 @@ class TestRedisSentinelMember(trove_testtools.TestCase):
                           'sentinel_admin_password': 'tsen', 'mode': 'sync'},
                          self.app.joining_config())
 
-    @mock.patch.object(sentinel.utils, 'poll_until',
-                       side_effect=lambda f, **kw: f() or (_ for _ in ()
-                                                           ).throw(
-                           sentinel.exception.PollTimeOut()))
-    def test_a_failover_waits_for_another_primary(self, poll):
+    def _hand_over(self, promoted, caught_up=True):
+        """The primary 172.31.250.195 hands over, its replicas'
+        offsets as INFO REPLICATION gives them.
+        """
+        events = []
+        conn = self.app.adm.connection
+        conn.client_pause.side_effect = (
+            lambda ms, all: events.append(('pause', all)))
+        conn.client_unpause.side_effect = lambda: events.append('unpause')
+        conn.replicaof.side_effect = (
+            lambda ip, port: events.append(('replicaof', ip, port)))
+        conn.info.return_value = {
+            'role': 'master', 'master_repl_offset': 100,
+            'slave0': {'ip': '172.31.250.194', 'offset': 100},
+            'slave1': {'ip': '172.31.250.196',
+                       'offset': 100 if caught_up else 90}}
         client = self._sentinel_client()
-        self.app.sentinel_primary = mock.Mock(
-            side_effect=['10.0.0.1', '10.0.0.2', '10.0.0.2'])
-        self.assertEqual('10.0.0.2', self.app.sentinel_failover())
-        client.sentinel_failover.assert_called_once_with('trove')
-        self.app.sentinel_primary = mock.Mock(return_value='10.0.0.1')
+        client.sentinel_failover.side_effect = (
+            lambda name: events.append(('failover', name)))
+        # As SENTINEL REPLICAS answers: the promoted one reports master
+        # while the sentinels still tell the old primary.
+        answers = iter([[{'ip': '172.31.250.194',
+                          'role-reported': 'slave'}]])
+        client.sentinel_slaves.side_effect = lambda name: next(
+            answers, [{'ip': '172.31.250.194', 'role-reported': promoted}])
+        told = iter(['172.31.250.195', '172.31.250.195', '172.31.250.194'])
+        self.app.sentinel_primary = mock.Mock(side_effect=lambda: next(told))
+
+        def poll(f, **kw):
+            for _ in range(3):
+                value = f()
+                if value:
+                    return value
+            raise sentinel.exception.PollTimeOut()
+        with mock.patch.object(sentinel.utils, 'poll_until',
+                               side_effect=poll):
+            return events, self.app.sentinel_failover
+
+    def test_the_primary_hands_over_without_losing_a_write(self):
+        events, failover = self._hand_over('master')
+        self.assertEqual('172.31.250.194', failover())
+        # Writes held (not refused) until this member follows the new
+        # primary: those held then get READONLY.
+        self.assertEqual([('pause', False), ('failover', 'trove'),
+                          ('replicaof', '172.31.250.194', 6379),
+                          'unpause'], events)
+
+    def test_no_failover_while_a_replica_is_behind(self):
+        events, failover = self._hand_over('master', caught_up=False)
+        self.assertRaisesRegex(sentinel.exception.TroveError, 'catch up',
+                               failover)
+        self.assertEqual([('pause', False), 'unpause'], events)
+
+    def test_writes_go_on_when_no_replica_is_promoted(self):
+        events, failover = self._hand_over('slave')
+        self.assertRaisesRegex(sentinel.exception.TroveError, 'promote',
+                               failover)
+        self.assertEqual([('pause', False), ('failover', 'trove'),
+                          'unpause'], events)
+
+    def test_only_the_primary_hands_over(self):
+        self.app.sentinel_primary = mock.Mock(return_value='172.31.250.194')
         self.assertRaisesRegex(sentinel.exception.TroveError,
-                               'did not elect', self.app.sentinel_failover)
+                               'not the primary', self.app.sentinel_failover)
+        self.app.adm.connection.client_pause.assert_not_called()
 
     def test_leave_quorum_and_reset(self):
         client = self._sentinel_client()

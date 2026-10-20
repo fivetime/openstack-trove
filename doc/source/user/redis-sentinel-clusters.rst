@@ -65,11 +65,18 @@ members with the same password. A member that cannot join is failed
 
 ``openstack database cluster shrink`` removes members, keeping at least
 three. The members that go are never elected again; if the primary is
-one of them, the sentinels elect another first (writes stop for a few
-seconds, as for any failover). The sentinels that stay then agree by a
+one of them, it hands over first (see below). The sentinels that stay then agree by a
 majority of them, and learn the members again.
 
 ``openstack database cluster restart`` and ``upgrade`` take the members
 one after another, the replicas first; the primary last, and only once
-the sentinels elected another, so that writes stop once, for a
-failover, and not for the primary's restart.
+it handed over, so that writes stop once, for the hand-over, and not for
+the primary's restart.
+
+The primary hands over without losing a write it acknowledged: it holds
+writes (``CLIENT PAUSE WRITE``) until its replicas have all it wrote, the
+sentinels promote one, and it follows that one; the writes it held then
+fail with ``READONLY`` and the client sends them again to the new
+primary. Writes wait for 2 to 4 seconds. A bare ``SENTINEL FAILOVER``
+loses the writes the old primary takes between the promotion and its
+following the new one.

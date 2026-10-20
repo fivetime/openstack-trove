@@ -199,9 +199,9 @@ class RedisSentinelClusterTasks(common_taskmanager.ClusterEntryTasksMixin,
 
     def shrink_cluster(self, context, cluster_id, removal_ids):
         """The members that go are never to be elected; the primary, if it
-        is one of them, hands over first; they are deleted; the sentinels
-        that stay agree by a majority of them, and learn the members again
-        one at a time.
+        is one of them, hands over first (without losing a write); they
+        are deleted; the sentinels that stay agree by a majority of them,
+        and learn the members again one at a time.
         """
         LOG.debug("Begin shrink_cluster (sentinel) for id: %s.", cluster_id)
 
@@ -215,8 +215,9 @@ class RedisSentinelClusterTasks(common_taskmanager.ClusterEntryTasksMixin,
                 except Exception:
                     LOG.exception("Member %s cannot be kept from being "
                                   "elected (it is down?).", instance.id)
-            if self._primary_of(leaving + staying).id in removal_ids:
-                self.get_guest(staying[0]).sentinel_failover()
+            primary = self._primary_of(leaving + staying)
+            if primary.id in removal_ids:
+                self.get_guest(primary).sentinel_failover()
             for instance in leaving:
                 Instance.delete(instance)
 
@@ -255,14 +256,11 @@ class RedisSentinelClusterTasks(common_taskmanager.ClusterEntryTasksMixin,
                                  else 0, instance.id)
 
     def _hand_over(self, instance):
-        """Before the primary is restarted or upgraded: another member's
-        sentinels elect another primary.
+        """Before the primary is restarted or upgraded: it hands over to a
+        replica the sentinels elect (the guest's sentinel_failover).
         """
-        if self._roles([instance]).get(instance.id) != 'master':
-            return
-        others = self._members(instance.context, self.id, but=(instance.id,))
-        if others:
-            self.get_guest(others[0]).sentinel_failover()
+        if self._roles([instance]).get(instance.id) == 'master':
+            self.get_guest(instance).sentinel_failover()
 
     def restart_cluster(self, context, cluster_id):
         self.rolling_restart_cluster(

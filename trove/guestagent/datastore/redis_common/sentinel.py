@@ -349,26 +349,88 @@ class SentinelAppMixin(object):
         finally:
             client.close()
 
-    def sentinel_failover(self, timeout=90):
-        """Have the sentinels elect another primary now (before the
-        primary is restarted, upgraded or removed); returns its address
-        once they did.
-        """
-        old = self.sentinel_primary()
-        LOG.info("Asking the sentinels for a failover from %s.", old)
-        self._with_sentinel(lambda c: c.sentinel_failover(MASTER_NAME))
+    def _replicas_caught_up(self):
+        """Whether every replica has all the primary wrote."""
+        info = self.adm.connection.info('replication')
+        offset = int(info.get('master_repl_offset', 0))
+        replicas = [value for key, value in info.items()
+                    if key.startswith('slave') and isinstance(value, dict)]
+        return bool(replicas) and all(
+            int(replica.get('offset', -1)) >= offset for replica in replicas)
 
-        def elected():
-            return self.sentinel_primary() not in (None, old)
-        try:
-            utils.poll_until(elected, sleep_time=1, time_out=timeout)
-        except exception.PollTimeOut:
+    def sentinel_failover(self, timeout=90, catch_up=15):
+        """On the primary, before it is restarted, upgraded or removed:
+        hand over to a replica without losing a write it acknowledged.
+        Returns the new primary's address.
+
+        SENTINEL FAILOVER alone promotes a replica at once while the old
+        primary takes writes until it is told to follow, and those are
+        lost (12 of about 10000 on production, 2026-10-20). So writes are
+        paused here first (CLIENT PAUSE WRITE: held, not refused), the
+        replicas catch up, the sentinels elect one, and this member
+        follows it before writes go on: those that were held then get
+        READONLY and the client tries again on the new primary. The member
+        follows by itself: the sentinels tell it over a link the pause may
+        hold up (their PUBLISH waits as a write would).
+        """
+        conn = self.adm.connection
+        old = self.sentinel_primary()
+        if old != self.get_node_ip()[0]:
             raise exception.TroveError(
-                "The sentinels did not elect another primary than %s within "
-                "%s seconds." % (old, timeout))
-        new = self.sentinel_primary()
-        LOG.info("The sentinels elected %s.", new)
+                "%s is not the primary (%s is): nothing to hand over." % (
+                    self.get_node_ip()[0], old))
+        LOG.info("Handing over: writes paused until another primary is "
+                 "elected.")
+        # Lifted below; the time is a bound should the agent stop here.
+        conn.client_pause((timeout + catch_up + 30) * 1000, all=False)
+        try:
+            try:
+                utils.poll_until(self._replicas_caught_up, sleep_time=0.2,
+                                 time_out=catch_up)
+            except exception.PollTimeOut:
+                raise exception.TroveError(
+                    "The replicas did not catch up within %s seconds: no "
+                    "failover." % catch_up)
+            self._with_sentinel(lambda c: c.sentinel_failover(MASTER_NAME))
+            try:
+                new = utils.poll_until(lambda: self._promoted(old),
+                                       sleep_time=0.2, time_out=timeout)
+            except exception.PollTimeOut:
+                raise exception.TroveError(
+                    "The sentinels did not promote a replica within %s "
+                    "seconds." % timeout)
+            conn.replicaof(new, self.DATABASE_PORT)
+        finally:
+            conn.client_unpause()
+        LOG.info("%s promoted; this member follows it.", new)
+        # The sentinels tell the new primary once they reconfigured the
+        # members; a client asking them before then is sent here still.
+        try:
+            utils.poll_until(lambda: self.sentinel_primary() == new,
+                             sleep_time=0.5, time_out=timeout)
+        except exception.PollTimeOut:
+            LOG.warning("The sentinels did not tell %s as the primary "
+                        "within %s seconds.", new, timeout)
         return new
+
+    def _promoted(self, old):
+        """The replica the sentinels promoted, once it says it is a
+        primary; None before.
+
+        Not the primary they tell (SENTINEL GET-MASTER-ADDR-BY-NAME): they
+        tell the new one once every member follows it, and the old primary
+        follows it only after its writes go on again (the sentinels' link to
+        it waits behind a PUBLISH the pause holds): waiting for that, the
+        old primary would wait for them, and they for it, until their
+        failover timeout (89 s of 90 in a container, 2026-10-20).
+        """
+        replicas = self._with_sentinel(
+            lambda c: c.sentinel_slaves(MASTER_NAME))
+        for replica in replicas:
+            if (replica.get('role-reported') == 'master' and
+                    replica.get('ip') != old):
+                return replica['ip']
+        return None
 
     def sentinel_leave(self):
         """Never to be elected: the member is about to be removed."""

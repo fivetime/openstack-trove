@@ -7,7 +7,10 @@ features:
     has the sentinels elect another primary first when the primary is
     among the members that go; the sentinels' quorum follows the number
     of members. A rolling restart or upgrade takes the replicas first and
-    the primary last, once the sentinels elected another.
+    the primary last, once it handed over. A primary that hands over (a
+    shrink, a rolling restart or upgrade) loses no write it acknowledged:
+    it holds writes until its replicas have all it wrote and one of them
+    is promoted, and then follows it.
   - |
     The common cluster framework's rolling restart and upgrade take a
     ``before_member`` hook, run before each member (a primary handing

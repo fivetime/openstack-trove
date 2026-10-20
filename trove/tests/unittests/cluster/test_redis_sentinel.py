@@ -383,8 +383,9 @@ class SentinelAfterTheBuildTest(trove_testtools.TestCase):
                           ).start()
         self.ids.append('i4')
         self.tasks.shrink_cluster('ctx', 'c1', ['i1'])
+        # The primary hands over itself.
         self.assertEqual(
-            [('sentinel_leave', 'i1'), ('sentinel_failover', 'i2')] +
+            [('sentinel_leave', 'i1'), ('sentinel_failover', 'i1')] +
             [('sentinel_set_quorum', i, 2) for i in ('i2', 'i3', 'i4')] +
             [('sentinel_reset', i, 3) for i in ('i2', 'i3', 'i4')] +
             [('lb', ['i2', 'i3', 'i4']), ('reset',)], self.calls)
@@ -410,7 +411,7 @@ class SentinelAfterTheBuildTest(trove_testtools.TestCase):
         hand_over(mock.Mock(id='i3', context='ctx'))
         self.assertEqual([], self.calls)
         hand_over(mock.Mock(id='i1', context='ctx'))
-        self.assertEqual([('sentinel_failover', 'i2')], self.calls)
+        self.assertEqual([('sentinel_failover', 'i1')], self.calls)
         self.tasks.rolling_upgrade_cluster = mock.Mock()
         self.tasks.upgrade_cluster('ctx', 'c1', 'v2')
         self.assertEqual(('ctx', 'c1', 'v2'),
