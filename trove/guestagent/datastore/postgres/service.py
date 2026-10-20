@@ -34,6 +34,17 @@ from trove.instance import service_status
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
 
+
+def lsn_number(lsn):
+    """A WAL location as PostgreSQL prints it (``16/B374D848``) as a
+    number: locations compare as numbers, not as text. PostgreSQL prints
+    no leading zeros, so as text '0/A000000' comes after '0/9FFFFFF0',
+    which it is before.
+    """
+    high, _sep, low = str(lsn).partition('/')
+    return (int(high, 16) << 32) + int(low, 16)
+
+
 SUPER_USER_NAME = "postgres"
 REPLICATION_USER = 'replicator'
 CONFIG_FILE = "/etc/postgresql/postgresql.conf"
@@ -345,6 +356,13 @@ class PgSqlApp(service.BaseDbApp):
         """
         r = self.adm.query("SELECT pg_current_wal_lsn()")
         return r[0][0]
+
+    def get_primary_host(self):
+        """The primary a standby streams from, as its WAL receiver has it;
+        None when it does not stream (its primary is gone, say).
+        """
+        r = self.adm.query("SELECT sender_host FROM pg_stat_wal_receiver")
+        return r[0][0] if r else None
 
     def get_last_wal_replay_lsn(self):
         """Wrapper for pg_last_wal_replay_lsn()

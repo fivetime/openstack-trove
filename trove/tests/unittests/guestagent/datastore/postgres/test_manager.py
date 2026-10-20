@@ -217,3 +217,37 @@ class TestPostgresManager(trove_testtools.TestCase):
             upgrade_info)
 
         self.pg_manager.override_guest_info.assert_not_called()
+
+    def test_a_wal_location_as_a_number(self):
+        self.assertEqual(0x16 << 32 | 0xB374D848,
+                         service.lsn_number('16/B374D848'))
+        # PostgreSQL prints no leading zeros: as text '0/A000000' would
+        # come after '0/9FFFFFF0'.
+        self.assertLess(service.lsn_number('0/A000000'),
+                        service.lsn_number('0/9FFFFFF0'))
+
+    def test_the_last_txn_of_a_standby(self):
+        app = self.pg_manager.app
+        with mock.patch.object(app, 'is_replica', return_value=True), \
+                mock.patch.object(app, 'get_last_wal_replay_lsn',
+                                  return_value='0/9FFFFFF0'), \
+                mock.patch.object(app, 'get_primary_host',
+                                  return_value='10.0.0.1'):
+            self.assertEqual(['10.0.0.1', 0x9FFFFFF0],
+                             self.pg_manager.get_last_txn(None))
+
+    def test_a_standby_waits_for_the_location_as_a_number(self):
+        app = self.pg_manager.app
+        replayed = iter(['0/A000000', '0/9FFFFFF0'])
+
+        def poll(caught_up, **kwargs):
+            while not caught_up():
+                pass
+        with mock.patch.object(app, 'is_replica', return_value=True), \
+                mock.patch.object(app, 'get_last_wal_replay_lsn',
+                                  side_effect=lambda: next(replayed)), \
+                mock.patch.object(manager.utils, 'poll_until',
+                                  side_effect=poll):
+            self.pg_manager.wait_for_txn(None, '0/9FFFFFF0')
+        # Not caught up at 0/A000000, which is before 0/9FFFFFF0.
+        self.assertRaises(StopIteration, next, replayed)

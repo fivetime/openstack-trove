@@ -16,6 +16,7 @@ from unittest import mock
 
 from oslo_service import periodic_task
 
+from trove.common import exception
 from trove.common import ssl
 from trove.guestagent.common import operating_system
 from trove.guestagent.datastore import manager as base_manager
@@ -44,6 +45,15 @@ class TestManager(trove_testtools.TestCase):
             ssl.MODE_BASIC, 'invalid'))
         self.assertFalse(self.manager.ssl_mode_at_least(
             None, ssl.MODE_BASIC))
+
+    def test_replication_positions_not_told_are_not_supported(self):
+        # The task manager's eject asks every replica; a datastore that
+        # does not tell says so, rather than "Endpoint does not support
+        # RPC method" (Redis and PostgreSQL said that until 2026-10-20).
+        for call in (self.manager.get_last_txn,
+                     self.manager.get_latest_txn_id):
+            self.assertRaises(exception.DatastoreOperationNotSupported,
+                              call, None)
 
     @mock.patch.object(operating_system, 'chmod')
     @mock.patch.object(operating_system, 'chown')

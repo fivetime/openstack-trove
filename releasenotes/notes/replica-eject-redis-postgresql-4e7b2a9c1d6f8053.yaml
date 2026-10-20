@@ -1,0 +1,23 @@
+---
+fixes:
+  - |
+    ``eject-replica-source`` works for Redis, Valkey, KeyDB and PostgreSQL
+    instances. The task manager asks every replica how far it has
+    replicated (``get_last_txn``) to pick the most current one; their
+    guest agents had no such call, so the eject failed and left the
+    primary and its replicas in error. They tell it now: a Redis family
+    replica its primary and replication offset, a PostgreSQL standby its
+    primary and replayed WAL location, as a number.
+  - |
+    ``promote-to-replica-source`` of a Redis, Valkey or KeyDB replica waits
+    for the replica to have everything its primary has: the primary's
+    replication offset was never asked and the wait did nothing, so the
+    last writes before a switch could be lost.
+  - |
+    A PostgreSQL standby being promoted compared WAL locations as text.
+    PostgreSQL prints no leading zeros, so a standby behind its primary
+    could count as caught up; they compare as numbers now.
+  - |
+    A guest agent asked for a replication position its datastore does not
+    tell says that it is not supported, rather than that the call does
+    not exist.

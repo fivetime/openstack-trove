@@ -597,3 +597,66 @@ class TestRedisAppendOnlyFile(trove_testtools.TestCase):
         self.assertEqual(['override gone', 'file off', 'container',
                           'healthy', 'file on', 'override gone'], calls)
         self.assertFalse(self._overridden())
+
+
+class TestRedisReplicationPosition(trove_testtools.TestCase):
+    """Where a server stands in its replication stream, for promote and
+    eject.
+    """
+
+    def setUp(self):
+        super(TestRedisReplicationPosition, self).setUp()
+        patcher = mock.patch.object(common_service.RedisApp, '__init__',
+                                    return_value=None)
+        patcher.start()
+        self.addCleanup(mock.patch.stopall)
+        self.app = common_service.RedisApp()
+        self.app.adm = mock.MagicMock()
+
+    def _seen(self, *names):
+        # INFO replication of a Valkey 9 primary and its replica with 1000
+        # keys written, and of the replica once the primary was killed
+        # (2026-10-20), as valkey-py parses it.
+        here = os.path.join(os.path.dirname(__file__), '..', 'redis_common',
+                            'replication')
+        infos = []
+        for name in names:
+            with open(os.path.join(here, name + '.txt')) as f:
+                infos.append(parsers.parse_info(f.read()))
+        self.app.adm.connection.info.side_effect = infos
+
+    def test_the_position_of_a_primary_and_a_replica(self):
+        self._seen('primary', 'replica', 'replica-primary-gone')
+        self.assertEqual((None, 31838), self.app.replication_position())
+        self.assertEqual(('172.31.250.178', 31838),
+                         self.app.replication_position())
+        # Its primary gone, the replica still tells what it had.
+        self.assertEqual(('172.31.250.178', 31838),
+                         self.app.replication_position())
+
+    def test_the_manager_tells_it_to_the_task_manager(self):
+        mgr = common_manager.RedisManager.__new__(common_manager.RedisManager)
+        mgr.app = self.app
+        self._seen('replica', 'primary')
+        self.assertEqual(['172.31.250.178', 31838],
+                         mgr.get_last_txn(None))
+        self.assertEqual(31838, mgr.get_latest_txn_id(None))
+
+    def test_a_replica_waits_for_the_primarys_offset(self):
+        positions = iter([('p', 100), ('p', 31000), ('p', 31838)])
+        self.app.replication_position = lambda: next(positions)
+
+        def poll(caught_up, sleep_time, time_out):
+            while not caught_up():
+                pass
+        with mock.patch.object(common_service.utils, 'poll_until',
+                               side_effect=poll):
+            self.app.wait_for_offset(31838, 60)
+        self.assertRaises(StopIteration, next, positions)
+
+    def test_a_replica_that_does_not_catch_up(self):
+        self.app.replication_position = lambda: ('p', 100)
+        with mock.patch.object(common_service.utils, 'poll_until',
+                               side_effect=exception.PollTimeOut):
+            self.assertRaisesRegex(exception.TroveError, 'offset 31838',
+                                   self.app.wait_for_offset, 31838, 60)

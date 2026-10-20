@@ -589,6 +589,36 @@ class RedisApp(service.BaseDbApp):
         except Exception:
             return False
 
+    # Where the server stands in its replication stream, for the task
+    # manager's promote and eject. A replica's offset and its primary's
+    # count the same stream, so they compare.
+
+    def replication_position(self):
+        """(the primary a replica replicates from, None on a primary; the
+        offset it has, as an integer: a primary's master_repl_offset, a
+        replica's slave_repl_offset)
+        """
+        info = self.adm.connection.info('replication')
+        if info.get('role') in ('slave', 'replica'):
+            return (info.get('master_host'),
+                    int(info.get('slave_repl_offset') or 0))
+        return None, int(info.get('master_repl_offset') or 0)
+
+    def wait_for_offset(self, offset, timeout):
+        """Until this replica has the given offset of its primary's
+        stream.
+        """
+        def caught_up():
+            _primary, have = self.replication_position()
+            LOG.debug("Replication offset %s of %s.", have, offset)
+            return have >= int(offset)
+        try:
+            utils.poll_until(caught_up, sleep_time=1, time_out=timeout)
+        except exception.PollTimeOut:
+            raise exception.TroveError(
+                "The replica did not reach replication offset %s within %s "
+                "seconds." % (offset, timeout))
+
     def stop_db(self, update_db=False):
         LOG.info("Stopping database gracefully.")
         try:

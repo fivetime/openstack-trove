@@ -990,6 +990,10 @@ class Manager(periodic_task.PeriodicTasks, SSLManager):
         raise exception.DatastoreOperationNotSupported(
             operation='get_latest_txn_id', datastore=self.manager)
 
+    def get_last_txn(self, context):
+        raise exception.DatastoreOperationNotSupported(
+            operation='get_last_txn', datastore=self.manager)
+
     def wait_for_txn(self, context, txn):
         raise exception.DatastoreOperationNotSupported(
             operation='wait_for_txn', datastore=self.manager)

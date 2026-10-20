@@ -296,6 +296,14 @@ class PostgresManager(cluster.PostgresqlMemberMixin, manager.Manager):
         LOG.info("Last wal location found: %s", lsn)
         return lsn
 
+    def get_last_txn(self, context):
+        """The primary this standby streams from and how far it has
+        replayed, as a number, for the task manager to pick the most
+        current replica when it ejects a primary that is gone.
+        """
+        return [self.app.get_primary_host(),
+                service.lsn_number(self.get_latest_txn_id(context))]
+
     def wait_for_txn(self, context, txn):
         if not self.app.is_replica():
             raise exception.TroveError("Attempting to wait for a txn on a "
@@ -304,7 +312,7 @@ class PostgresManager(cluster.PostgresqlMemberMixin, manager.Manager):
         def _wait_for_txn():
             lsn = self.app.get_last_wal_replay_lsn()
             LOG.info("Last wal location found: %s", lsn)
-            return lsn >= txn
+            return service.lsn_number(lsn) >= service.lsn_number(txn)
 
         try:
             utils.poll_until(_wait_for_txn, time_out=60)

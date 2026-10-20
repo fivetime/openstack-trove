@@ -251,13 +251,22 @@ class RedisManager(cluster_member.ClusterWatchMixin, manager.Manager):
         # readonly except making it slave
         pass
 
+    def get_last_txn(self, context):
+        """The primary this replica replicates from and how far it has
+        replicated, for the task manager to pick the most current replica
+        when it ejects a primary that is gone.
+        """
+        primary, offset = self.app.replication_position()
+        return [primary, offset]
+
     def get_latest_txn_id(self, context):
-        # No transactions support in Redis
-        pass
+        """How far the server is in the replication stream: what a
+        replica being promoted waits for.
+        """
+        return self.app.replication_position()[1]
 
     def wait_for_txn(self, context, txn):
-        # No transactions support in Redis
-        pass
+        self.app.wait_for_offset(txn, CONF.state_change_wait_time)
 
     def upgrade(self, context, upgrade_info):
         """Upgrade the database."""
