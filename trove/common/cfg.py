@@ -1038,12 +1038,12 @@ def _cluster_health_opts():
     ]
 
 
-def _with_cluster_watch(opts, probe_timeout=20):
+def _with_cluster_watch(opts, probe_timeout=20, probe_interval=30):
     """The options of the watch on each member of a datastore's clusters
     (``trove.guestagent.common.cluster_probe.ClusterWatch``).
     """
     watch = [
-        cfg.IntOpt('cluster_probe_interval', default=30, min=0,
+        cfg.IntOpt('cluster_probe_interval', default=probe_interval, min=0,
                    help='Seconds between two looks of the guest agent at '
                         'what the member sees of its cluster. 0 turns the '
                         'watch off.'),
@@ -1225,11 +1225,13 @@ def _build_redis_family_datastore_opts(
         ),
         cfg.ListOpt(
             'cluster_tcp_ports',
-            default=["16379"],
+            default=["16379", "26379", "6380", "6381"],
             item_type=ListOfPortsType,
             help='TCP ports the members of a cluster talk to each other on, '
-                 'opened in their security group as well: the cluster bus, '
-                 'client port + 10000.',
+                 'opened in their security group as well: the cluster bus '
+                 '(client port + 10000) of a Redis Cluster; the sentinel and '
+                 'the ready and read ports the load balancer checks, of a '
+                 'cluster of the sentinel topology.',
         ),
         cfg.StrOpt(
             'backup_strategy',
@@ -1371,9 +1373,23 @@ def _redis_cluster_opts():
 redis_opts += _redis_cluster_opts()
 valkey_opts += _redis_cluster_opts()
 keydb_opts += _redis_cluster_opts()
-redis_opts = _with_cluster_watch(redis_opts, probe_timeout=10)
-valkey_opts = _with_cluster_watch(valkey_opts, probe_timeout=10)
-keydb_opts = _with_cluster_watch(keydb_opts, probe_timeout=10)
+
+
+# A cluster of the sentinel topology has an endpoint, a load balancer in
+# front of the primary's ready port, a read endpoint in front of the
+# replicas that keep up, and the sentinels'; its members watch it every
+# few seconds, as its primary may change any moment.
+def _with_redis_family_clusters(opts):
+    opts = _with_cluster_entry(
+        opts, ready_port=6380, read_port=6381, load_balancer_port=6379,
+        read_load_balancer_port=6380,
+        extra_load_balancer_ports={'sentinel_endpoint': 26379})
+    return _with_cluster_watch(opts, probe_timeout=10, probe_interval=3)
+
+
+redis_opts = _with_redis_family_clusters(redis_opts)
+valkey_opts = _with_redis_family_clusters(valkey_opts)
+keydb_opts = _with_redis_family_clusters(keydb_opts)
 
 # Cassandra
 cassandra_group = cfg.OptGroup(

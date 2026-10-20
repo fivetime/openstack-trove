@@ -21,12 +21,15 @@ from oslo_utils import importutils
 from valkey._parsers import helpers as parsers
 
 from trove.common import cfg
+from trove.common import cluster_health as ch
 from trove.common import configurations
 from trove.common import constants
 from trove.common import exception
+from trove.common import loadbalancer
 from trove.common import template
 from trove.extensions.common import models as extension_models
 from trove.guestagent.datastore.redis_common import manager as common_manager
+from trove.guestagent.datastore.redis_common import sentinel
 from trove.guestagent.datastore.redis_common import service as common_service
 from trove.guestagent.strategies.replication import redis_base
 from trove.tests.unittests import trove_testtools
@@ -660,3 +663,239 @@ class TestRedisReplicationPosition(trove_testtools.TestCase):
                                side_effect=exception.PollTimeOut):
             self.assertRaisesRegex(exception.TroveError, 'offset 31838',
                                    self.app.wait_for_offset, 31838, 60)
+
+
+def _sentinel_state(name):
+    """What the sentinel of 172.31.250.195 answered (SENTINEL MASTER,
+    REPLICAS and SENTINELS of a Valkey 9 primary .194 with replicas .195
+    and .196, 2026-10-20): all up; .196 killed; .196 back and the primary
+    .194 killed, .196 elected. Parsed as valkey-py parses them.
+    """
+    import json
+    here = os.path.join(os.path.dirname(__file__), '..', 'redis_common',
+                        'sentinel')
+    with open(os.path.join(here, name + '.json')) as f:
+        raw = json.load(f)
+    return {'master': parsers.parse_sentinel_master(raw['master']),
+            'replicas': parsers.parse_sentinel_slaves_and_sentinels(
+                raw['replicas']),
+            'sentinels': parsers.parse_sentinel_slaves_and_sentinels(
+                raw['sentinels'])}
+
+
+class TestRedisSentinelMember(trove_testtools.TestCase):
+    """A member of a cluster of the sentinel topology."""
+
+    def setUp(self):
+        super(TestRedisSentinelMember, self).setUp()
+        patcher = mock.patch.object(common_service.RedisApp, '__init__',
+                                    return_value=None)
+        patcher.start()
+        self.addCleanup(mock.patch.stopall)
+        self.app = common_service.RedisApp()
+        self.app.adm = mock.MagicMock()
+        self.app.datadir = '/var/lib/redis'
+        self.app.docker_client = mock.MagicMock()
+        self.cm = mock.MagicMock()
+        mock.patch.object(common_service.RedisApp, 'configuration_manager',
+                          new_callable=mock.PropertyMock,
+                          return_value=self.cm).start()
+        mock.patch.object(common_service.RedisApp, 'get_node_ip',
+                          return_value=['172.31.250.195', '6379']).start()
+        for name in ('database_service_uid', 'database_service_gid'):
+            mock.patch.object(common_service.RedisApp, name,
+                              new_callable=mock.PropertyMock,
+                              return_value='999').start()
+        self.os = mock.patch.object(sentinel, 'operating_system').start()
+
+    def test_the_sentinel_configuration(self):
+        # As the containers of all three datastores took it (2026-10-20):
+        # clients without a password ask where the primary is; the
+        # sentinels log in to each other as trove-sentinel.
+        text = sentinel.sentinel_config('10.0.0.2', '10.0.0.1', 2, 'adm',
+                                        'sen', '/d/sentinel.sock')
+        lines = text.splitlines()
+        self.assertIn('sentinel monitor trove 10.0.0.1 6379 2', lines)
+        self.assertIn('sentinel announce-ip 10.0.0.2', lines)
+        self.assertIn('unixsocket /d/sentinel.sock', lines)
+        self.assertIn('sentinel sentinel-user trove-sentinel', lines)
+        self.assertIn('sentinel auth-user trove sentinel', lines)
+        self.assertIn('sentinel auth-pass trove sen', lines)
+        default = [ln for ln in lines if ln.startswith('user default ')][0]
+        self.assertIn('-@all', default)
+        self.assertIn('+sentinel|get-master-addr-by-name', default)
+        for forbidden in ('+sentinel|set', '+sentinel|failover',
+                          '+sentinel|remove', '+@all'):
+            self.assertNotIn(forbidden + ' ', default + ' ')
+        self.assertEqual(2, sentinel.quorum(['a', 'b', 'c']))
+        self.assertEqual(3, sentinel.quorum(['a', 'b', 'c', 'd', 'e']))
+
+    def _install(self, primary, mode='sync'):
+        self.app.set_cluster_admin = mock.Mock()
+        self.app.save_password = mock.Mock()
+        self.app.restart_with_sentinel = mock.Mock()
+        self.app.wait_for_primary_link = mock.Mock()
+        self.app.install_sentinel({
+            'primary': primary, 'mode': mode,
+            'members': ['172.31.250.194', '172.31.250.195',
+                        '172.31.250.196'],
+            'admin_password': 'adm', 'sentinel_password': 'sen',
+            'sentinel_admin_password': 'tsen'})
+
+    def test_install_a_replica(self):
+        self._install('172.31.250.194')
+        self.app.set_cluster_admin.assert_called_once_with('adm')
+        acl = self.app.adm.connection.acl_setuser.call_args[1]
+        self.assertEqual(('sentinel', ['+sen'], ['*']),
+                         (acl['username'], acl['passwords'],
+                          acl['channels']))
+        self.assertIn('+config|rewrite', acl['commands'])
+        self.app.adm.connection.acl_save.assert_called_once_with()
+        self.cm.apply_system_override.assert_called_once_with(
+            {'replica-announce-ip': '172.31.250.195',
+             'min-replicas-to-write': 1, 'min-replicas-max-lag': 10},
+            'sentinel')
+        written = self.os.write_file.call_args_list[0][0]
+        self.assertEqual('/var/lib/redis/sentinel/sentinel.conf',
+                         written[0])
+        self.assertIn('sentinel monitor trove 172.31.250.194 6379 2',
+                      written[1])
+        self.app.restart_with_sentinel.assert_called_once_with()
+        self.app.adm.connection.replicaof.assert_called_once_with(
+            '172.31.250.194', 6379)
+        self.app.wait_for_primary_link.assert_called_once_with()
+
+    def test_install_the_primary_in_async_mode(self):
+        self._install('172.31.250.195', mode='async')
+        self.assertEqual(
+            0, self.cm.apply_system_override.call_args[0][0][
+                'min-replicas-to-write'])
+        self.app.adm.connection.replicaof.assert_not_called()
+
+    def _view(self, info, elected='172.31.250.195', mode='sync'):
+        self.app.adm.connection.info.return_value = info
+        self.app.sentinel_primary = mock.Mock(return_value=elected)
+        self.app.sentinel_mode = mock.Mock(return_value=mode)
+        return self.app.sentinel_member_view()
+
+    def test_the_primary_takes_writes_as_its_sentinel_elects_it(self):
+        primary = {'role': 'master', 'connected_slaves': 2}
+        self.assertEqual(('master', 'master', True, False, False),
+                         tuple(self._view(primary)))
+        # Started again, a primary still, but the sentinels elected
+        # another meanwhile: no writes from the endpoint.
+        self.assertFalse(self._view(primary, elected='10.9.9.9').writable)
+        # Its sentinel does not answer: no writes either.
+        self.app.adm.connection.info.return_value = primary
+        self.app.sentinel_primary = mock.Mock(side_effect=OSError('gone'))
+        self.assertFalse(self.app.sentinel_member_view().writable)
+
+    def test_sync_needs_a_replica(self):
+        alone = {'role': 'master', 'connected_slaves': 0}
+        self.assertFalse(self._view(alone).writable)
+        self.assertTrue(self._view(alone, mode='async').writable)
+
+    def test_a_replica_serves_reads_while_it_keeps_up(self):
+        replica = {'role': 'slave', 'master_link_status': 'up',
+                   'master_last_io_seconds_ago': 1}
+        self.assertEqual(('replica', 'replica', False, False, True),
+                         tuple(self._view(replica)))
+        self.assertFalse(self._view(dict(
+            replica, master_last_io_seconds_ago=30)).readable)
+        self.assertFalse(self._view(dict(
+            replica, master_link_status='down')).readable)
+
+    def test_the_health_as_the_sentinel_sees_it(self):
+        for name, health in (
+                ('all-up', ch.view(ch.HEALTHY, me='172.31.250.195')),
+                ('replica-down', ch.view(
+                    ch.DEGRADED, ['172.31.250.196'],
+                    'down as the sentinel sees it', '172.31.250.195')),
+                # .196 elected; the old primary .194 held down.
+                ('failed-over', ch.view(
+                    ch.DEGRADED, ['172.31.250.194'],
+                    'down as the sentinel sees it', '172.31.250.195'))):
+            self.app.sentinel_state = mock.Mock(
+                return_value=_sentinel_state(name))
+            self.assertEqual(health, self.app.sentinel_health(), name)
+
+    def test_no_primary_is_down(self):
+        state = _sentinel_state('all-up')
+        state['master']['is_odown'] = True
+        self.app.sentinel_state = mock.Mock(return_value=state)
+        self.assertEqual(ch.DOWN, self.app.sentinel_health()['status'])
+
+    def test_sentinels_that_failed_to_log_in_are_dropped(self):
+        # CLIENT LIST of a member whose sentinels connected before their
+        # user was there (2026-10-20): they stay as default.
+        self.app.adm.connection.client_list.return_value = [
+            {'id': '7', 'user': 'default', 'cmd': 'publish'},
+            {'id': '8', 'user': 'default', 'cmd': 'ping'},
+            {'id': '9', 'user': 'os_admin', 'cmd': 'client|list'},
+            {'id': '10', 'user': 'sentinel', 'cmd': 'publish'}]
+        self.assertEqual(1, self.app.drop_failed_sentinel_links())
+        self.app.adm.connection.client_kill_filter.assert_called_once_with(
+            _id='7')
+
+    def test_the_container_runs_the_sentinel_too(self):
+        self.cm.has_system_override.return_value = True
+        self.app.SERVER_BINARY = 'valkey-server'
+        self.app.DATASTORE_NAME = 'valkey'
+        self.assertEqual(['/bin/sh', '/etc/valkey/trove-start.sh'],
+                         self.app.sentinel_command())
+        self.app._write_start_script()
+        script = self.os.write_file.call_args[0][1]
+        self.assertIn('valkey-sentinel /var/lib/redis/sentinel/sentinel.conf'
+                      ' &', script)
+        self.assertIn('valkey-server /etc/redis/redis.conf &', script)
+
+
+class TestRedisSentinelManager(trove_testtools.TestCase):
+
+    def _manager(self, sentinel_member):
+        mgr = common_manager.RedisManager.__new__(common_manager.RedisManager)
+        mgr.app = mock.Mock()
+        mgr.app.is_sentinel_member.return_value = sentinel_member
+        mgr.app.get_node_ip.return_value = ['10.0.0.2', '6379']
+        mgr._docker_client = mock.Mock()
+        mgr.cluster_watch = None
+        return mgr
+
+    def test_a_sentinel_member_keeps_the_endpoint_ports(self):
+        self.patch_datastore_manager('valkey')
+        with mock.patch.object(common_manager.cluster_probe,
+                               'ClusterEntry') as entry, \
+                mock.patch.object(common_manager.cluster_member.cluster_probe,
+                                  'ClusterWatch') as watch:
+            self.assertIs(entry.return_value,
+                          self._manager(True).new_cluster_watch())
+            self.assertIs(watch.return_value,
+                          self._manager(False).new_cluster_watch())
+
+    def test_joining_restarts_the_watch_as_an_entry(self):
+        mgr = self._manager(True)
+        old = mock.Mock()
+        mgr.cluster_watch = old
+        with mock.patch.object(common_manager.cluster_probe,
+                               'ClusterEntry') as entry:
+            self.assertEqual({'ip': '10.0.0.2'},
+                             mgr.sentinel_install(None, {'primary': 'x'}))
+        mgr.app.install_sentinel.assert_called_once_with({'primary': 'x'})
+        old.stop.assert_called_once_with()
+        entry.return_value.start.assert_called_once_with()
+        self.assertIs(entry.return_value, mgr.cluster_watch)
+
+    def test_the_options_of_the_endpoints(self):
+        for ds in ('redis', 'valkey', 'keydb'):
+            conf = cfg.CONF.get(ds)
+            self.assertEqual(
+                (6380, 6381, 6379, 6380, {'sentinel_endpoint': 26379}, 3),
+                (conf.cluster_ready_port, conf.cluster_read_port,
+                 conf.cluster_load_balancer_port,
+                 conf.cluster_read_load_balancer_port,
+                 loadbalancer.extra_ports(conf),
+                 conf.cluster_probe_interval), ds)
+            for port in (16379, 26379, 6380, 6381):
+                self.assertTrue(any(port in ports
+                                    for ports in conf.cluster_tcp_ports),
+                                '%s %s' % (ds, port))

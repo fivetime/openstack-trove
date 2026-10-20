@@ -122,13 +122,27 @@ class ClusterWatchMixin(object):
 
     cluster_watch = None
 
+    def new_cluster_watch(self):
+        """The watch of this member: a datastore whose cluster has an
+        endpoint behind a load balancer gives a ClusterEntry.
+        """
+        return cluster_probe.ClusterWatch(self.app)
+
     def init_cluster_watch(self):
         """Start the watch; a manager without one is still a manager."""
         try:
-            self.cluster_watch = cluster_probe.ClusterWatch(self.app)
+            self.cluster_watch = self.new_cluster_watch()
             self.cluster_watch.start()
         except Exception:
             LOG.exception("The cluster watch could not be set up.")
+
+    def restart_cluster_watch(self):
+        """The watch again, of the kind the member is now (it joined a
+        cluster that has an endpoint, say).
+        """
+        if self.cluster_watch is not None:
+            self.cluster_watch.stop()
+        self.init_cluster_watch()
 
     def cluster_complete(self, context):
         """Every member has joined: the watch tells from now on."""

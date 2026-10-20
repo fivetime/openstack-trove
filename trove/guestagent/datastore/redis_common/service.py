@@ -27,6 +27,7 @@ from trove.guestagent.common import cluster_probe
 from trove.guestagent.common import configuration, guestagent_utils, \
     operating_system
 from trove.guestagent.datastore.redis_common import manager
+from trove.guestagent.datastore.redis_common import sentinel
 from trove.guestagent.datastore import service
 from trove.guestagent.utils import docker as docker_util
 from trove.instance import service_status
@@ -43,8 +44,10 @@ AOF_CHANGE_ID = 'aof-from-rdb'
 CLUSTER_WAIT_TIMEOUT = 300
 
 
-class RedisApp(service.BaseDbApp):
+class RedisApp(sentinel.SentinelAppMixin, service.BaseDbApp):
     DATASTORE_NAME = 'redis'
+    # Where the ready port of a member of a sentinel cluster leads.
+    DATABASE_PORT = 6379
     CLI_BINARY = 'redis-cli'
     CONFIG_FILE = '/etc/redis/redis.conf'
     CNF_INCLUDE_DIR = '/etc/redis/conf.d'
@@ -286,7 +289,12 @@ class RedisApp(service.BaseDbApp):
                  f'{docker_image}:{ds_version}')
 
         if not command:
-            command = f'{self.SERVER_BINARY} {self.CONFIG_FILE}'
+            # A member of a sentinel cluster runs its sentinel too, however
+            # the container comes to be made again (an upgrade, say).
+            command = (self.sentinel_command() if self.is_sentinel_member()
+                       else f'{self.SERVER_BINARY} {self.CONFIG_FILE}')
+            if self.is_sentinel_member():
+                self._write_start_script()
 
         aof_after_start = self.prepare_aof(running=False)
 
@@ -428,10 +436,23 @@ class RedisApp(service.BaseDbApp):
     def is_cluster_member(self):
         return self.get_configuration_property('cluster-enabled') == 'yes'
 
+    def is_watched_member(self):
+        """A member of a cluster of either topology."""
+        return self.is_cluster_member() or self.is_sentinel_member()
+
+    def reconcile(self, view):
+        """Every tick of the watch of a sentinel member: the connections
+        of sentinels that failed to log in go, for them to log in anew.
+        """
+        if self.is_sentinel_member():
+            self.drop_failed_sentinel_links()
+
     def member_view(self):
         """For the cluster watch: the cluster state this node sees and
         its role now.
         """
+        if self.is_sentinel_member():
+            return self.sentinel_member_view()
         info = self.adm.cluster_info()
         me = [n for n in self.adm.cluster_nodes() if 'myself' in n['flags']]
         role = me[0]['role'] if me else None
@@ -444,6 +465,8 @@ class RedisApp(service.BaseDbApp):
         while a node is failing (``fail``, ``fail?``: a master failed over
         or about to be, a replica gone).
         """
+        if self.is_sentinel_member():
+            return self.sentinel_health()
         info = self.adm.cluster_info()
         nodes = self.adm.cluster_nodes()
         me = [n['address'] for n in nodes if 'myself' in n['flags']]

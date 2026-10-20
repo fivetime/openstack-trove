@@ -18,8 +18,10 @@ from trove.common import exception
 from trove.common.notification import EndNotification
 from trove.common import ssl
 from trove.guestagent.common import cluster_member
+from trove.guestagent.common import cluster_probe
 from trove.guestagent.common import operating_system
 from trove.guestagent.datastore import manager
+from trove.guestagent.datastore.redis_common import sentinel
 from trove.guestagent.datastore import service as base_service
 
 LOG = logging.getLogger(__name__)
@@ -52,6 +54,34 @@ class RedisManager(cluster_member.ClusterWatchMixin, manager.Manager):
     @property
     def configuration_manager(self):
         return self.app.configuration_manager
+
+    def new_cluster_watch(self):
+        """A member of a sentinel cluster keeps the ready ports of the
+        cluster's endpoints too.
+        """
+        if self.app.is_sentinel_member():
+            return cluster_probe.ClusterEntry(self.app, self.docker_client)
+        return super(RedisManager, self).new_cluster_watch()
+
+    # The sentinel topology (driven by the taskmanager's strategy)
+
+    def sentinel_install(self, context, config):
+        """Join the sentinel cluster: the member's users, settings and
+        sentinel; it watches the cluster with its endpoint from now on.
+        """
+        self.app.install_sentinel(config)
+        self.restart_cluster_watch()
+        return {'ip': self.app.get_node_ip()[0]}
+
+    def sentinel_reset(self, context):
+        """The sentinel forgets the members it knew and learns them again
+        (after a shrink).
+        """
+        client = self.app._sentinel()
+        try:
+            client.sentinel_reset(sentinel.MASTER_NAME)
+        finally:
+            client.close()
 
     def do_prepare(self, context, packages, databases, memory_mb, users,
                    device_path, mount_point, backup_info,
