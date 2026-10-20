@@ -15,6 +15,7 @@ from unittest import mock
 from trove.common import cluster_health as ch
 from trove.guestagent.common import cluster_probe as probe
 from trove.guestagent.common import readyport
+from trove.guestagent.datastore import service as base_service
 from trove.tests.unittests import trove_testtools
 
 
@@ -242,10 +243,28 @@ class TestClusterEventReporter(trove_testtools.TestCase):
         self.now = now
         return self.reporter.observe(signal, 'view')
 
-    def test_a_member_that_starts_normal_says_nothing(self):
+    def test_a_member_that_starts_normal_says_so_once(self):
+        self.assertEqual('normal', self._at(1000, probe.NORMAL))
+        self.assertIsNone(self._at(1003, probe.NORMAL))
+        self.assertIsNone(self._at(1100, probe.NORMAL))
+        self.assertEqual([('normal', None, 0)], self.sent)
+
+    def test_a_member_that_starts_normal_waits_until_ready(self):
+        ready = [False]
+        self.reporter.ready = lambda: ready[0]
         self.assertIsNone(self._at(1000, probe.NORMAL))
         self.assertIsNone(self._at(1003, probe.NORMAL))
-        self.assertEqual([], self.sent)
+        ready[0] = True
+        self.assertEqual('normal', self._at(1006, probe.NORMAL))
+        self.assertIsNone(self._at(1009, probe.NORMAL))
+        # Since when it is normal.
+        self.assertEqual([('normal', None, 6)], self.sent)
+
+    def test_a_member_that_starts_abnormal_does_not_wait(self):
+        self.reporter.ready = lambda: False
+        self.assertEqual('abnormal', self._at(1000, self.abnormal))
+        # Normal again: a transition, told.
+        self.assertEqual('normal', self._at(1010, probe.NORMAL))
 
     def test_a_member_that_starts_abnormal_says_so_once(self):
         self.assertEqual('abnormal', self._at(1000, self.abnormal))
@@ -254,15 +273,15 @@ class TestClusterEventReporter(trove_testtools.TestCase):
 
     def test_every_transition_is_told(self):
         self._at(1000, probe.NORMAL)
-        self.assertEqual('abnormal', self._at(1003, self.abnormal))
+        self.assertEqual('abnormal', self._at(1005, self.abnormal))
         # A change of kind, once the gap has passed.
-        self.assertEqual('lease_request', self._at(1009, self.lease))
-        self.assertEqual('normal', self._at(1015, probe.NORMAL))
-        self.assertIsNone(self._at(1018, probe.NORMAL))
-        self.assertEqual(['abnormal', 'lease_request', 'normal'],
+        self.assertEqual('lease_request', self._at(1011, self.lease))
+        self.assertEqual('normal', self._at(1017, probe.NORMAL))
+        self.assertIsNone(self._at(1020, probe.NORMAL))
+        self.assertEqual(['normal', 'abnormal', 'lease_request', 'normal'],
                          [s[0] for s in self.sent])
         # Since when the state lasts.
-        self.assertEqual(0, self.sent[2][2])
+        self.assertEqual(0, self.sent[3][2])
 
     def test_an_abnormal_member_tells_again_every_interval(self):
         self._at(1000, self.abnormal)
@@ -332,9 +351,18 @@ class TestClusterEvents(ProbeTestBase):
         self.app.member_view.return_value = view
         self.probe._tick()
 
-    def test_a_member_that_comes_up_normal_says_nothing(self):
+    def test_a_member_that_comes_up_normal_says_so_after_its_heartbeat(self):
+        # The real status object: no heartbeat sent yet.
+        self.app.status = base_service.BaseDbStatus(mock.MagicMock())
         self._tick(_view('ONLINE', 'PRIMARY'))
+        self._tick(_view('ONLINE', 'PRIMARY'), 1010)
         self.cast.assert_not_called()
+        self.app.status.heartbeat_sent = True
+        self._tick(_view('ONLINE', 'PRIMARY'), 1020)
+        self._tick(_view('ONLINE', 'PRIMARY'), 1030)
+        self.cast.assert_called_once()
+        self.assertEqual(('i2', 'normal'), self.cast.call_args.args)
+        self.assertEqual(20, self.cast.call_args.kwargs['payload']['since'])
 
     def test_a_member_that_comes_up_abnormal_says_so_once(self):
         self._tick(_view('OFFLINE', None))
@@ -356,16 +384,18 @@ class TestClusterEvents(ProbeTestBase):
         self._tick(_view('ONLINE', 'PRIMARY'))
         self.app.cluster_signal.assert_called_once_with(
             _view('ONLINE', 'PRIMARY'))
+        # Up and normal: said once.
+        self.assertEqual(('i2', 'normal'), self.cast.call_args.args)
         self.app.cluster_signal.return_value = probe.ClusterSignal(
             True, probe.LEASE_REQUEST, 'alone', extra={'left': 0})
-        self._tick(_view('ONLINE', 'PRIMARY'), 1003)
+        self._tick(_view('ONLINE', 'PRIMARY'), 1005)
         self.assertEqual(('i2', 'lease_request'), self.cast.call_args.args)
         self.assertEqual({'left': 0},
                          self.cast.call_args.kwargs['payload']['extra'])
         self.app.cluster_signal.return_value = probe.NORMAL
         self._tick(_view('ONLINE', 'PRIMARY'), 1010)
         self.assertEqual(('i2', 'normal'), self.cast.call_args.args)
-        self.assertEqual(2, self.cast.call_count)
+        self.assertEqual(3, self.cast.call_count)
 
     def test_the_event_view_hook(self):
         self.app.cluster_event_view = mock.Mock(return_value={'gr': 1})
@@ -691,7 +721,8 @@ class TestClusterWatch(trove_testtools.TestCase):
     def test_a_cluster_short_of_a_member_and_whole_again(self):
         self.watch.enable_complete()
         self._tick(1000)
-        self.cast.assert_not_called()
+        # Up and whole: said once.
+        self.assertEqual(probe.NORMAL_KIND, self.cast.call_args[0][1])
         self.app.health = ch.view(ch.DEGRADED, ['10.0.0.2'],
                                   'failing: 10.0.0.2', me='10.0.0.1')
         self._tick(1030)
@@ -706,9 +737,9 @@ class TestClusterWatch(trove_testtools.TestCase):
                          payload['member'])
         # Again only after the event interval while it lasts.
         self._tick(1060)
-        self.assertEqual(1, self.cast.call_count)
-        self._tick(1330)
         self.assertEqual(2, self.cast.call_count)
+        self._tick(1330)
+        self.assertEqual(3, self.cast.call_count)
         self.app.health = ch.view(ch.HEALTHY, me='10.0.0.1')
         self._tick(1360)
         self.assertEqual(probe.NORMAL_KIND, self.cast.call_args[0][1])
@@ -728,7 +759,7 @@ class TestClusterWatch(trove_testtools.TestCase):
         self.app.cluster_signal = lambda view: probe.NORMAL
         self.watch.enable_complete()
         self._tick(1000)
-        self.cast.assert_not_called()
+        self.assertEqual(probe.NORMAL_KIND, self.cast.call_args[0][1])
         self.app.health = ch.view(ch.DEGRADED, ['10.0.0.3'],
                                   'not in the primary component',
                                   me='10.0.0.1')

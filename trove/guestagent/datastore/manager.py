@@ -220,6 +220,18 @@ class Manager(periodic_task.PeriodicTasks, SSLManager):
     def get_service_status(self):
         return self.status.get_actual_db_status()
 
+    def service_started(self):
+        """The first heartbeat as soon as the agent serves, not a pass or
+        two of the periodic loop later: a member that comes back is up as
+        far as the control plane can tell at once.
+        """
+        if self.status is None:
+            return
+        try:
+            self.update_status(None)
+        except Exception:
+            LOG.exception("The first heartbeat was not sent.")
+
     def rpc_ping(self, context):
         LOG.debug("Responding to RPC ping.")
         return True

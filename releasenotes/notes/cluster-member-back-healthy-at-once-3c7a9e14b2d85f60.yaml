@@ -1,0 +1,12 @@
+---
+fixes:
+  - |
+    A cluster member that came back (its server started again after an
+    outage) and found its cluster as it should be told nothing, and its
+    guest agent sent its first heartbeat only a pass or two of the
+    periodic loop after it started: the task manager counted the member
+    as down until then, and the cluster was HEALTHY again only at its next
+    look, 2 to 4 minutes after the member was back. The guest agent now
+    sends a heartbeat as soon as it serves, and a member that starts
+    normal tells it once, after that heartbeat: the cluster is looked at,
+    and found healthy, then.

@@ -124,16 +124,21 @@ class ClusterEventReporter(object):
     itself, and a datastore may ask for sooner), never twice within
     ``min_gap`` seconds (a member whose state flaps tells its latest
     state once the gap has passed). A member that starts abnormal tells
-    it once; one that starts normal says nothing.
+    it once; one that starts normal tells it once too, as soon as
+    ``ready()``: a cluster that waits for the member to come back is
+    looked at then, not at its next round, and the control plane counts
+    a member it has no heartbeat of yet as down, so the word waits for
+    the first one.
 
     ``send(kind, signal, view, since)`` does the telling and may raise.
     """
 
-    def __init__(self, interval, min_gap, send, now=None):
+    def __init__(self, interval, min_gap, send, now=None, ready=None):
         self.interval = interval
         self.min_gap = min_gap
         self.send = send
         self._now = now or time.monotonic
+        self.ready = ready or (lambda: True)
         # The (abnormal, kind) last seen and since when; when it was last
         # told; whether a change waits for the gap to pass.
         self.key = None
@@ -151,14 +156,14 @@ class ClusterEventReporter(object):
         if key != self.key:
             was_abnormal = self.key is not None and self.key[0]
             self.since = now
-            due = bool(signal.abnormal) or was_abnormal
+            due = bool(signal.abnormal) or was_abnormal or self._first_word()
         elif signal.abnormal:
             period = self.interval
             if signal.resend_after is not None:
                 period = min(period, max(signal.resend_after, 0))
             due = self.last_sent is None or now - self.last_sent >= period
         else:
-            due = False
+            due = self._first_word()
         self.key = key
         gap_over = (self.last_sent is None or
                     now - self.last_sent >= self.min_gap)
@@ -178,6 +183,10 @@ class ClusterEventReporter(object):
         self.send(kind, signal, view, now - self.since)
         self.last_sent, self.pending, self.sent = now, False, self.sent + 1
         return kind
+
+    def _first_word(self):
+        """Whether the member, which has told nothing yet, tells it now."""
+        return self.sent == 0 and bool(self.ready())
 
 
 def ip_key(ip):
@@ -250,7 +259,7 @@ class ClusterWatch(object):
         self.reporter = ClusterEventReporter(
             getattr(conf, 'cluster_event_interval', 60),
             getattr(conf, 'cluster_event_min_interval', 5),
-            send=self._send_event)
+            send=self._send_event, ready=self._heartbeat_out)
         self._spawn = eventlet.spawn_n
         self._sending = False
         self.view = UNKNOWN_MEMBER
@@ -292,6 +301,13 @@ class ClusterWatch(object):
         if self._loop is not None:
             self._loop.stop()
             self._loop = None
+
+    def _heartbeat_out(self):
+        """Whether the agent has sent a heartbeat since it started (an app
+        without the status object tells nothing of it: yes).
+        """
+        return bool(getattr(getattr(self.app, 'status', None),
+                            'heartbeat_sent', True))
 
     def enable_member(self):
         """The member has joined the cluster."""

@@ -57,6 +57,8 @@ class BaseDbStatus(object):
     def __init__(self, docker_client):
         self.status = None
         self.docker_client = docker_client
+        # Whether this agent has sent a heartbeat since it started.
+        self.heartbeat_sent = False
 
         self.__prepare_completed = None
 
@@ -169,6 +171,7 @@ class BaseDbStatus(object):
                 sent=timeutils.utcnow_ts(microsecond=True))
             LOG.debug("Successfully cast set_status.")
             self.status = status
+            self.heartbeat_sent = True
         else:
             LOG.debug("Prepare has not completed yet, skipping heartbeat.")
 

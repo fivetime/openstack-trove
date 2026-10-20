@@ -20,6 +20,8 @@ from trove.common import exception
 from trove.common import ssl
 from trove.guestagent.common import operating_system
 from trove.guestagent.datastore import manager as base_manager
+from trove.guestagent.datastore import service as base_service
+from trove.instance import service_status
 from trove.tests.unittests import trove_testtools
 
 
@@ -117,3 +119,48 @@ class TestHeartbeat(trove_testtools.TestCase):
         self.assertEqual(114, base_manager.heartbeat_spacing(60))
         self.assertEqual(55, base_manager.Manager('test')._periodic_spacing[
             'update_status'])
+
+
+class TestFirstHeartbeat(trove_testtools.TestCase):
+    """The agent's first heartbeat goes out when it starts serving, with
+    the real status object and the conductor's cast mocked.
+    """
+
+    def setUp(self):
+        super(TestFirstHeartbeat, self).setUp()
+        self.manager = base_manager.Manager('test')
+        self.manager.status = base_service.BaseDbStatus(mock.Mock())
+        self.installed = mock.patch.object(
+            base_service.BaseDbStatus, 'is_installed',
+            new_callable=mock.PropertyMock, return_value=True).start()
+        mock.patch.object(
+            base_service.BaseDbStatus, 'get_actual_db_status',
+            return_value=service_status.ServiceStatuses.HEALTHY).start()
+        self.conductor = mock.patch.object(
+            base_service.conductor_api, 'API').start()
+        self.addCleanup(mock.patch.stopall)
+
+    def test_the_first_heartbeat_goes_out_when_the_agent_serves(self):
+        self.assertFalse(self.manager.status.heartbeat_sent)
+        self.manager.service_started()
+        beat = self.conductor.return_value.heartbeat
+        beat.assert_called_once()
+        self.assertEqual({'service_status': 'healthy'}, beat.call_args.args[1])
+        self.assertTrue(self.manager.status.heartbeat_sent)
+
+    def test_none_before_the_database_is_installed(self):
+        self.installed.return_value = False
+        self.manager.service_started()
+        self.conductor.return_value.heartbeat.assert_not_called()
+        self.assertFalse(self.manager.status.heartbeat_sent)
+
+    def test_a_failing_first_heartbeat_does_not_stop_the_agent(self):
+        self.conductor.return_value.heartbeat.side_effect = RuntimeError(
+            'no broker')
+        self.manager.service_started()
+        self.assertFalse(self.manager.status.heartbeat_sent)
+
+    def test_a_manager_without_a_status_sends_nothing(self):
+        manager = base_manager.Manager('test')
+        manager.service_started()
+        self.conductor.return_value.heartbeat.assert_not_called()
