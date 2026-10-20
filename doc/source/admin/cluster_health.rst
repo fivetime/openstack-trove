@@ -100,3 +100,22 @@ and ``[percona]`` have the last two, their probe has its own options):
 
 The health is kept in its own table (``cluster_health``), written only
 when it changes.
+
+Notification
+~~~~~~~~~~~~
+
+Every change is told once, by the task manager that recorded it, as the
+notification ``trove.cluster.health`` (with the other notifications of
+the task manager, through ``[oslo_messaging_notifications]``)::
+
+    {"cluster_id": "...", "cluster_name": "mycluster",
+     "tenant_id": "...", "datastore_version_id": "...",
+     "status": "DEGRADED", "previous_status": "HEALTHY",
+     "members_out": ["mycluster-member-3"],
+     "reason": "not answering: mycluster-member-3",
+     "since": "2026-10-19T18:02:11Z", "region": "RegionOne"}
+
+``previous_status`` is null for the first record of a cluster. With an
+event definition for it in Ceilometer, a tenant can be alarmed by an
+Aodh event alarm on ``trove.cluster.health`` (for instance on the trait
+``status`` not being ``HEALTHY``).

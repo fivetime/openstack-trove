@@ -88,6 +88,52 @@ class HealthTestBase(trove_testtools.TestCase):
         return row.status, json.loads(row.detail), row.since
 
 
+class TestHealthNotification(HealthTestBase):
+    """A change of the health is told, once."""
+
+    def setUp(self):
+        super(TestHealthNotification, self).setUp()
+        self.notifier = mock.patch.object(
+            health.rpc, 'get_notifier').start().return_value
+        self.addCleanup(mock.patch.stopall)
+
+    def test_every_change_is_told_once(self):
+        cluster, members = self._cluster()
+        healthy = ch.combine([('c-member-1', ch.view(ch.HEALTHY)),
+                              ('c-member-2', ch.view(ch.HEALTHY))], [])
+        self.assertTrue(health.record(cluster.id, healthy))
+        self._recorded(cluster.id)
+        # The same again (another task manager, the next look): nothing.
+        self.assertFalse(health.record(cluster.id, healthy))
+        degraded = ch.combine([('c-member-1', ch.view(ch.HEALTHY))],
+                              ['c-member-2'])
+        self.assertTrue(health.record(cluster.id, degraded))
+
+        told = [c[0] for c in self.notifier.info.call_args_list]
+        self.assertEqual(['trove.cluster.health'] * 2, [t[1] for t in told])
+        first, second = told[0][2], told[1][2]
+        self.assertEqual(
+            {'cluster_id': cluster.id, 'cluster_name': 'c',
+             'tenant_id': 't', 'datastore_version_id': 'v1',
+             'status': ch.HEALTHY, 'previous_status': None,
+             'members_out': [], 'reason': None},
+            {k: v for k, v in first.items() if k not in ('since', 'region')})
+        self.assertEqual(
+            (ch.DEGRADED, ch.HEALTHY, ['c-member-2'],
+             'not answering: c-member-2'),
+            (second['status'], second['previous_status'],
+             second['members_out'], second['reason']))
+        self.assertEqual(self._recorded(cluster.id)[2].isoformat()[:19],
+                         second['since'][:19])
+
+    def test_a_notification_not_sent_leaves_the_record(self):
+        self.notifier.info.side_effect = RuntimeError('no broker')
+        cluster, members = self._cluster()
+        self.assertTrue(health.record(cluster.id, ch.combine(
+            [('c-member-1', ch.view(ch.HEALTHY))], [])))
+        self.assertEqual(ch.HEALTHY, self._recorded(cluster.id)[0])
+
+
 class TestHealthWatch(HealthTestBase):
 
     def _watch(self, answers):

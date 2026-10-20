@@ -25,6 +25,9 @@ at again every ``cluster_health_interval`` seconds until it is.
 A record is written only when it changes, in one statement (two task
 managers looking at the same cluster write the same), into its own table:
 a cluster saved from an older read does not write an older health back.
+The task manager whose statement changed it sends the notification
+``trove.cluster.health``, for the tenant's alarms (an Aodh event alarm
+through Ceilometer) and the operator's.
 """
 
 from concurrent import futures
@@ -39,13 +42,18 @@ from trove.cluster.tasks import ClusterTasks
 from trove.common import cfg
 from trove.common import clients
 from trove.common import cluster_health
+from trove.common import context as trove_context
 from trove.common import exception
+from trove.common import timeutils as trove_timeutils
 from trove.instance.models import DBInstance
 from trove.instance.models import InstanceServiceStatus
 from trove.instance import tasks as inst_tasks
+from trove import rpc
 
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
+
+EVENT_TYPE = 'trove.cluster.health'
 
 
 def _detail(health):
@@ -66,13 +74,46 @@ def known_members(cluster_id):
         return {}
 
 
+def _status_of(cluster_id):
+    try:
+        return cluster_models.DBClusterHealth.find_by(id=cluster_id).status
+    except exception.NotFound:
+        return None
+
+
+def notify(cluster_id, previous, health, since):
+    """Tell that the cluster's health changed: what it is, what it was
+    (None for the first record), the members out and why.
+    """
+    try:
+        db_cluster = cluster_models.DBCluster.find_by(id=cluster_id)
+        payload = {
+            'cluster_id': cluster_id,
+            'cluster_name': db_cluster.name,
+            'tenant_id': db_cluster.tenant_id,
+            'datastore_version_id': db_cluster.datastore_version_id,
+            'status': health['status'],
+            'previous_status': previous,
+            'members_out': list(health.get('out') or []),
+            'reason': health.get('reason'),
+            'since': trove_timeutils.isotime(since),
+            'region': CONF.region,
+        }
+        rpc.get_notifier(service='taskmanager').info(
+            trove_context.TroveContext(), EVENT_TYPE, payload)
+    except Exception:
+        LOG.exception("The change of the health of cluster %s was not "
+                      "told.", cluster_id)
+
+
 def record(cluster_id, health):
-    """Record the cluster's health when it changed. Returns whether it
-    did.
+    """Record the cluster's health when it changed, and tell it. Returns
+    whether it did.
     """
     detail = _detail(health)
     now = timeutils.utcnow()
     model = cluster_models.DBClusterHealth
+    previous = _status_of(cluster_id)
     with model.query() as query:
         changed = query.filter(model.id == cluster_id).filter(
             (model.status != health['status']) |
@@ -94,6 +135,7 @@ def record(cluster_id, health):
              {'c': cluster_id, 's': health['status'],
               'r': ': %s' % health['reason'] if health.get('reason')
               else ''})
+    notify(cluster_id, previous, health, now)
     return True
 
 

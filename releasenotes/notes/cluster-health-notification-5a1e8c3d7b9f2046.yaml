@@ -1,0 +1,9 @@
+---
+features:
+  - |
+    A change of the health of a cluster is told as the notification
+    ``trove.cluster.health`` (``cluster_id``, ``cluster_name``,
+    ``tenant_id``, ``datastore_version_id``, ``status``,
+    ``previous_status``, ``members_out``, ``reason``, ``since``,
+    ``region``), once, by the task manager that recorded it: for a
+    tenant's Aodh event alarms through Ceilometer, and for the operator.
