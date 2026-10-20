@@ -168,14 +168,16 @@ def get_server(target, endpoints, key, serializer=None,
 def delete_server_queues(target, retry=None, transport=None):
     """Delete the queues the RPC servers of a target consume from.
 
-    For a topic that is not used again. Does nothing with an oslo.messaging
-    too old to provide delete_rpc_server_queues.
+    For a topic that is not used again. oslo.messaging calls it
+    cleanup_rpc_server, and delete_rpc_server_queues before the name was
+    settled; does nothing with an oslo.messaging that has neither.
     """
     assert TRANSPORT is not None
-    delete = getattr(messaging, 'delete_rpc_server_queues', None)
+    delete = (getattr(messaging, 'cleanup_rpc_server', None) or
+              getattr(messaging, 'delete_rpc_server_queues', None))
     if delete is None:
-        LOG.debug("oslo.messaging has no delete_rpc_server_queues, not "
-                  "deleting the queues of %s", target)
+        LOG.debug("oslo.messaging has no cleanup_rpc_server, not deleting "
+                  "the queues of %s", target)
         return
     delete(transport or TRANSPORT, target, retry=retry)
 

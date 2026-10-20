@@ -28,16 +28,28 @@ class DeleteServerQueuesTest(trove_testtools.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    @mock.patch.object(messaging, 'delete_rpc_server_queues', create=True)
-    def test_delete_server_queues(self, delete):
-        rpc.delete_server_queues(self.target, retry=3)
+    def _messaging(self, *names):
+        """oslo.messaging with only the given calls."""
+        return mock.patch.object(rpc, 'messaging', mock.Mock(spec=names))
 
-        delete.assert_called_once_with(
+    def test_delete_server_queues(self):
+        with self._messaging('cleanup_rpc_server',
+                             'delete_rpc_server_queues') as m:
+            rpc.delete_server_queues(self.target, retry=3)
+        m.cleanup_rpc_server.assert_called_once_with(
+            mock.sentinel.transport, self.target, retry=3)
+        m.delete_rpc_server_queues.assert_not_called()
+
+    def test_delete_server_queues_before_the_name_was_settled(self):
+        # The name oslo.messaging had at first (our fork's).
+        with self._messaging('delete_rpc_server_queues') as m:
+            rpc.delete_server_queues(self.target, retry=3)
+        m.delete_rpc_server_queues.assert_called_once_with(
             mock.sentinel.transport, self.target, retry=3)
 
     def test_delete_server_queues_old_oslo_messaging(self):
-        # Without delete_rpc_server_queues there is nothing to call.
-        with mock.patch.object(rpc, 'messaging', mock.Mock(spec=[])):
+        # Without either there is nothing to call.
+        with self._messaging():
             rpc.delete_server_queues(self.target, retry=3)
 
 
@@ -85,11 +97,14 @@ class PartitionTransportTest(trove_testtools.TestCase):
         rpc.get_server(target, [], key=None, transport=mock.sentinel.p2)
         self.assertIs(mock.sentinel.p2, get_rpc_server.call_args.args[0])
 
-    @mock.patch.object(messaging, 'delete_rpc_server_queues', create=True)
-    def test_delete_server_queues_on_a_given_transport(self, delete):
+    def test_delete_server_queues_on_a_given_transport(self):
         target = messaging.Target(topic='t', server='s')
-        rpc.delete_server_queues(target, retry=3, transport=mock.sentinel.p2)
-        delete.assert_called_once_with(mock.sentinel.p2, target, retry=3)
+        with mock.patch.object(rpc, 'messaging',
+                               mock.Mock(spec=['cleanup_rpc_server'])) as m:
+            rpc.delete_server_queues(target, retry=3,
+                                     transport=mock.sentinel.p2)
+        m.cleanup_rpc_server.assert_called_once_with(
+            mock.sentinel.p2, target, retry=3)
 
     def test_cleanup_closes_partition_transports(self):
         p2 = mock.Mock()
