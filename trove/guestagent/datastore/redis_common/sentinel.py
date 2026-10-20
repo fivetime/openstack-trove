@@ -215,11 +215,16 @@ class SentinelAppMixin(object):
 
     def restart_with_sentinel(self):
         """The container again, with the sentinel beside the server: a
-        container keeps the command it was created with.
+        container keeps the command it was created with. Of the image it
+        was created from: without one, start_db takes the image's latest
+        tag, another version than the datastore version (an 8.1 member
+        ran 9.1.2, 2026-10-20).
         """
+        image = docker_util.get_container_image(self.docker_client)
         self.stop_db()
         docker_util.remove_container(self.docker_client)
-        self.start_db(update_db=False, command=self.sentinel_command())
+        self.start_db(update_db=False, command=self.sentinel_command(),
+                      image=image)
 
     def wait_for_primary_link(self, timeout=300):
         def linked():

@@ -277,6 +277,16 @@ def restart_container(client, name="database"):
     container.restart(timeout=CONF.state_change_wait_time)
 
 
+def get_container_image(client, name="database"):
+    """The image a container was created from, as it was named then
+    (repository:tag), or None without the container.
+    """
+    try:
+        return client.containers.get(name).attrs['Config']['Image']
+    except docker.errors.NotFound:
+        return None
+
+
 def remove_container(client, name="database"):
     try:
         container = client.containers.get(name)

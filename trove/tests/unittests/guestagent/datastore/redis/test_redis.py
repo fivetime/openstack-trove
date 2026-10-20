@@ -601,6 +601,40 @@ class TestRedisAppendOnlyFile(trove_testtools.TestCase):
                           'healthy', 'file on', 'override gone'], calls)
         self.assertFalse(self._overridden())
 
+    def _start_image(self, **kwargs):
+        """The image start_db starts the container of."""
+        self._info({})
+        self.app.status = mock.Mock()
+        self.app.status.wait_for_status.return_value = True
+        conf = mock.Mock(network_isolation=False, state_change_wait_time=5)
+        conf.get.return_value = mock.Mock(
+            docker_image='harbor.tue.jp/cache-dockerhub/valkey/valkey')
+        with mock.patch.object(common_service, 'CONF', conf), \
+                mock.patch.object(common_service.cfg,
+                                  'get_configuration_property',
+                                  return_value=[]), \
+                mock.patch.object(common_service.operating_system,
+                                  'ensure_directory'), \
+                mock.patch.object(common_service.docker_util,
+                                  'start_container') as start, \
+                mock.patch.object(common_service.RedisApp,
+                                  'database_service_uid', 999), \
+                mock.patch.object(common_service.RedisApp,
+                                  'database_service_gid', 999):
+            self.app.start_db(**kwargs)
+        return start.call_args[0][1]
+
+    def test_start_db_image(self):
+        self.assertEqual('harbor.tue.jp/cache-dockerhub/valkey/valkey:8.1',
+                         self._start_image(ds_version='8.1'))
+        self.assertEqual('harbor.tue.jp/cache-dockerhub/valkey/valkey:latest',
+                         self._start_image())
+        # The image of the container it replaces, whatever the version.
+        self.assertEqual(
+            'harbor.tue.jp/cache-dockerhub/valkey/valkey:8.1',
+            self._start_image(
+                image='harbor.tue.jp/cache-dockerhub/valkey/valkey:8.1'))
+
 
 class TestRedisReplicationPosition(trove_testtools.TestCase):
     """Where a server stands in its replication stream, for promote and
@@ -792,6 +826,22 @@ class TestRedisSentinelMember(trove_testtools.TestCase):
         self.app.adm.connection.info.return_value = primary
         self.app.sentinel_primary = mock.Mock(side_effect=OSError('gone'))
         self.assertFalse(self.app.sentinel_member_view().writable)
+
+    def test_the_sentinel_comes_beside_the_server_of_the_same_image(self):
+        # As docker-py gives a container's attributes (docker inspect): the
+        # image as it was named when the container was made.
+        container = mock.Mock(attrs={'Config': {
+            'Image': 'harbor.tue.jp/cache-dockerhub/valkey/valkey:8.1',
+            'Cmd': ['valkey-server', '/etc/valkey/valkey.conf']}})
+        self.app.docker_client.containers.get.return_value = container
+        self.app.stop_db = mock.Mock()
+        self.app.start_db = mock.Mock()
+        self.app.sentinel_command = mock.Mock(return_value='/data/start.sh')
+        self.app.restart_with_sentinel()
+        container.remove.assert_called_once_with(force=True)
+        self.app.start_db.assert_called_once_with(
+            update_db=False, command='/data/start.sh',
+            image='harbor.tue.jp/cache-dockerhub/valkey/valkey:8.1')
 
     def _sentinel_client(self):
         client = mock.MagicMock()

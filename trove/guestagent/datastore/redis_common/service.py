@@ -282,11 +282,15 @@ class RedisApp(sentinel.SentinelAppMixin, service.BaseDbApp):
         return None
 
     def start_db(self, update_db=False, ds_version=None, command=None,
-                 extra_volumes=None, memory_mb=None):
-        """Start and wait for database service."""
-        docker_image = CONF.get(CONF.datastore_manager).docker_image
-        image = (f'{docker_image}:latest' if not ds_version else
-                 f'{docker_image}:{ds_version}')
+                 extra_volumes=None, memory_mb=None, image=None):
+        """Start and wait for database service: of ``image`` if given (the
+        image of the container it replaces), else of the datastore's image
+        at ``ds_version``.
+        """
+        if not image:
+            docker_image = CONF.get(CONF.datastore_manager).docker_image
+            image = (f'{docker_image}:latest' if not ds_version else
+                     f'{docker_image}:{ds_version}')
 
         if not command:
             # A member of a sentinel cluster runs its sentinel too, however
