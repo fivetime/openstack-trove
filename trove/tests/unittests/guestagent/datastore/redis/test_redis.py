@@ -718,6 +718,9 @@ class TestRedisSentinelMember(trove_testtools.TestCase):
         self.assertIn('sentinel monitor trove 10.0.0.1 6379 2', lines)
         self.assertIn('sentinel announce-ip 10.0.0.2', lines)
         self.assertIn('unixsocket /d/sentinel.sock', lines)
+        # As the server's socket: the guest agent cannot connect to one
+        # only the database user may (EACCES on production, 2026-10-20).
+        self.assertIn('unixsocketperm 777', lines)
         self.assertIn('sentinel sentinel-user trove-sentinel', lines)
         self.assertIn('sentinel auth-user trove sentinel', lines)
         self.assertIn('sentinel auth-pass trove sen', lines)

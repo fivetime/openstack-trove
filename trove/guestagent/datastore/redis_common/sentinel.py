@@ -91,7 +91,7 @@ def sentinel_config(self_ip, primary_ip, quorum, admin_password,
     return '\n'.join([
         'port %d' % SENTINEL_PORT,
         'unixsocket %s' % socket_path,
-        'unixsocketperm 700',
+        'unixsocketperm 777',
         'user default on nopass %s' % CLIENT_COMMANDS,
         'user %s on >%s ~* &* +@all' % (SENTINEL_ADMIN, admin_password),
         'sentinel sentinel-user %s' % SENTINEL_ADMIN,
