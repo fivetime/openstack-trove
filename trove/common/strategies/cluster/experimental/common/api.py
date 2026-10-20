@@ -268,7 +268,7 @@ class MemberRolesMixin(object):
     def _endpoints(self):
         """The cluster's endpoint and, for a datastore whose standbys
         serve reads, its read endpoint: {'endpoint', 'read_endpoint'},
-        only those there are.
+        and its further endpoints by their names, only those there are.
         """
         conf = CONF.get(self.cluster.datastore_version.manager)
         if not getattr(conf, 'cluster_load_balancer', False):
@@ -277,6 +277,8 @@ class MemberRolesMixin(object):
         read_port = getattr(conf, 'cluster_read_load_balancer_port', 0)
         if read_port:
             ports.append(('read_endpoint', read_port))
+        ports.extend(sorted(
+            loadbalancer.extra_ports(conf).items()))
         endpoints = {}
         try:
             client = loadbalancer.OctaviaClient()

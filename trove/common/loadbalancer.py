@@ -52,6 +52,15 @@ class LoadBalancerNotFound(LoadBalancerError):
     message = _("Load balancer %(name)s is not there.")
 
 
+def extra_ports(conf):
+    """The further endpoints of a datastore's clusters
+    (``cluster_load_balancer_extra_ports``), {name: port}.
+    """
+    return {name: int(port) for name, port in
+            (getattr(conf, 'cluster_load_balancer_extra_ports', None) or
+             {}).items()}
+
+
 def cluster_load_balancer_name(cluster_id):
     return 'trove-cluster-%s' % cluster_id
 

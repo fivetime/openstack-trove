@@ -892,7 +892,8 @@ def _cluster_option(deprecated_prefix):
 
 def _with_cluster_entry(opts, deprecated_prefix=None, ready_port=3307,
                         read_port=0, load_balancer_port=3306,
-                        read_load_balancer_port=0):
+                        read_load_balancer_port=0,
+                        extra_load_balancer_ports=None):
     """The options of a cluster whose endpoint is a load balancer in front
     of the members that take writes (and of those that serve reads):
     the guest agent of each member watches it and opens the member's
@@ -932,6 +933,13 @@ def _with_cluster_entry(opts, deprecated_prefix=None, ready_port=3307,
                    help='Port the load balancer of a cluster listens on for '
                         'reads, sending to the members that serve them. '
                         '0: no read endpoint.'),
+        cfg.DictOpt('cluster_load_balancer_extra_ports',
+                    default=extra_load_balancer_ports or {},
+                    help='More endpoints of a cluster, by name: the load '
+                         'balancer listens on the port and sends to every '
+                         'member on the same port (a service each member '
+                         'runs, such as a Redis sentinel), shown in the '
+                         'cluster as <name>.'),
         cfg.BoolOpt('cluster_events', default=True,
                     help='Tell the control plane, through the conductor, of '
                          'every change of the member\'s cluster state, and '

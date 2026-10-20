@@ -100,6 +100,10 @@ class ClusterEntryTasksMixin(object):
         if read_port and read_lb_port:
             listeners.append((read_lb_port, [
                 dict(member, protocol_port=read_port) for member in members]))
+        # Each further endpoint, to every member on the same port.
+        for _name, port in sorted(loadbalancer.extra_ports(conf).items()):
+            listeners.append((port, [
+                dict(member, protocol_port=port) for member in members]))
         loadbalancer.ensure_load_balancer(
             loadbalancer.OctaviaClient(),
             loadbalancer.cluster_load_balancer_name(cluster_id),
