@@ -127,7 +127,9 @@ class HomogeneousCluster(ClusterModeMixin, cluster_models.Cluster):
 
     @classmethod
     def _kept_properties(cls, extended_properties):
-        props = extended_properties or {}
+        props = extended_properties
+        if not isinstance(props, dict):
+            return {}
         keys = (topology.TOPOLOGY,) + tuple(cls.KEPT_PROPERTIES)
         return {key: props[key] for key in keys if key in props}
 
@@ -222,9 +224,11 @@ class HomogeneousCluster(ClusterModeMixin, cluster_models.Cluster):
         try:
             locality = srv_grp.ServerGroup.convert_to_hint(self.server_group)
             configuration_id = self.db_info.configuration_id
+            # A new member is of the cluster's topology and mode, as kept.
             new_instances = self._create_instances(
                 context, db_info, datastore, datastore_version, instances,
-                None, locality, configuration_id, image_id)
+                self._kept_properties(db_info.get_properties()) or None,
+                locality, configuration_id, image_id)
 
             task_api.load(context, datastore_version.manager).grow_cluster(
                 db_info.id, [instance.id for instance in new_instances])

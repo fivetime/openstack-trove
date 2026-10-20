@@ -373,7 +373,11 @@ class ClusterTasks(Cluster):
         LOG.debug("end delete_cluster for id: %s", cluster_id)
 
     def rolling_restart_cluster(self, context, cluster_id, delay_sec=0,
-                                ordering_function=None):
+                                ordering_function=None, before_member=None):
+        """Restart the members one after another, in the datastore's order
+        (``ordering_function``, a sort key); ``before_member(instance)``
+        runs before each (a primary handing over to another member).
+        """
         LOG.debug("Begin rolling cluster restart for id: %s", cluster_id)
 
         def _restart_cluster_instance(instance):
@@ -407,6 +411,8 @@ class ClusterTasks(Cluster):
                         "cluster before proceeding.", delay_sec)
                     time.sleep(delay_sec)
                 instance = BuiltInstanceTasks.load(context, db_inst.id)
+                if before_member is not None:
+                    before_member(instance)
                 _restart_cluster_instance(instance)
         except PollTimeOut:
             LOG.exception("Timeout for restarting cluster.")
@@ -421,7 +427,11 @@ class ClusterTasks(Cluster):
         LOG.debug("End rolling restart for id: %s.", cluster_id)
 
     def rolling_upgrade_cluster(self, context, cluster_id,
-                                datastore_version, ordering_function=None):
+                                datastore_version, ordering_function=None,
+                                before_member=None):
+        """Upgrade the members one after another, as
+        ``rolling_restart_cluster`` restarts them.
+        """
         LOG.debug("Begin rolling cluster upgrade for id: %s.", cluster_id)
 
         def _upgrade_cluster_instance(instance):
@@ -457,6 +467,8 @@ class ClusterTasks(Cluster):
                     LOG.error("Timeout for upgrading cluster %s.",
                               cluster_id)
                     raise PollTimeOut
+                if before_member is not None:
+                    before_member(instance)
                 _upgrade_cluster_instance(instance)
 
             self.reset_task()

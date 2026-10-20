@@ -21,7 +21,6 @@ from trove.guestagent.common import cluster_member
 from trove.guestagent.common import cluster_probe
 from trove.guestagent.common import operating_system
 from trove.guestagent.datastore import manager
-from trove.guestagent.datastore.redis_common import sentinel
 from trove.guestagent.datastore import service as base_service
 
 LOG = logging.getLogger(__name__)
@@ -73,15 +72,23 @@ class RedisManager(cluster_member.ClusterWatchMixin, manager.Manager):
         self.restart_cluster_watch()
         return {'ip': self.app.get_node_ip()[0]}
 
-    def sentinel_reset(self, context):
+    def sentinel_reset(self, context, members):
         """The sentinel forgets the members it knew and learns them again
-        (after a shrink).
+        (after a shrink), until it knows of ``members``.
         """
-        client = self.app._sentinel()
-        try:
-            client.sentinel_reset(sentinel.MASTER_NAME)
-        finally:
-            client.close()
+        self.app.sentinel_reset(members)
+
+    def get_sentinel_config(self, context):
+        return self.app.joining_config()
+
+    def sentinel_failover(self, context):
+        return self.app.sentinel_failover()
+
+    def sentinel_leave(self, context):
+        self.app.sentinel_leave()
+
+    def sentinel_set_quorum(self, context, quorum):
+        self.app.sentinel_set_quorum(quorum)
 
     def do_prepare(self, context, packages, databases, memory_mb, users,
                    device_path, mount_point, backup_info,

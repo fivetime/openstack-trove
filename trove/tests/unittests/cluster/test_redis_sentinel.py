@@ -26,6 +26,7 @@ from trove.common.strategies.cluster.experimental.redis import (
     sentinel_taskmanager)
 from trove.common.strategies.cluster.experimental.redis import (
     taskmanager as redis_taskmanager)
+from trove.instance import models as instance_models
 from trove.tests.unittests import trove_testtools
 
 
@@ -123,11 +124,41 @@ class SentinelApiTest(trove_testtools.TestCase):
                       redis_taskmanager.RedisTaskManagerStrategy()
                       .task_manager_cluster_tasks_class)
 
-    def test_no_grow_or_shrink_yet(self):
+    def test_new_members_are_of_the_topology_and_mode_kept(self):
+        self.db_info = _DBInfo({'topology': 'sentinel',
+                                'replication_mode': 'async', 'other': 1})
         cluster = sentinel_api.RedisSentinelCluster.__new__(
             sentinel_api.RedisSentinelCluster)
-        self.assertRaises(exception.BadRequest, cluster.grow, [])
-        self.assertRaises(exception.BadRequest, cluster.shrink, [])
+        cluster.db_info = self.db_info
+        cluster.context = self.ctx
+        cluster.ds = mock.Mock()
+        cluster.ds_version = self.args[3]
+        mock.patch.object(sentinel_api.RedisSentinelCluster, 'server_group',
+                          new_callable=mock.PropertyMock,
+                          return_value=None).start()
+        cluster.validate_cluster_available = mock.Mock()
+        cluster._validate_cluster_instances = mock.Mock()
+        self.db_info.update = mock.Mock()
+        self.db_info.configuration_id = None
+        with mock.patch.object(common_api.srv_grp.ServerGroup,
+                               'convert_to_hint', return_value=None):
+            cluster.grow([{'flavor_id': 'f', 'volume_size': 2}])
+        self.assertEqual({'topology': 'sentinel', 'replication_mode': 'async'},
+                         self.created.call_args[0][5])
+
+    @mock.patch.object(instance_models.DBInstance, 'find_all')
+    def test_a_shrink_keeps_the_minimum(self, find_all):
+        cluster = sentinel_api.RedisSentinelCluster.__new__(
+            sentinel_api.RedisSentinelCluster)
+        cluster.db_info = self.db_info
+        cluster.ds_version = self.args[3]
+        find_all.return_value.count.return_value = 4
+        self.assertRaisesRegex(exception.BadRequest, 'at least 3',
+                               cluster.shrink, ['a', 'b'])
+        with mock.patch.object(common_api.HomogeneousCluster,
+                               'shrink') as shrink:
+            cluster.shrink(['a'])
+        shrink.assert_called_once_with(['a'])
 
 
 class SentinelViewTest(trove_testtools.TestCase):
@@ -243,3 +274,146 @@ class SentinelTasksTest(trove_testtools.TestCase):
         self.tasks.get_guest = guest
         self.tasks.create_cluster('ctx', 'c1')
         self.assertEqual([('failed', 'c1')], self.calls)
+
+
+class SentinelAfterTheBuildTest(trove_testtools.TestCase):
+    """Grow, shrink and the rolling actions of a cluster of i1 (the
+    primary), i2 and i3.
+    """
+
+    def setUp(self):
+        super(SentinelAfterTheBuildTest, self).setUp()
+        self.addCleanup(mock.patch.stopall)
+        self.tasks = sentinel_taskmanager.RedisSentinelClusterTasks.__new__(
+            sentinel_taskmanager.RedisSentinelClusterTasks)
+        self.tasks.db_info = _DBInfo({'topology': 'sentinel'})
+        self.tasks.ds_version = mock.Mock(manager='valkey')
+        self.calls = []
+        self.ids = ['i1', 'i2', 'i3']
+        self.roles = {'i1': 'master', 'i2': 'replica', 'i3': 'replica',
+                      'i4': 'replica'}
+        mock.patch.object(
+            sentinel_taskmanager.DBInstance, 'find_all',
+            side_effect=lambda **kw: mock.Mock(**{
+                'all.return_value': [mock.Mock(id=i) for i in self.ids]})
+        ).start()
+        mock.patch.object(sentinel_taskmanager.Instance, 'load',
+                          side_effect=lambda ctx, i: mock.Mock(
+                              id=i, context=ctx)).start()
+        self.deleted = mock.patch.object(
+            sentinel_taskmanager.Instance, 'delete',
+            side_effect=lambda instance: self.ids.remove(instance.id)
+        ).start()
+        self.root = mock.patch.object(sentinel_taskmanager.ext_models,
+                                      'Root').start()
+        self.root.load.return_value = None
+        self.history = mock.patch.object(sentinel_taskmanager.ext_models,
+                                         'RootHistory').start()
+        self.tasks._all_instances_ready = mock.Mock(return_value=True)
+
+        def guest(instance):
+            i = instance.id
+            g = mock.Mock()
+            g.get_node_ip.return_value = ['10.0.0.%s' % i[-1], '6379']
+            g.get_member_role.side_effect = (
+                lambda: {'role': self.roles.get(i)})
+            g.get_sentinel_config.return_value = {
+                'admin_password': 'adm', 'sentinel_password': 'sen',
+                'sentinel_admin_password': 'tsen', 'mode': 'sync'}
+            g.get_root_password.return_value = 'rootpw'
+
+            def record(name):
+                return lambda *a: self.calls.append((name, i) + a)
+            for name in ('sentinel_install', 'cluster_complete',
+                         'sentinel_set_quorum', 'sentinel_leave',
+                         'sentinel_reset', 'enable_root_with_password'):
+                getattr(g, name).side_effect = record(name)
+
+            def failover():
+                self.calls.append(('sentinel_failover', i))
+                self.roles.update(i1='replica', i2='master')
+            g.sentinel_failover.side_effect = failover
+            return g
+        self.tasks.get_guest = guest
+        self.tasks._load_balancer_enabled = mock.Mock(return_value=True)
+        self.tasks._sync_load_balancer = mock.Mock(
+            side_effect=lambda ctx, cid, instances: self.calls.append(
+                ('lb', sorted(i.id for i in instances))))
+        self.tasks.reset_task = mock.Mock(
+            side_effect=lambda: self.calls.append(('reset',)))
+        self.tasks._fail_new_members = mock.Mock(
+            side_effect=lambda ids: self.calls.append(('failed', ids)))
+
+    def _grow(self):
+        self.ids.append('i4')
+        self.tasks.grow_cluster('ctx', 'c1', ['i4'])
+
+    def test_a_member_joins_the_primary_and_the_quorum_follows(self):
+        self._grow()
+        install = self.calls[0]
+        self.assertEqual(('sentinel_install', 'i4'), install[:2])
+        config = install[2]
+        self.assertEqual(('10.0.0.1', ['10.0.0.1', '10.0.0.2', '10.0.0.3',
+                                       '10.0.0.4'], 'sync', 'sen'),
+                         (config['primary'], config['members'],
+                          config['mode'], config['sentinel_password']))
+        self.assertEqual(
+            [('cluster_complete', 'i4')] +
+            [('sentinel_set_quorum', i, 3) for i in
+             ('i1', 'i2', 'i3', 'i4')] +
+            [('lb', ['i1', 'i2', 'i3', 'i4']), ('reset',)],
+            self.calls[1:])
+        self.history.create.assert_not_called()
+
+    def test_a_member_that_joins_gets_root(self):
+        self.root.load.side_effect = lambda ctx, i: i == 'i2'
+        self._grow()
+        self.assertIn(('enable_root_with_password', 'i4', 'rootpw'),
+                      self.calls)
+        self.history.create.assert_called_once_with('ctx', 'i4')
+
+    def test_a_grow_that_fails_fails_the_new_member_only(self):
+        self.roles = {}
+        self._grow()
+        self.assertEqual([('failed', ['i4']), ('reset',)], self.calls)
+
+    def test_the_primary_leaves_after_handing_over(self):
+        mock.patch.object(sentinel_taskmanager.utils, 'poll_until',
+                          side_effect=lambda f, **kw: self.assertTrue(f())
+                          ).start()
+        self.ids.append('i4')
+        self.tasks.shrink_cluster('ctx', 'c1', ['i1'])
+        self.assertEqual(
+            [('sentinel_leave', 'i1'), ('sentinel_failover', 'i2')] +
+            [('sentinel_set_quorum', i, 2) for i in ('i2', 'i3', 'i4')] +
+            [('sentinel_reset', i, 3) for i in ('i2', 'i3', 'i4')] +
+            [('lb', ['i2', 'i3', 'i4']), ('reset',)], self.calls)
+        self.assertEqual(['i2', 'i3', 'i4'], self.ids)
+
+    def test_a_replica_leaves_without_a_failover(self):
+        mock.patch.object(sentinel_taskmanager.utils, 'poll_until').start()
+        self.ids.append('i4')
+        self.tasks.shrink_cluster('ctx', 'c1', ['i3'])
+        self.assertNotIn('sentinel_failover', [c[0] for c in self.calls])
+        self.assertEqual(('reset',), self.calls[-1])
+
+    def test_rolling_the_replicas_first_the_primary_once_it_handed_over(
+            self):
+        self.tasks.rolling_restart_cluster = mock.Mock()
+        self.tasks.restart_cluster('ctx', 'c1')
+        kwargs = self.tasks.rolling_restart_cluster.call_args[1]
+        members = [mock.Mock(id=i) for i in ('i1', 'i2', 'i3')]
+        self.assertEqual(['i2', 'i3', 'i1'],
+                         [m.id for m in sorted(
+                             members, key=kwargs['ordering_function'])])
+        hand_over = kwargs['before_member']
+        hand_over(mock.Mock(id='i3', context='ctx'))
+        self.assertEqual([], self.calls)
+        hand_over(mock.Mock(id='i1', context='ctx'))
+        self.assertEqual([('sentinel_failover', 'i2')], self.calls)
+        self.tasks.rolling_upgrade_cluster = mock.Mock()
+        self.tasks.upgrade_cluster('ctx', 'c1', 'v2')
+        self.assertEqual(('ctx', 'c1', 'v2'),
+                         self.tasks.rolling_upgrade_cluster.call_args[0])
+        self.assertIn('before_member',
+                      self.tasks.rolling_upgrade_cluster.call_args[1])

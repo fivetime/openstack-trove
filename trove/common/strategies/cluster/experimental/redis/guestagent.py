@@ -123,7 +123,27 @@ class RedisGuestAgentAPI(guest_api.API):
                           version=guest_api.API.API_BASE_VERSION,
                           config=config)
 
-    def sentinel_reset(self):
+    def sentinel_reset(self, members):
         LOG.debug("Resetting the member's sentinel.")
         return self._call("sentinel_reset", self.agent_high_timeout,
+                          version=guest_api.API.API_BASE_VERSION,
+                          members=members)
+
+    def get_sentinel_config(self):
+        """The cluster's passwords and mode, as a member keeps them."""
+        return self._call("get_sentinel_config", self.agent_high_timeout,
                           version=guest_api.API.API_BASE_VERSION)
+
+    def sentinel_failover(self):
+        """Have the sentinels elect another primary; its address."""
+        return self._call("sentinel_failover", self.agent_high_timeout,
+                          version=guest_api.API.API_BASE_VERSION)
+
+    def sentinel_leave(self):
+        return self._call("sentinel_leave", self.agent_high_timeout,
+                          version=guest_api.API.API_BASE_VERSION)
+
+    def sentinel_set_quorum(self, quorum):
+        return self._call("sentinel_set_quorum", self.agent_high_timeout,
+                          version=guest_api.API.API_BASE_VERSION,
+                          quorum=quorum)

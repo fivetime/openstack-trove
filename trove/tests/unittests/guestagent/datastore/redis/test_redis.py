@@ -793,6 +793,58 @@ class TestRedisSentinelMember(trove_testtools.TestCase):
         self.app.sentinel_primary = mock.Mock(side_effect=OSError('gone'))
         self.assertFalse(self.app.sentinel_member_view().writable)
 
+    def _sentinel_client(self):
+        client = mock.MagicMock()
+        self.app._sentinel = mock.Mock(return_value=client)
+        return client
+
+    def test_a_member_that_joins_is_given_what_the_others_keep(self):
+        self._install('172.31.250.194')
+        saved = {c[0][0]: c[0][1]
+                 for c in self.app.save_password.call_args_list}
+        self.assertEqual({'trove-sentinel': 'tsen', 'sentinel': 'sen'},
+                         saved)
+        self.app.get_cluster_admin_password = mock.Mock(return_value='adm')
+        self.app.get_auth_password = mock.Mock(
+            side_effect=lambda file: {'sentinel.cnf': 'sen',
+                                      'trove-sentinel.cnf': 'tsen'}[file])
+        self.app.sentinel_mode = mock.Mock(return_value='sync')
+        self.assertEqual({'admin_password': 'adm', 'sentinel_password': 'sen',
+                          'sentinel_admin_password': 'tsen', 'mode': 'sync'},
+                         self.app.joining_config())
+
+    @mock.patch.object(sentinel.utils, 'poll_until',
+                       side_effect=lambda f, **kw: f() or (_ for _ in ()
+                                                           ).throw(
+                           sentinel.exception.PollTimeOut()))
+    def test_a_failover_waits_for_another_primary(self, poll):
+        client = self._sentinel_client()
+        self.app.sentinel_primary = mock.Mock(
+            side_effect=['10.0.0.1', '10.0.0.2', '10.0.0.2'])
+        self.assertEqual('10.0.0.2', self.app.sentinel_failover())
+        client.sentinel_failover.assert_called_once_with('trove')
+        self.app.sentinel_primary = mock.Mock(return_value='10.0.0.1')
+        self.assertRaisesRegex(sentinel.exception.TroveError,
+                               'did not elect', self.app.sentinel_failover)
+
+    def test_leave_quorum_and_reset(self):
+        client = self._sentinel_client()
+        self.app.sentinel_leave()
+        self.app.adm.connection.config_set.assert_called_once_with(
+            'replica-priority', 0)
+        self.app.sentinel_set_quorum(2)
+        client.sentinel_set.assert_called_once_with('trove', 'quorum', 2)
+        states = iter([{'num-other-sentinels': 1, 'num-slaves': 1},
+                       {'num-other-sentinels': 2, 'num-slaves': 2}])
+        self.app.sentinel_state = mock.Mock(
+            side_effect=lambda: {'master': next(states)})
+        with mock.patch.object(sentinel.utils, 'poll_until',
+                               side_effect=lambda f, **kw: [
+                                   f() for _ in range(2)]):
+            self.app.sentinel_reset(3)
+        client.sentinel_reset.assert_called_once_with('trove')
+        self.assertEqual(2, client.close.call_count)
+
     def test_sync_needs_a_replica(self):
         alone = {'role': 'master', 'connected_slaves': 0}
         self.assertFalse(self._view(alone).writable)

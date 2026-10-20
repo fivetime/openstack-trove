@@ -405,6 +405,57 @@ class MongoDbClusterTasksTest(trove_testtools.TestCase):
     @patch('trove.taskmanager.models.StartNotification')
     @patch.object(ClusterTasks, 'reset_task')
     @patch.object(DBInstance, 'find_all')
+    def test_rolling_upgrade_cluster_before_each_member(
+            self, mock_find_all, mock_reset_task, mock_start, mock_end,
+            mock_instance_task, mock_upgrade):
+        events = []
+        db_instances = [Mock(id=i) for i in (1, 2)]
+        mock_find_all.return_value.all.return_value = db_instances
+
+        def load(_, instance_id):
+            instance = Mock(id=instance_id)
+            instance.upgrade.side_effect = (
+                lambda _v: events.append(('upgrade', instance_id)))
+            return instance
+        mock_instance_task.load.side_effect = load
+        self.clustertasks.rolling_upgrade_cluster(
+            MagicMock(), Mock(), Mock(),
+            before_member=lambda i: events.append(('before', i.id)))
+        self.assertEqual([('before', 1), ('upgrade', 1), ('before', 2),
+                          ('upgrade', 2)], events)
+
+    @patch('trove.taskmanager.models.DBaaSInstanceRestart')
+    @patch('trove.taskmanager.models.BuiltInstanceTasks')
+    @patch('trove.taskmanager.models.EndNotification')
+    @patch('trove.taskmanager.models.StartNotification')
+    @patch.object(ClusterTasks, 'reset_task')
+    @patch.object(DBInstance, 'find_all')
+    def test_rolling_restart_cluster_before_each_member(
+            self, mock_find_all, mock_reset_task, mock_start, mock_end,
+            mock_instance_task, mock_restart):
+        events = []
+        mock_find_all.return_value.all.return_value = [Mock(id=2),
+                                                       Mock(id=1)]
+
+        def load(_, instance_id):
+            instance = Mock(id=instance_id)
+            instance.restart.side_effect = (
+                lambda: events.append(('restart', instance_id)))
+            return instance
+        mock_instance_task.load.side_effect = load
+        with patch('trove.taskmanager.models.utils.poll_until'):
+            self.clustertasks.rolling_restart_cluster(
+                MagicMock(), Mock(), ordering_function=lambda i: i.id,
+                before_member=lambda i: events.append(('before', i.id)))
+        self.assertEqual([('before', 1), ('restart', 1), ('before', 2),
+                          ('restart', 2)], events)
+
+    @patch('trove.taskmanager.models.DBaaSInstanceUpgrade')
+    @patch('trove.taskmanager.models.BuiltInstanceTasks')
+    @patch('trove.taskmanager.models.EndNotification')
+    @patch('trove.taskmanager.models.StartNotification')
+    @patch.object(ClusterTasks, 'reset_task')
+    @patch.object(DBInstance, 'find_all')
     def _assert_rolling_upgrade_cluster(self,
                                         ordering_function,
                                         ordering,

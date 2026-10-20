@@ -185,6 +185,8 @@ class SentinelAppMixin(object):
             commands=SENTINEL_COMMANDS, channels=['*'])
         self.adm.connection.acl_save()
         self.save_password(SENTINEL_ADMIN, config['sentinel_admin_password'])
+        # What a member that joins later is given (sentinel_config).
+        self.save_password(SENTINEL_USER, config['sentinel_password'])
         sync = config.get('mode', SYNC) == SYNC
         self.configuration_manager.apply_system_override({
             'replica-announce-ip': self_ip,
@@ -326,3 +328,70 @@ class SentinelAppMixin(object):
             LOG.info("Dropped %d sentinel connections that had failed to "
                      "log in.", dropped)
         return dropped
+
+    # What the task manager has the members do after the build
+
+    def joining_config(self):
+        """The cluster's passwords and mode, for a member that joins."""
+        return {
+            'admin_password': self.get_cluster_admin_password(),
+            'sentinel_password': self.get_auth_password(
+                file='%s.cnf' % SENTINEL_USER),
+            'sentinel_admin_password': self.get_auth_password(
+                file='%s.cnf' % SENTINEL_ADMIN),
+            'mode': self.sentinel_mode(),
+        }
+
+    def _with_sentinel(self, act):
+        client = self._sentinel()
+        try:
+            return act(client)
+        finally:
+            client.close()
+
+    def sentinel_failover(self, timeout=90):
+        """Have the sentinels elect another primary now (before the
+        primary is restarted, upgraded or removed); returns its address
+        once they did.
+        """
+        old = self.sentinel_primary()
+        LOG.info("Asking the sentinels for a failover from %s.", old)
+        self._with_sentinel(lambda c: c.sentinel_failover(MASTER_NAME))
+
+        def elected():
+            return self.sentinel_primary() not in (None, old)
+        try:
+            utils.poll_until(elected, sleep_time=1, time_out=timeout)
+        except exception.PollTimeOut:
+            raise exception.TroveError(
+                "The sentinels did not elect another primary than %s within "
+                "%s seconds." % (old, timeout))
+        new = self.sentinel_primary()
+        LOG.info("The sentinels elected %s.", new)
+        return new
+
+    def sentinel_leave(self):
+        """Never to be elected: the member is about to be removed."""
+        self.adm.connection.config_set('replica-priority', 0)
+
+    def sentinel_set_quorum(self, quorum):
+        self._with_sentinel(
+            lambda c: c.sentinel_set(MASTER_NAME, 'quorum', quorum))
+
+    def sentinel_reset(self, members, timeout=120):
+        """Forget the members the sentinel knew, and learn those there are
+        again: done once members are removed, one member at a time.
+        """
+        self._with_sentinel(lambda c: c.sentinel_reset(MASTER_NAME))
+
+        def relearnt():
+            master = self.sentinel_state()['master']
+            return (int(master.get('num-other-sentinels', 0)) ==
+                    members - 1 and
+                    int(master.get('num-slaves', 0)) == members - 1)
+        try:
+            utils.poll_until(relearnt, sleep_time=2, time_out=timeout)
+        except exception.PollTimeOut:
+            raise exception.TroveError(
+                "The sentinel did not learn the %s members again within "
+                "%s seconds." % (members, timeout))

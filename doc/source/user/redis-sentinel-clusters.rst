@@ -54,7 +54,22 @@ load balancer, and the name the sentinels know the primary by
 now, ``master`` or ``replica``. Root (``openstack database root enable``)
 is enabled on every member.
 
-Not yet
-~~~~~~~
+Growing, shrinking, restarting and upgrading
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-A cluster of the sentinel topology cannot be grown or shrunk yet.
+``openstack database cluster grow`` adds members as replicas of the
+primary there is, each with its sentinel; the sentinels then agree by a
+majority of them all, and root, if it is enabled, is enabled on the new
+members with the same password. A member that cannot join is failed
+(``GROWING_ERROR``) and the cluster is left as it was.
+
+``openstack database cluster shrink`` removes members, keeping at least
+three. The members that go are never elected again; if the primary is
+one of them, the sentinels elect another first (writes stop for a few
+seconds, as for any failover). The sentinels that stay then agree by a
+majority of them, and learn the members again.
+
+``openstack database cluster restart`` and ``upgrade`` take the members
+one after another, the replicas first; the primary last, and only once
+the sentinels elected another, so that writes stop once, for a
+failover, and not for the primary's restart.

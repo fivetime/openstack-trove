@@ -23,11 +23,15 @@ name its sentinels know the primary by.
 """
 
 from trove.cluster.views import ClusterView
+from trove.common import cfg
 from trove.common import exception
 from trove.common.i18n import _
 from trove.common.strategies.cluster.experimental.common import (
     api as common_api)
 from trove.extensions.mgmt.clusters.views import MgmtClusterView
+from trove.instance.models import DBInstance
+
+CONF = cfg.CONF
 
 TOPOLOGY = 'sentinel'
 MODE_KEY = 'replication_mode'
@@ -44,15 +48,19 @@ class RedisSentinelCluster(common_api.HomogeneousCluster):
     DEFAULT_MODE = SYNC
     KEPT_PROPERTIES = (MODE_KEY,)
 
-    def grow(self, instances, image_id=None):
-        raise exception.BadRequest(_(
-            "A Redis cluster of the sentinel topology cannot be grown "
-            "yet."))
-
     def shrink(self, instances):
-        raise exception.BadRequest(_(
-            "A Redis cluster of the sentinel topology cannot be shrunk "
-            "yet."))
+        """Keep a majority of sentinels that can agree: at least
+        ``min_cluster_member_count`` members stay.
+        """
+        members = DBInstance.find_all(cluster_id=self.db_info.id,
+                                      deleted=False).count()
+        minimum = CONF.get(self.ds_version.manager).min_cluster_member_count
+        if members - len(instances) < minimum:
+            raise exception.BadRequest(_(
+                "A Redis cluster of the sentinel topology keeps at least "
+                "%(minimum)s members; %(left)s would be left.") % {
+                    'minimum': minimum, 'left': members - len(instances)})
+        return super(RedisSentinelCluster, self).shrink(instances)
 
 
 class SentinelViewMixin(common_api.MemberRolesMixin):
