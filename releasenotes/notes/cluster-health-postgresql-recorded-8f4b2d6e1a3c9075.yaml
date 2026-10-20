@@ -1,0 +1,6 @@
+---
+fixes:
+  - |
+    The health of PostgreSQL clusters is recorded. The PostgreSQL recovery
+    has looks of its own, which never recorded what their views said, so
+    every PostgreSQL cluster showed ``UNKNOWN``.

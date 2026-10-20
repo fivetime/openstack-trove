@@ -208,6 +208,7 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
             return
         self.first_seen.setdefault(cluster_id, time.monotonic())
         views = self._views(context, members)
+        self._record_health(cluster_id, members, views)
         top = topology.Topology(members, views)
         if not top.reachable:
             LOG.warning("Cluster %s: no member answers; nothing is decided "
@@ -605,6 +606,7 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
         members = self._members(context, cluster_id)
         self._current_members = members
         views = self._views(context, members)
+        self._record_health(cluster_id, members, views)
         top = topology.Topology(members, views)
         leader, ambiguous = top.leader()
         if leader is not None and not ambiguous:

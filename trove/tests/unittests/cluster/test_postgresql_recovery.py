@@ -439,6 +439,25 @@ class HealthyRecoveryTest(RecoveryTestBase):
         self.assertEqual({}, self.recovery.waiting_since)
         self.assertFalse(self.recovery.still_watching('c1'))
 
+    def test_every_look_records_the_health(self):
+        # The recovery's own look, and its look while it recovers: both
+        # record what the views say (none did before 2026-10-20, and the
+        # clusters stayed UNKNOWN).
+        recorded = mock.patch.object(
+            common_recovery.health, 'from_views',
+            return_value={'status': 'DEGRADED'}).start()
+        self._healthy()
+        self.answers['i3'] = None
+        self._check_at(0)
+        cluster_id, members, views, _out, _serving = recorded.call_args[0]
+        self.assertEqual('c1', cluster_id)
+        self.assertEqual(['i1', 'i2', 'i3'], [m.id for m in members])
+        self.assertIsNone(dict((m.id, a) for m, a in views)['i3'])
+        self.assertTrue(self.recovery.still_watching('c1'))
+        self.db_cluster.task_status = ClusterTasks.RECOVERING_CLUSTER
+        self._check_at(10)
+        self.assertEqual(2, recorded.call_count)
+
     def test_the_lease_when_the_primary_asks(self):
         # A primary with standbys asks (its request crossed a standby
         # coming back): granted all the same.
