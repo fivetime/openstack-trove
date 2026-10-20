@@ -89,6 +89,11 @@ class ClusterModeMixin(object):
         mode = (extended_properties or {}).get(cls.MODE_KEY)
         if cls.MODE_KEY and mode:
             config[cls.MODE_KEY] = mode
+        # The member prepares itself for the topology of its cluster, when
+        # its datastore has more than one (common.topology).
+        shape = (extended_properties or {}).get(topology.TOPOLOGY)
+        if shape:
+            config[topology.TOPOLOGY] = shape
         return config
 
     @classmethod

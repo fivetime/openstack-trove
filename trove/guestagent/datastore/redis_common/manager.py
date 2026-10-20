@@ -123,7 +123,11 @@ class RedisManager(cluster_member.ClusterWatchMixin, manager.Manager):
 
         self.app.enable_aclfile()
 
-        if cluster_config:
+        # A member of a Redis Cluster runs in cluster mode; one of the
+        # sentinel topology is a plain server the task manager makes a
+        # primary or a replica.
+        if cluster_config and cluster_config.get(
+                'topology', 'cluster') == 'cluster':
             self.app.enable_cluster()
 
         if snapshot:

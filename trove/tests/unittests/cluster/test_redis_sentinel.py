@@ -84,8 +84,13 @@ class SentinelApiTest(trove_testtools.TestCase):
                                   'replication_mode': 'sync'}),
              ('create_cluster', 'c1')], self.db_info.calls)
         member_config = sentinel_api.RedisSentinelCluster._member_config(
-            self.db_info, {'replication_mode': 'async'})
+            self.db_info, {'replication_mode': 'async',
+                           'topology': 'sentinel'})
         self.assertEqual('async', member_config['replication_mode'])
+        # The member is not to run in cluster mode.
+        self.assertEqual('sentinel', member_config['topology'])
+        self.assertEqual(
+            'sentinel', self.created.call_args[0][5]['topology'])
 
     def test_async_mode_and_a_mode_that_is_none(self):
         self._create({'topology': 'sentinel', 'replication_mode': 'async'})

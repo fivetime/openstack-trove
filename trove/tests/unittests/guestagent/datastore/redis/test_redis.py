@@ -899,3 +899,33 @@ class TestRedisSentinelManager(trove_testtools.TestCase):
                 self.assertTrue(any(port in ports
                                     for ports in conf.cluster_tcp_ports),
                                 '%s %s' % (ds, port))
+
+
+class TestRedisPrepareTopology(trove_testtools.TestCase):
+    """A member of a Redis Cluster runs in cluster mode; one of the
+    sentinel topology does not (REPLICAOF is refused in cluster mode: the
+    first sentinel cluster on 2026-10-20 failed so).
+    """
+
+    def _prepare(self, cluster_config):
+        mgr = common_manager.RedisManager.__new__(common_manager.RedisManager)
+        mgr.app = mock.Mock()
+        mgr.app.ACL_FILE = '/var/lib/valkey/conf.d/users.acl'
+        mgr.update_overrides = mock.Mock()
+        with mock.patch.object(common_manager, 'operating_system') as os_:
+            os_.exists.return_value = True
+            mgr.do_prepare(None, None, None, 512, None, None, None, None,
+                           'conf', None, None, cluster_config, None)
+        return mgr.app
+
+    def test_cluster_mode_for_a_redis_cluster_only(self):
+        for cluster_config, enabled in (
+                (None, False),
+                ({'id': 'c1', 'instance_type': 'member'}, True),
+                ({'id': 'c1', 'topology': 'cluster'}, True),
+                ({'id': 'c1', 'topology': 'sentinel'}, False)):
+            app = self._prepare(cluster_config)
+            self.assertEqual(enabled, app.enable_cluster.called,
+                             cluster_config)
+            app.start_db.assert_called_once_with(ds_version=None,
+                                                 memory_mb=512)
