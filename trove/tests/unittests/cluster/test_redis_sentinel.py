@@ -10,6 +10,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+import inspect
 import json
 from unittest import mock
 
@@ -21,11 +22,15 @@ from trove.common.strategies.cluster.experimental.common import (
 from trove.common.strategies.cluster.experimental.redis import (
     api as redis_api)
 from trove.common.strategies.cluster.experimental.redis import (
+    guestagent as redis_guestagent)
+from trove.common.strategies.cluster.experimental.redis import (
     sentinel_api)
 from trove.common.strategies.cluster.experimental.redis import (
     sentinel_taskmanager)
 from trove.common.strategies.cluster.experimental.redis import (
     taskmanager as redis_taskmanager)
+from trove.guestagent.datastore.redis_common import (
+    sentinel as sentinel_guest)
 from trove.instance import models as instance_models
 from trove.tests.unittests import trove_testtools
 
@@ -418,3 +423,23 @@ class SentinelAfterTheBuildTest(trove_testtools.TestCase):
                          self.tasks.rolling_upgrade_cluster.call_args[0])
         self.assertIn('before_member',
                       self.tasks.rolling_upgrade_cluster.call_args[1])
+
+
+class SentinelHandOverTimeoutTest(trove_testtools.TestCase):
+
+    def test_the_task_manager_waits_longer_than_the_guest(self):
+        # The guest's own bounds, as its method has them: in sync, catch
+        # up, promotion, and the sentinels telling the new primary (which
+        # waits as long as the promotion).
+        params = inspect.signature(
+            sentinel_guest.SentinelAppMixin.sentinel_failover).parameters
+        longest = (params['in_sync'].default + params['catch_up'].default +
+                   2 * params['timeout'].default)
+        self.assertGreater(redis_guestagent.HAND_OVER_TIMEOUT, longest)
+        client = redis_guestagent.RedisGuestAgentAPI.__new__(
+            redis_guestagent.RedisGuestAgentAPI)
+        client.agent_high_timeout = 180
+        client._call = mock.Mock()
+        client.sentinel_failover()
+        self.assertEqual(redis_guestagent.HAND_OVER_TIMEOUT,
+                         client._call.call_args[0][1])

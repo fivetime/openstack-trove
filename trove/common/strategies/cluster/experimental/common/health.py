@@ -56,6 +56,14 @@ CONF = cfg.CONF
 EVENT_TYPE = 'trove.cluster.health'
 
 
+# The tasks of a member that is up as it should be: none, or a
+# configuration that waits for a restart (the member runs on, as it was).
+# A member with another task is being built, resized, restarted...: its
+# cluster is left alone until the task ends.
+SETTLED_TASKS = (inst_tasks.InstanceTasks.NONE,
+                 inst_tasks.InstanceTasks.RESTART_REQUIRED)
+
+
 def _detail(health):
     return json.dumps({'out': health.get('out') or [],
                        'reason': health.get('reason'),
@@ -183,8 +191,7 @@ class HealthWatch(object):
         members = DBInstance.find_all(cluster_id=cluster_id,
                                       deleted=False).all()
         if not members or any(
-                m.task_status != inst_tasks.InstanceTasks.NONE
-                for m in members):
+                m.task_status not in SETTLED_TASKS for m in members):
             self.unhealthy.discard(cluster_id)
             return
         stale = stale_members(m.id for m in members)

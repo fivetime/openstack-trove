@@ -48,7 +48,6 @@ from trove.common import cluster_health
 from trove.common.strategies.cluster.experimental.common import health
 from trove.instance.models import DBInstance
 from trove.instance.models import InstanceServiceStatus
-from trove.instance import tasks as inst_tasks
 
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
@@ -118,10 +117,11 @@ class ClusterRecovery(object):
     @staticmethod
     def _member_busy(member):
         """A member with a task of its own (being built, resized, restarted,
-        upgraded...) is left alone, and so is its cluster.
+        upgraded...) is left alone, and so is its cluster; not one whose
+        configuration waits for a restart, which runs on as it was.
         """
         try:
-            return member.task_status != inst_tasks.InstanceTasks.NONE
+            return member.task_status not in health.SETTLED_TASKS
         except Exception:
             return False
 

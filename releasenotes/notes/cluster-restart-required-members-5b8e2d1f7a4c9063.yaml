@@ -1,0 +1,23 @@
+---
+fixes:
+  - |
+    A cluster with a member whose configuration waits for a restart
+    (``RESTART_REQUIRED``, after a configuration group with a parameter
+    that needs one is attached or detached) was left alone by the task
+    manager until the restart: neither its health was looked at nor was
+    it recovered after an outage, and its members showed no role. Such a
+    member runs on as it was; its cluster is now watched and recovered as
+    any other, and the member tells its role.
+  - |
+    A member of a Redis, Valkey or KeyDB cluster of the sentinel topology
+    ran the image's latest tag instead of its datastore version (the
+    container is made again for the sentinel to run beside the server);
+    a KeyDB cluster could not be built at all where the image has no
+    latest tag. The container is made again of the image it was made of.
+  - |
+    A primary of a sentinel cluster hands over only once every replica is
+    in sync: a replica still in a full resynchronization (one just
+    restarted by a rolling restart) could be picked by the sentinels, its
+    resynchronization then undid the promotion, and writes were held for
+    the length of the attempt. The sentinels have 30 seconds to promote a
+    replica; otherwise writes go on with the primary as it was.

@@ -21,6 +21,10 @@ from trove.guestagent import api as guest_api
 CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
 
+# How long the task manager waits for a primary of a sentinel cluster to
+# hand over (redis_common.sentinel.SentinelAppMixin.sentinel_failover).
+HAND_OVER_TIMEOUT = 720
+
 
 class RedisGuestAgentStrategy(base.BaseGuestAgentStrategy):
 
@@ -135,8 +139,15 @@ class RedisGuestAgentAPI(guest_api.API):
                           version=guest_api.API.API_BASE_VERSION)
 
     def sentinel_failover(self):
-        """Have the sentinels elect another primary; its address."""
-        return self._call("sentinel_failover", self.agent_high_timeout,
+        """The primary hands over to a replica the sentinels promote; the
+        new primary's address. Longer than the guest waits at most (600
+        seconds for the replicas to be in sync, 15 to catch up, 30 for the
+        promotion, 30 for the sentinels to tell it): a call given up while
+        the guest still waits would hand over after the task manager has
+        failed the action.
+        """
+        return self._call("sentinel_failover",
+                          max(self.agent_high_timeout, HAND_OVER_TIMEOUT),
                           version=guest_api.API.API_BASE_VERSION)
 
     def sentinel_leave(self):

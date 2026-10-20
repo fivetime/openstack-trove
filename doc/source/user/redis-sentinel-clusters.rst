@@ -77,6 +77,10 @@ The primary hands over without losing a write it acknowledged: it holds
 writes (``CLIENT PAUSE WRITE``) until its replicas have all it wrote, the
 sentinels promote one, and it follows that one; the writes it held then
 fail with ``READONLY`` and the client sends them again to the new
-primary. Writes wait for 2 to 4 seconds. A bare ``SENTINEL FAILOVER``
+primary. Writes wait for 2 to 4 seconds. It waits first, with writes going
+on, until every replica is in sync (a replica restarted a moment ago
+resynchronizes in full); a hand-over that cannot happen (no replica in
+sync within 10 minutes, none promoted within 30 seconds) leaves the
+primary as it was and fails the action. A bare ``SENTINEL FAILOVER``
 loses the writes the old primary takes between the promotion and its
 following the new one.

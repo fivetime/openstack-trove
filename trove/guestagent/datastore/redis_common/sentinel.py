@@ -354,16 +354,34 @@ class SentinelAppMixin(object):
         finally:
             client.close()
 
-    def _replicas_caught_up(self):
-        """Whether every replica has all the primary wrote."""
+    def _replicas(self):
+        """The primary's replication offset and its replicas, as INFO
+        REPLICATION gives them.
+        """
         info = self.adm.connection.info('replication')
-        offset = int(info.get('master_repl_offset', 0))
         replicas = [value for key, value in info.items()
                     if key.startswith('slave') and isinstance(value, dict)]
-        return bool(replicas) and all(
-            int(replica.get('offset', -1)) >= offset for replica in replicas)
+        return int(info.get('master_repl_offset', 0)), replicas
 
-    def sentinel_failover(self, timeout=90, catch_up=15):
+    def _replicas_online(self):
+        """Whether every replica is in sync (``online``): not one in a
+        full resynchronization, as a replica started again is.
+        """
+        _offset, replicas = self._replicas()
+        return bool(replicas) and all(
+            replica.get('state') == 'online' for replica in replicas)
+
+    def _replicas_caught_up(self):
+        """Whether every replica is in sync and has all the primary
+        wrote.
+        """
+        offset, replicas = self._replicas()
+        return bool(replicas) and all(
+            replica.get('state') == 'online' and
+            int(replica.get('offset', -1)) >= offset
+            for replica in replicas)
+
+    def sentinel_failover(self, timeout=30, catch_up=15, in_sync=600):
         """On the primary, before it is restarted, upgraded or removed:
         hand over to a replica without losing a write it acknowledged.
         Returns the new primary's address.
@@ -377,6 +395,15 @@ class SentinelAppMixin(object):
         READONLY and the client tries again on the new primary. The member
         follows by itself: the sentinels tell it over a link the pause may
         hold up (their PUBLISH waits as a write would).
+
+        Before the pause, every replica must be in sync (``in_sync``
+        seconds, writes going on meanwhile): the sentinels may pick a
+        replica still in a full resynchronization (one just started again
+        in a rolling restart), whose resynchronization then makes it a
+        replica of this member again, and the promotion never comes (Redis
+        8.10, 2026-10-20). With writes paused, the sentinels take this
+        member for down after a few seconds: ``timeout`` for the promotion
+        is short, and on any failure writes go on here as before.
         """
         conn = self.adm.connection
         old = self.sentinel_primary()
@@ -384,6 +411,13 @@ class SentinelAppMixin(object):
             raise exception.TroveError(
                 "%s is not the primary (%s is): nothing to hand over." % (
                     self.get_node_ip()[0], old))
+        try:
+            utils.poll_until(self._replicas_online, sleep_time=1,
+                             time_out=in_sync)
+        except exception.PollTimeOut:
+            raise exception.TroveError(
+                "The replicas were not all in sync within %s seconds: no "
+                "failover." % in_sync)
         LOG.info("Handing over: writes paused until another primary is "
                  "elected.")
         # Lifted below; the time is a bound should the agent stop here.

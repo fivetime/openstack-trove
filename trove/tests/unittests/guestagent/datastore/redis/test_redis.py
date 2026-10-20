@@ -863,9 +863,10 @@ class TestRedisSentinelMember(trove_testtools.TestCase):
                           'sentinel_admin_password': 'tsen', 'mode': 'sync'},
                          self.app.joining_config())
 
-    def _hand_over(self, promoted, caught_up=True):
-        """The primary 172.31.250.195 hands over, its replicas'
-        offsets as INFO REPLICATION gives them.
+    def _hand_over(self, promoted, caught_up=True, state='online'):
+        """The primary 172.31.250.195 hands over, its replicas' states
+        and offsets as INFO REPLICATION gives them (valkey-py parses each
+        slaveN line into a dict).
         """
         events = []
         conn = self.app.adm.connection
@@ -876,9 +877,10 @@ class TestRedisSentinelMember(trove_testtools.TestCase):
             lambda ip, port: events.append(('replicaof', ip, port)))
         conn.info.return_value = {
             'role': 'master', 'master_repl_offset': 100,
-            'slave0': {'ip': '172.31.250.194', 'offset': 100},
-            'slave1': {'ip': '172.31.250.196',
-                       'offset': 100 if caught_up else 90}}
+            'slave0': {'ip': '172.31.250.194', 'port': 6379,
+                       'state': 'online', 'offset': 100, 'lag': 0},
+            'slave1': {'ip': '172.31.250.196', 'port': 6379, 'state': state,
+                       'offset': 100 if caught_up else 90, 'lag': 0}}
         client = self._sentinel_client()
         client.sentinel_failover.side_effect = (
             lambda name: events.append(('failover', name)))
@@ -897,9 +899,10 @@ class TestRedisSentinelMember(trove_testtools.TestCase):
                 if value:
                     return value
             raise sentinel.exception.PollTimeOut()
-        with mock.patch.object(sentinel.utils, 'poll_until',
-                               side_effect=poll):
-            return events, self.app.sentinel_failover
+        # For the whole test: the caller calls sentinel_failover after.
+        mock.patch.object(sentinel.utils, 'poll_until',
+                          side_effect=poll).start()
+        return events, self.app.sentinel_failover
 
     def test_the_primary_hands_over_without_losing_a_write(self):
         events, failover = self._hand_over('master')
@@ -915,6 +918,15 @@ class TestRedisSentinelMember(trove_testtools.TestCase):
         self.assertRaisesRegex(sentinel.exception.TroveError, 'catch up',
                                failover)
         self.assertEqual([('pause', False), 'unpause'], events)
+
+    def test_no_pause_while_a_replica_resynchronizes(self):
+        # A replica just started again (a rolling restart): in a full
+        # resynchronization, the sentinels may pick it and its
+        # resynchronization undoes the promotion (Redis 8.10, 2026-10-20).
+        events, failover = self._hand_over('master', state='send_bulk')
+        self.assertRaisesRegex(sentinel.exception.TroveError, 'in sync',
+                               failover)
+        self.assertEqual([], events)
 
     def test_writes_go_on_when_no_replica_is_promoted(self):
         events, failover = self._hand_over('slave')

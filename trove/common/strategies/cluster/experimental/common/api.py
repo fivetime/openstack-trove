@@ -39,8 +39,9 @@ from trove.taskmanager import api as task_api
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
 
-# Members in these are asked for their role; the others cannot answer.
-ANSWERING_STATUSES = ('ACTIVE', 'HEALTHY')
+# Members in these are asked for their role; the others cannot answer:
+# up, with or without a configuration that waits for a restart.
+ANSWERING_STATUSES = ('ACTIVE', 'HEALTHY', 'RESTART_REQUIRED')
 
 
 def validate_cluster_instances(context, instances, datastore,

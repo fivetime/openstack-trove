@@ -406,3 +406,20 @@ class RedisClusterViewTest(trove_testtools.TestCase):
                 cluster, load_servers=True).build_instances()
             self.assertEqual(['replica', 'master', 'unknown', 'unknown'],
                              [i['role'] for i in instances])
+
+    @patch.object(redis_api.ClusterView, '_build_instances')
+    def test_a_member_waiting_for_a_restart_tells_its_role(self, build):
+        # A configuration group that needs a restart: the member runs on
+        # and answers; one being rebuilt does not.
+        cluster = Mock()
+        cluster.datastore_version.manager = 'redis'
+        cluster.instances = [Mock(id='i1', status='RESTART_REQUIRED'),
+                             Mock(id='i2', status='REBUILD')]
+        cluster.get_guest = lambda instance: Mock(**{
+            'get_member_role.return_value': {'state': 'ok',
+                                             'role': 'master'}})
+        build.return_value = ([{'id': 'i1'}, {'id': 'i2'}], [])
+        instances, _ips = redis_api.RedisClusterView(
+            cluster, load_servers=True).build_instances()
+        self.assertEqual(['master', 'unknown'],
+                         [i['role'] for i in instances])

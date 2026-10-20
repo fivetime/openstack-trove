@@ -22,6 +22,8 @@ from trove.cluster.tasks import ClusterTasks
 from trove.cluster import views as cluster_views
 from trove.common import cluster_health as ch
 from trove.common import exception
+from trove.common.strategies.cluster.experimental.common import (
+    recovery as common_recovery)
 from trove.common.strategies.cluster.experimental.common import health
 from trove.common.strategies.cluster.experimental.galera_common import (
     recovery as galera_recovery)
@@ -236,6 +238,36 @@ class TestHealthWatch(HealthTestBase):
         self._watch({}).check_now(None, cluster, 'test')
         self.assertRaises(exception.NotFound, DBClusterHealth.find_by,
                           id=cluster.id)
+
+    def _member_task(self, member, task):
+        with DBInstance.query() as query:
+            query.filter_by(id=member.id).update({'task_id': task.code})
+
+    def test_a_member_waiting_for_a_restart_is_looked_at(self):
+        # A configuration group that needs a restart leaves the members
+        # RESTART_REQUIRED until the tenant restarts them, running on as
+        # they were: their cluster's health is still looked at.
+        cluster, members = self._cluster()
+        for member in members:
+            self._member_task(member, InstanceTasks.RESTART_REQUIRED)
+        seen = ch.view(ch.DEGRADED, ['10.0.0.3'], 'failing: 10.0.0.3')
+        self._watch({'c-member-1': seen, 'c-member-2': seen,
+                     'c-member-3': RuntimeError('timed out')}
+                    ).check_now(None, cluster, 'test')
+        self.assertEqual(ch.DEGRADED, self._recorded(cluster.id)[0])
+        # A member being restarted is another matter: its cluster is left.
+        cluster, members = self._cluster()
+        self._member_task(members[0], InstanceTasks.REBOOTING)
+        self._watch({}).check_now(None, cluster, 'test')
+        self.assertRaises(exception.NotFound, DBClusterHealth.find_by,
+                          id=cluster.id)
+
+    def test_a_member_waiting_for_a_restart_is_not_busy(self):
+        busy = common_recovery.ClusterRecovery._member_busy
+        self.assertFalse(busy(mock.Mock(task_status=InstanceTasks.NONE)))
+        self.assertFalse(busy(
+            mock.Mock(task_status=InstanceTasks.RESTART_REQUIRED)))
+        self.assertTrue(busy(mock.Mock(task_status=InstanceTasks.REBOOTING)))
 
     def test_the_hub_gives_the_clusters_that_heal_themselves_a_watch(self):
         hub = recovery.RecoveryHub(coordinator=mock.Mock())
