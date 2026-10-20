@@ -46,6 +46,12 @@ The probe runs every few seconds, apart from the guest agent's periodic
 tasks, which run every report interval: a failover has to show on the
 ready port within seconds.
 
+The probe is three parts, each a datastore takes as far as it needs:
+``ClusterWatch`` watches and tells, ``ClusterEntry`` adds the ready port
+(and the read port) for a cluster behind a load balancer whose datastore
+elects its primary by itself, ``ClusterProbe`` adds bringing the member
+back.
+
 A datastore whose clusters heal themselves (Redis, MongoDB, Cassandra,
 Vertica) runs only the part that watches and tells, ``ClusterWatch``: its
 app gives ``is_cluster_member()``, ``member_view()`` and
@@ -474,23 +480,20 @@ class ClusterWatch(object):
                 'writable': self.writable()}
 
 
-class ClusterProbe(ClusterWatch):
-    """Watches the member's state in the cluster, keeps the ready port
-    open on a member that takes writes, and brings a member that is out
-    of the cluster back.
+class ClusterEntry(ClusterWatch):
+    """Watches the member's state in the cluster and keeps the ready port
+    open on a member that takes writes (and the read port on one that
+    serves reads), for a datastore whose clients reach the cluster
+    through a load balancer: the cluster's one address. Bringing the
+    member back is the datastore's own business here (it elects a primary
+    by itself); ``ClusterProbe`` adds it for the datastores whose members
+    the probe brings back.
     """
 
     def __init__(self, app, docker_client, conf=None):
         conf = conf or CONF.get(CONF.datastore_manager or 'mysql')
-        super(ClusterProbe, self).__init__(app, conf)
+        super(ClusterEntry, self).__init__(app, conf)
         self.reconcile_every = conf.cluster_ready_port_reconcile
-        self.recovery_grace = conf.cluster_recovery_grace
-        self.recovery_interval = conf.cluster_recovery_interval
-        self.peer_timeout = conf.cluster_peer_timeout
-        self.auto_bootstrap = conf.cluster_auto_bootstrap
-        self.needs_all = conf.cluster_bootstrap_needs_all_members
-        self.jitter = conf.cluster_bootstrap_jitter
-        self.last_recovery = 0
         self.port = readyport.ReadyPort(
             docker_client, conf.cluster_ready_port, app.DATABASE_PORT)
         # A second port, open on a member that serves reads (a standby of
@@ -526,6 +529,32 @@ class ClusterProbe(ClusterWatch):
                                   port.port)
         self.ticks += 1
 
+    def snapshot(self):
+        snapshot = super(ClusterEntry, self).snapshot()
+        snapshot['ready_port'] = self.port.applied
+        if self.read_port is not None:
+            snapshot['readable'] = self.readable()
+            snapshot['read_port'] = self.read_port.applied
+        return snapshot
+
+
+class ClusterProbe(ClusterEntry):
+    """Watches the member's state in the cluster, keeps the ready port
+    open on a member that takes writes, and brings a member that is out
+    of the cluster back.
+    """
+
+    def __init__(self, app, docker_client, conf=None):
+        conf = conf or CONF.get(CONF.datastore_manager or 'mysql')
+        super(ClusterProbe, self).__init__(app, docker_client, conf)
+        self.recovery_grace = conf.cluster_recovery_grace
+        self.recovery_interval = conf.cluster_recovery_interval
+        self.peer_timeout = conf.cluster_peer_timeout
+        self.auto_bootstrap = conf.cluster_auto_bootstrap
+        self.needs_all = conf.cluster_bootstrap_needs_all_members
+        self.jitter = conf.cluster_bootstrap_jitter
+        self.last_recovery = 0
+
     def _after(self, view):
         now = time.monotonic()
         if (self.complete and not self.leaving and view.down and
@@ -533,14 +562,6 @@ class ClusterProbe(ClusterWatch):
                 now - self.last_recovery >= self.recovery_interval):
             self.last_recovery = now
             self.recover(view.state)
-
-    def snapshot(self):
-        snapshot = super(ClusterProbe, self).snapshot()
-        snapshot['ready_port'] = self.port.applied
-        if self.read_port is not None:
-            snapshot['readable'] = self.readable()
-            snapshot['read_port'] = self.read_port.applied
-        return snapshot
 
     def _scan_peers(self):
         user, password = self.app._recovery_credentials()

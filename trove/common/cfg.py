@@ -875,14 +875,10 @@ pxc_opts = _build_mysql_family_datastore_opts(
 # member that fell out of the cluster back. Shared by the clusters built on
 # the MySQL guest agent; a datastore names the options its earlier releases
 # used with a prefix, so that a configuration with those still works.
-def _with_cluster_probe_and_entry(opts, deprecated_prefix=None,
-                                  needs_all=False, ready_port=3307,
-                                  read_port=0, load_balancer_port=3306,
-                                  read_load_balancer_port=0,
-                                  recovery_grace=60):
-    """The options of a cluster whose members run the cluster probe and
-    whose endpoint is a load balancer: a datastore gives its ports and
-    the grace its recovery waits.
+def _cluster_option(deprecated_prefix):
+    """How a cluster option of a datastore is made: under its name, and
+    under the name it had (``<prefix><name without cluster_>``) when the
+    datastore had another.
     """
     def deprecated(name):
         if not deprecated_prefix:
@@ -891,7 +887,19 @@ def _with_cluster_probe_and_entry(opts, deprecated_prefix=None,
 
     def opt(cls, name, **kwargs):
         return cls(name, deprecated_name=deprecated(name), **kwargs)
+    return opt
 
+
+def _with_cluster_entry(opts, deprecated_prefix=None, ready_port=3307,
+                        read_port=0, load_balancer_port=3306,
+                        read_load_balancer_port=0):
+    """The options of a cluster whose endpoint is a load balancer in front
+    of the members that take writes (and of those that serve reads):
+    the guest agent of each member watches it and opens the member's
+    ready port while it does (``cluster_probe.ClusterEntry``); a
+    datastore gives its ports.
+    """
+    opt = _cluster_option(deprecated_prefix)
     cluster = [
         opt(cfg.IntOpt, 'cluster_probe_interval', default=3,
             help='Seconds between two checks of where the member stands '
@@ -913,6 +921,54 @@ def _with_cluster_probe_and_entry(opts, deprecated_prefix=None,
         opt(cfg.IntOpt, 'cluster_ready_port_reconcile', default=20,
             help='Checks of the member between two unconditional checks '
                  'that the ready port is as it should be.'),
+        cfg.BoolOpt('cluster_load_balancer', default=True,
+                    help='Put a load balancer in front of the members of a '
+                         'cluster, on their subnet: the cluster\'s endpoint, '
+                         'sending to the members that take writes.'),
+        cfg.PortOpt('cluster_load_balancer_port', default=load_balancer_port,
+                    help='Port the load balancer of a cluster listens on.'),
+        cfg.IntOpt('cluster_read_load_balancer_port',
+                   default=read_load_balancer_port, min=0, max=65535,
+                   help='Port the load balancer of a cluster listens on for '
+                        'reads, sending to the members that serve them. '
+                        '0: no read endpoint.'),
+        cfg.BoolOpt('cluster_events', default=True,
+                    help='Tell the control plane, through the conductor, of '
+                         'every change of the member\'s cluster state, and '
+                         'again every cluster_event_interval seconds while '
+                         'the member is not where it should be; a '
+                         'PostgreSQL primary without a standby asks for its '
+                         'write lease the same way. Off: the task manager '
+                         'only finds out by its scan.'),
+        cfg.IntOpt('cluster_event_interval', default=60, min=1,
+                   help='Seconds between two reports of a member that stays '
+                        'in an abnormal state, so that a lost report heals '
+                        'itself.'),
+        cfg.IntOpt('cluster_event_min_interval', default=5, min=0,
+                   help='At most one report per this many seconds: a member '
+                        'whose state flaps reports its latest state once '
+                        'the gap has passed.'),
+    ]
+    names = {opt.name for opt in cluster}
+    return [opt for opt in opts if opt.name not in names] + cluster
+
+
+def _with_cluster_probe_and_entry(opts, deprecated_prefix=None,
+                                  needs_all=False, ready_port=3307,
+                                  read_port=0, load_balancer_port=3306,
+                                  read_load_balancer_port=0,
+                                  recovery_grace=60):
+    """The options of a cluster whose members run the cluster probe and
+    whose endpoint is a load balancer: the entry's, and those of bringing
+    a member back; a datastore gives its ports and the grace its recovery
+    waits.
+    """
+    opts = _with_cluster_entry(
+        opts, deprecated_prefix=deprecated_prefix, ready_port=ready_port,
+        read_port=read_port, load_balancer_port=load_balancer_port,
+        read_load_balancer_port=read_load_balancer_port)
+    opt = _cluster_option(deprecated_prefix)
+    cluster = [
         opt(cfg.IntOpt, 'cluster_recovery_grace', default=recovery_grace,
             help='Seconds a member of a complete cluster stays out of the '
                  'cluster before the guest agent tries to bring it back.'),
@@ -942,17 +998,6 @@ def _with_cluster_probe_and_entry(opts, deprecated_prefix=None,
             help='Seconds the member told to form the cluster again has '
                  'to bring a primary component up before the task manager '
                  'looks at the cluster anew.'),
-        cfg.BoolOpt('cluster_load_balancer', default=True,
-                    help='Put a load balancer in front of the members of a '
-                         'cluster, on their subnet: the cluster\'s endpoint, '
-                         'sending to the members that take writes.'),
-        cfg.PortOpt('cluster_load_balancer_port', default=load_balancer_port,
-                    help='Port the load balancer of a cluster listens on.'),
-        cfg.IntOpt('cluster_read_load_balancer_port',
-                   default=read_load_balancer_port, min=0, max=65535,
-                   help='Port the load balancer of a cluster listens on for '
-                        'reads, sending to the members that serve them. '
-                        '0: no read endpoint.'),
         cfg.IntOpt('cluster_fence_grace', default=15,
                    help='Seconds a member that takes writes goes on without '
                         'any member following it before it closes its '
@@ -962,22 +1007,6 @@ def _with_cluster_probe_and_entry(opts, deprecated_prefix=None,
                    help='Seconds after which the task manager fails a '
                         'cluster over to the best member here although not '
                         'every member needed has answered. 0: never.'),
-        cfg.BoolOpt('cluster_events', default=True,
-                    help='Tell the control plane, through the conductor, of '
-                         'every change of the member\'s cluster state, and '
-                         'again every cluster_event_interval seconds while '
-                         'the member is not where it should be; a '
-                         'PostgreSQL primary without a standby asks for its '
-                         'write lease the same way. Off: the task manager '
-                         'only finds out by its scan.'),
-        cfg.IntOpt('cluster_event_interval', default=60, min=1,
-                   help='Seconds between two reports of a member that stays '
-                        'in an abnormal state, so that a lost report heals '
-                        'itself.'),
-        cfg.IntOpt('cluster_event_min_interval', default=5, min=0,
-                   help='At most one report per this many seconds: a member '
-                        'whose state flaps reports its latest state once '
-                        'the gap has passed.'),
     ]
     names = {opt.name for opt in cluster}
     return [opt for opt in opts if opt.name not in names] + cluster

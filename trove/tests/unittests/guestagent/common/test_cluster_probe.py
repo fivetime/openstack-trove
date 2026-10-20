@@ -874,3 +874,41 @@ class TestWatchedManagers(trove_testtools.TestCase):
         manager.app.is_watched_member.return_value = True
         manager.app.cluster_health.side_effect = RuntimeError('no')
         self.assertTrue(manager.get_cluster_health(None)['down'])
+
+
+class TestClusterEntry(ProbeTestBase):
+    """The entry alone: the ready port as the member stands, nothing done
+    to bring the member back (its datastore elects a primary by itself).
+    """
+
+    def setUp(self):
+        super(TestClusterEntry, self).setUp()
+        self.entry = probe.ClusterEntry(self.app, mock.MagicMock(),
+                                        conf=self.conf)
+        self.entry.port = self.probe.port
+        self.entry.enable_complete()
+        mock.patch.object(probe.time, 'sleep').start()
+
+    def _tick_at(self, seconds):
+        with mock.patch.object(probe.time, 'monotonic',
+                               return_value=seconds):
+            self.entry._tick()
+
+    def test_the_port_follows_the_member(self):
+        self._tick_at(0)
+        self.probe.port.ensure.assert_called_with(True, pid=4242)
+        self.app.member_view.return_value = _view('SECONDARY', 'REPLICA')
+        self._tick_at(3)
+        self.probe.port.ensure.assert_called_with(False, pid=4242)
+        self.assertEqual({'state': 'SECONDARY', 'role': 'REPLICA',
+                          'writable': False, 'ready_port': None},
+                         self.entry.snapshot())
+
+    def test_a_member_out_of_the_cluster_is_left_to_its_datastore(self):
+        self.app.member_view.return_value = _view('OFFLINE', None)
+        for seconds in (0, 61, 92, 200):
+            self._tick_at(seconds)
+        self.app._query_peer.assert_not_called()
+        self.app.rejoin_group.assert_not_called()
+        self.app.bootstrap_group.assert_not_called()
+        self.assertFalse(hasattr(self.entry, 'recover'))
