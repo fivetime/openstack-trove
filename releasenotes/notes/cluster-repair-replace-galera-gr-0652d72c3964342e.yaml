@@ -1,0 +1,16 @@
+---
+features:
+  - |
+    The cluster repair replaces a lost member of a Galera cluster (MariaDB,
+    Percona XtraDB Cluster) and of a Group Replication cluster (MySQL,
+    Percona Server) too: the cluster can lose the member when every other
+    member answers, is in the primary component (Galera) or ONLINE in a
+    group that keeps its majority (Group Replication), and sees every
+    member the configuration names but the lost one. The plugins share
+    ``common.replace.PeersHoldItOut``, which a datastore whose members tell
+    the members they see out can use as it is or narrow.
+fixes:
+  - |
+    The shrink of a Galera or Group Replication cluster removes a member
+    whose server is gone: loading it with its server failed ("Instance ...
+    is not ready."), and the shrink removed nothing.

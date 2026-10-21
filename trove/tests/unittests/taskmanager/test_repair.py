@@ -32,6 +32,10 @@ from trove.common.strategies.cluster.experimental.common import (
     health as common_health)
 from trove.common.strategies.cluster.experimental.common import repair
 from trove.common.strategies.cluster.experimental.common import replace
+from trove.common.strategies.cluster.experimental.galera_common import (
+    repair as galera_repair)
+from trove.common.strategies.cluster.experimental.group_replication import (
+    repair as gr_repair)
 from trove.common.strategies.cluster.experimental.redis import (
     repair as redis_repair)
 from trove.common import utils
@@ -757,6 +761,106 @@ class TestAFailedGrow(test_health.HealthTestBase):
             [InstanceTasks.NONE, InstanceTasks.NONE,
              InstanceTasks.BUILDING_ERROR_SERVER],
             [DBInstance.find_by(id=m.id).task_status for m in members])
+
+
+class _PeerViews(test_health.HealthTestBase):
+    """A plugin of PeersHoldItOut asked about the first of three members,
+    with the views the other two tell (as the guests' own tests pin them
+    from captured status).
+    """
+
+    manager = None
+    ips = ()
+
+    def setUp(self):
+        super(_PeerViews, self).setUp()
+        self.guests = {}
+        self.cluster, self.members = self._cluster(3, stale=(0,))
+        common_health.record(self.cluster.id, ch.combine(
+            [(m.name, ch.view(ch.HEALTHY, me=ip))
+             for m, ip in zip(self.members, self.ips)], []))
+        for m in self.members[1:]:
+            self.guests[m.id] = mock.Mock()
+
+    def _tell(self, member, view):
+        self.guests[self.members[member].id].get_cluster_health.\
+            return_value = view
+
+    def _ask(self):
+        plugin = replace.plugin_for(self.manager)
+        plugin.guest_factory = lambda c, i, m: self.guests[i]
+        return plugin.can_replace(mock.Mock(), self.cluster,
+                                  self.members[0], self.members[1:])
+
+
+class TestGaleraReplace(_PeerViews):
+    """Galera's word on a lost member (MariaDB 11.4, wsrep status)."""
+
+    manager = 'mariadb'
+    ips = ('172.31.250.100', '172.31.250.98', '172.31.250.99')
+
+    def test_out_of_the_primary_component_of_both_others(self):
+        self._tell(1, ch.view(ch.DEGRADED, ['172.31.250.100'],
+                              'not in the primary component',
+                              '172.31.250.98'))
+        self._tell(2, ch.view(ch.DEGRADED, ['172.31.250.100'],
+                              'not in the primary component',
+                              '172.31.250.99'))
+        self.assertEqual(
+            (True, 'every other member holds 172.31.250.100 out'),
+            self._ask())
+
+    def test_not_while_another_is_alone_or_out_itself(self):
+        self._tell(1, ch.view(ch.DEGRADED, ['172.31.250.100'],
+                              'not in the primary component',
+                              '172.31.250.98'))
+        # The last one standing: both others out.
+        self._tell(2, ch.view(ch.DEGRADED,
+                              ['172.31.250.100', '172.31.250.98'],
+                              'not in the primary component',
+                              '172.31.250.99'))
+        self.assertFalse(self._ask()[0])
+        # Out of a primary component: it sees itself out.
+        self._tell(2, ch.view(ch.DEGRADED, ['172.31.250.99'],
+                              'out of the primary component',
+                              '172.31.250.99'))
+        self.assertFalse(self._ask()[0])
+        # In with it: not lost.
+        self._tell(2, ch.view(ch.HEALTHY, me='172.31.250.99'))
+        self.assertFalse(self._ask()[0])
+
+
+class TestGroupReplicationReplace(_PeerViews):
+    """Group Replication's word on a lost member (MySQL 8.4)."""
+
+    manager = 'mysql'
+    ips = ('172.31.250.116', '172.31.250.114', '172.31.250.115')
+
+    def test_not_online_for_both_others(self):
+        self._tell(1, ch.view(ch.DEGRADED, ['172.31.250.116'],
+                              'not ONLINE in the group', '172.31.250.114'))
+        self._tell(2, ch.view(ch.DEGRADED, ['172.31.250.116'],
+                              'not ONLINE in the group', '172.31.250.115'))
+        self.assertTrue(self._ask()[0])
+
+    def test_not_while_the_group_lost_its_majority(self):
+        self._tell(1, ch.view(ch.DOWN, ['172.31.250.115', '172.31.250.116'],
+                              'the group has lost the majority of its '
+                              'members', '172.31.250.114'))
+        self._tell(2, ch.view(ch.DEGRADED, ['172.31.250.116'],
+                              'not ONLINE in the group', '172.31.250.115'))
+        self.assertFalse(self._ask()[0])
+
+    def test_the_plugins_are_found_by_their_entry_points(self):
+        replace._plugins.clear()
+        for manager, cls in (
+                ('mariadb', galera_repair.GaleraReplace),
+                ('pxc', galera_repair.GaleraReplace),
+                ('mysql', gr_repair.GroupReplicationReplace),
+                ('percona', gr_repair.GroupReplicationReplace)):
+            plugin = replace.plugin_for(manager)
+            self.assertIsInstance(plugin, cls)
+            self.assertEqual(manager, plugin.manager)
 
 
 def DBInstance_all(cluster_id):

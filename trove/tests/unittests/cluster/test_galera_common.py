@@ -321,14 +321,46 @@ class GaleraCommonTasksTest(trove_testtools.TestCase):
         self.tasks.update_statuses_on_failure.assert_not_called()
         self.tasks.reset_task.assert_called_once()
 
+    @mock.patch.object(galera_taskmanager, 'load_any_instance', create=True)
+    @mock.patch.object(galera_taskmanager.utils, 'poll_until')
+    @mock.patch.object(galera_taskmanager, 'Instance')
+    @mock.patch.object(galera_taskmanager, 'DBInstance')
+    def test_shrink_removes_a_member_whose_server_is_gone(
+            self, db_instance, instance, poll_until, load_any):
+        # The repair's replacement of a member lost for good: its server
+        # is gone, and loading it with its server fails (instance.models
+        # load_instance: "Instance ... is not ready.").
+        db_instance.find_all.return_value.all.return_value = (
+            self._instances('i1', 'i3'))
+
+        def load(ctx, instance_id):
+            if instance_id == 'i2':
+                raise exception.UnprocessableEntity(
+                    "Instance %s is not ready." % instance_id)
+            return mock.Mock(id=instance_id)
+        instance.load.side_effect = load
+        load_any.side_effect = lambda ctx, i: mock.Mock(
+            id=i, server=None if i == 'i2' else mock.Mock())
+        instance.delete.side_effect = lambda inst: self.calls.append(
+            ('delete', inst.id))
+
+        self.tasks.shrink_cluster('ctx', 'c1', ['i2'])
+
+        self.assertIn(('delete', 'i2'), self.calls)
+        self.assertNotIn(('leave_cluster', 'i2'), self.calls)
+        self.tasks.update_statuses_on_failure.assert_not_called()
+        self.tasks.reset_task.assert_called_once()
+
+    @mock.patch.object(galera_taskmanager, 'load_any_instance', create=True)
     @mock.patch.object(galera_taskmanager.utils, 'poll_until')
     @mock.patch.object(galera_taskmanager, 'Instance')
     @mock.patch.object(galera_taskmanager, 'DBInstance')
     def test_shrink_leaves_first_and_updates_the_load_balancer(
-            self, db_instance, instance, poll_until):
+            self, db_instance, instance, poll_until, load_any):
         db_instance.find_all.return_value.all.return_value = (
             self._instances('i1', 'i3'))
         instance.load.side_effect = lambda ctx, i: mock.Mock(id=i)
+        load_any.side_effect = lambda ctx, i: mock.Mock(id=i)
         instance.delete.side_effect = lambda inst: self.calls.append(
             ('delete', inst.id))
 

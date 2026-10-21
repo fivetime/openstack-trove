@@ -274,14 +274,16 @@ class GroupReplicationTasksTest(trove_testtools.TestCase):
                              call[0][2])
         self.tasks.update_statuses_on_failure.assert_not_called()
 
+    @mock.patch.object(gr_taskmanager, 'load_any_instance', create=True)
     @mock.patch.object(gr_taskmanager.utils, 'poll_until')
     @mock.patch.object(gr_taskmanager, 'Instance')
     @mock.patch.object(gr_taskmanager, 'DBInstance')
     def test_shrink_leaves_before_delete(self, db_instance, instance,
-                                         poll_until):
+                                         poll_until, load_any):
         db_instance.find_all.return_value.all.return_value = (
             self._instances('i1', 'i3'))
         instance.load.side_effect = lambda ctx, i: mock.Mock(id=i)
+        load_any.side_effect = lambda ctx, i: mock.Mock(id=i)
         instance.delete.side_effect = lambda inst: self.calls.append(
             ('delete', inst.id))
 
@@ -293,6 +295,38 @@ class GroupReplicationTasksTest(trove_testtools.TestCase):
                    if c[0] == 'write_cluster_configuration_overrides']
         self.assertEqual(['i1', 'i3'], updates)
         self.tasks.update_statuses_on_failure.assert_not_called()
+
+    @mock.patch.object(gr_taskmanager, 'load_any_instance', create=True)
+    @mock.patch.object(gr_taskmanager.utils, 'poll_until')
+    @mock.patch.object(gr_taskmanager, 'Instance')
+    @mock.patch.object(gr_taskmanager, 'DBInstance')
+    def test_shrink_removes_a_member_whose_server_is_gone(
+            self, db_instance, instance, poll_until, load_any):
+        # The repair's replacement of a member lost for good: its server
+        # is gone, and loading it with its server fails (instance.models
+        # load_instance: "Instance ... is not ready.").
+        db_instance.find_all.return_value.all.return_value = (
+            self._instances('i1', 'i3'))
+        instance.load.side_effect = lambda ctx, i: (
+            self._not_ready(i) if i == 'i2' else mock.Mock(id=i))
+        load_any.side_effect = lambda ctx, i: mock.Mock(
+            id=i, server=None if i == 'i2' else mock.Mock())
+        instance.delete.side_effect = lambda inst: self.calls.append(
+            ('delete', inst.id))
+
+        self.tasks.shrink_cluster('ctx', 'c1', ['i2'])
+
+        self.assertIn(('delete', 'i2'), self.calls)
+        self.assertNotIn(('leave_cluster', 'i2'), self.calls)
+        updates = [c[1] for c in self.calls
+                   if c[0] == 'write_cluster_configuration_overrides']
+        self.assertEqual(['i1', 'i3'], updates)
+        self.tasks.update_statuses_on_failure.assert_not_called()
+
+    @staticmethod
+    def _not_ready(instance_id):
+        raise exception.UnprocessableEntity(
+            "Instance %s is not ready." % instance_id)
 
     @mock.patch.object(gr_taskmanager, 'Instance')
     @mock.patch.object(gr_taskmanager, 'DBInstance')
@@ -363,14 +397,16 @@ class GroupReplicationTasksTest(trove_testtools.TestCase):
         self.tasks.reset_task.assert_called_once()
         self.assertEqual([], [c for c in self.calls if c[0] == 'sync'])
 
+    @mock.patch.object(gr_taskmanager, 'load_any_instance', create=True)
     @mock.patch.object(gr_taskmanager.utils, 'poll_until')
     @mock.patch.object(gr_taskmanager, 'Instance')
     @mock.patch.object(gr_taskmanager, 'DBInstance')
     def test_shrink_takes_the_member_out_of_the_load_balancer(
-            self, db_instance, instance, poll_until):
+            self, db_instance, instance, poll_until, load_any):
         db_instance.find_all.return_value.all.return_value = (
             self._instances('i1', 'i3'))
         instance.load.side_effect = lambda ctx, i: mock.Mock(id=i)
+        load_any.side_effect = lambda ctx, i: mock.Mock(id=i)
 
         self.tasks.shrink_cluster('ctx', 'c1', ['i2'])
 

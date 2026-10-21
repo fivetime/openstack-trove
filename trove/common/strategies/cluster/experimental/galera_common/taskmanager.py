@@ -30,6 +30,7 @@ from trove.common.template import ClusterConfigTemplate
 from trove.common import utils
 from trove.instance.models import DBInstance
 from trove.instance.models import Instance
+from trove.instance.models import load_any_instance
 from trove.instance import tasks as inst_tasks
 from trove.taskmanager import api as task_api
 import trove.taskmanager.models as task_models
@@ -288,9 +289,14 @@ class GaleraCommonClusterTasks(common_taskmanager.ClusterEntryTasksMixin,
         LOG.debug("Begin Galera shrink_cluster for id: %s.", cluster_id)
 
         def _shrink_cluster():
-            removal_instances = [Instance.load(context, instance_id)
+            # A member whose server is gone (one the repair replaces) goes
+            # too: loaded without its server, and not asked.
+            removal_instances = [load_any_instance(context, instance_id)
                                  for instance_id in removal_instance_ids]
             for instance in removal_instances:
+                if instance.server is None:
+                    Instance.delete(instance)
+                    continue
                 # Its ready port closes before it goes: nothing new is
                 # sent to it.
                 try:

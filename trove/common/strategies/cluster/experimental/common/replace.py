@@ -93,6 +93,70 @@ class ReplacePlugin(object):
         raise NotImplementedError()
 
 
+class PeersHoldItOut(ReplacePlugin):
+    """The plugin of a datastore whose members each tell the members they
+    see out (``get_cluster_health``: ``out`` and ``me`` named alike, as
+    the sentinels, Galera and Group Replication do): the cluster can lose
+    a member when every other member answers, none holds the cluster
+    down, and each holds that member out and no other.
+
+    A datastore narrows it with ``applies`` (the clusters it knows how to
+    replace a member of) and ``vouches`` (what a member's view must say);
+    ``min_others`` is the members the cluster must keep.
+    """
+
+    min_others = 2
+
+    def __init__(self, manager, guest_factory=None):
+        super(PeersHoldItOut, self).__init__(manager)
+        self.guest_factory = guest_factory or clients.create_guest_client
+
+    def applies(self, db_cluster):
+        """(bool, reason): whether a member of the cluster is replaced."""
+        return True, None
+
+    def vouches(self, member, view, lost_name):
+        """(bool, reason): whether the member's view holds the lost one
+        out, and it alone.
+        """
+        if view.get('status') == cluster_health.DOWN:
+            return False, 'member %s holds the cluster down: %s' % (
+                member.name, view.get('reason'))
+        out = set(view.get('out') or [])
+        if out != {lost_name}:
+            return False, 'member %s holds out %s, not %s alone' % (
+                member.name, ', '.join(sorted(out)) or 'none', lost_name)
+        return True, None
+
+    def can_replace(self, context, db_cluster, lost, others):
+        ok, why = self.applies(db_cluster)
+        if not ok:
+            return False, why
+        if len(others) < self.min_others:
+            return False, 'fewer than %d members would be left' % (
+                self.min_others)
+        lost_name = next((name for name, trove_name in
+                          health.known_members(db_cluster.id).items()
+                          if trove_name == lost.name), None)
+        if not lost_name:
+            return False, 'its address is not known'
+        timeout = CONF.get(self.manager).cluster_health_timeout
+        for member in others:
+            try:
+                view = self.guest_factory(
+                    context, member.id, self.manager).get_cluster_health(
+                        timeout=timeout)
+            except Exception as err:
+                return False, 'member %s does not answer: %s' % (
+                    member.name, err)
+            if not view:
+                return False, 'member %s tells nothing' % member.name
+            ok, why = self.vouches(member, view, lost_name)
+            if not ok:
+                return False, why
+        return True, 'every other member holds %s out' % lost_name
+
+
 _plugins = {}
 
 

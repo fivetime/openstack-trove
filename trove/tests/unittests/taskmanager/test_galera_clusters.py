@@ -258,6 +258,8 @@ class GaleraClusterTasksTest(trove_testtools.TestCase):
                                        new_instances)
         mock_reset_task.assert_called_with()
 
+    @patch('trove.common.strategies.cluster.experimental.galera_common.'
+           'taskmanager.load_any_instance', create=True)
     @patch.object(GaleraCommonClusterTasks, 'reset_task')
     @patch.object(Instance, 'load')
     @patch.object(Instance, 'delete')
@@ -267,7 +269,7 @@ class GaleraClusterTasksTest(trove_testtools.TestCase):
     @patch.object(GaleraCommonClusterTasks, '_render_cluster_config')
     def test_shrink_cluster_success(self, mock_render, mock_ip, mock_guest,
                                     mock_find_all, mock_delete, mock_load,
-                                    mock_reset_task):
+                                    mock_reset_task, mock_load_any):
         mock_find_all.return_value.all.return_value = [self.dbinst1]
         context = Mock()
         remove_instances = [Mock()]
