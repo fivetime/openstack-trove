@@ -36,6 +36,7 @@ from trove.common import utils
 from trove.extensions.common import models as ext_models
 from trove.instance.models import DBInstance
 from trove.instance.models import Instance
+from trove.instance.models import load_any_instance
 import trove.taskmanager.models as task_models
 
 LOG = logging.getLogger(__name__)
@@ -206,16 +207,21 @@ class RedisSentinelClusterTasks(common_taskmanager.ClusterEntryTasksMixin,
         LOG.debug("Begin shrink_cluster (sentinel) for id: %s.", cluster_id)
 
         def _shrink_cluster():
-            leaving = [Instance.load(context, instance_id)
+            # A member whose server is gone (one the repair replaces) goes
+            # too: loaded without its server.
+            leaving = [load_any_instance(context, instance_id)
                        for instance_id in removal_ids]
             staying = self._members(context, cluster_id, but=removal_ids)
-            for instance in leaving:
+            # Without its server a member answers nothing: not asked.
+            there = [instance for instance in leaving
+                     if instance.server is not None]
+            for instance in there:
                 try:
                     self.get_guest(instance).sentinel_leave()
                 except Exception:
                     LOG.exception("Member %s cannot be kept from being "
                                   "elected (it is down?).", instance.id)
-            primary = self._primary_of(leaving + staying)
+            primary = self._primary_of(there + staying)
             if primary.id in removal_ids:
                 self.get_guest(primary).sentinel_failover()
             for instance in leaving:

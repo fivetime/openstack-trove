@@ -302,9 +302,21 @@ class SentinelAfterTheBuildTest(trove_testtools.TestCase):
             side_effect=lambda **kw: mock.Mock(**{
                 'all.return_value': [mock.Mock(id=i) for i in self.ids]})
         ).start()
+        self.gone = set()
+
+        def load(ctx, i):
+            if i in self.gone:
+                # Its server is gone (instance.models.load_instance).
+                raise exception.UnprocessableEntity(
+                    "Instance %s is not ready." % i)
+            return mock.Mock(id=i, context=ctx)
         mock.patch.object(sentinel_taskmanager.Instance, 'load',
-                          side_effect=lambda ctx, i: mock.Mock(
-                              id=i, context=ctx)).start()
+                          side_effect=load).start()
+        mock.patch.object(
+            sentinel_taskmanager, 'load_any_instance', create=True,
+            side_effect=lambda ctx, i: mock.Mock(
+                id=i, context=ctx, server=None) if i in self.gone
+            else load(ctx, i)).start()
         self.deleted = mock.patch.object(
             sentinel_taskmanager.Instance, 'delete',
             side_effect=lambda instance: self.ids.remove(instance.id)
@@ -402,6 +414,17 @@ class SentinelAfterTheBuildTest(trove_testtools.TestCase):
         self.tasks.shrink_cluster('ctx', 'c1', ['i3'])
         self.assertNotIn('sentinel_failover', [c[0] for c in self.calls])
         self.assertEqual(('reset',), self.calls[-1])
+
+    def test_a_member_whose_server_is_gone_leaves_unasked(self):
+        # The repair's replacement of a member lost for good.
+        mock.patch.object(sentinel_taskmanager.utils, 'poll_until').start()
+        self.gone.add('i3')
+        self.tasks.shrink_cluster('ctx', 'c1', ['i3'])
+        self.assertNotIn('i3', self.ids)
+        self.assertEqual(
+            [('sentinel_set_quorum', i, 2) for i in ('i1', 'i2')] +
+            [('sentinel_reset', i, 2) for i in ('i1', 'i2')] +
+            [('lb', ['i1', 'i2']), ('reset',)], self.calls)
 
     def test_rolling_the_replicas_first_the_primary_once_it_handed_over(
             self):

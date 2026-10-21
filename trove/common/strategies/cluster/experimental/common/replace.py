@@ -36,7 +36,8 @@ the cluster's properties (``repair``) so that any task manager follows
 it, one that starts again too: ``removing`` (the shrink is under way),
 ``adding`` (the grow is), then done. A step that does not come out as it
 should ends the replacement, told as an error, and leaves the cluster to
-the operator.
+the operator: the member is not replaced again by itself (``repair_failed``
+in the properties names it) until it is gone.
 
 A datastore takes part with a plugin in the namespace
 ``trove.cluster.repair``, by its manager's name: a ``ReplacePlugin``.
@@ -63,6 +64,9 @@ CONF = cfg.CONF
 
 NAMESPACE = 'trove.cluster.repair'
 STATE = 'repair'
+# The member whose replacement failed: not replaced again by itself (the
+# operator's, until it is gone or another replacement succeeds).
+FAILED = 'repair_failed'
 REMOVING, ADDING = 'removing', 'adding'
 # The cluster's task while a step is under way.
 STEP_TASKS = {REMOVING: ClusterTasks.SHRINKING_CLUSTER,
@@ -205,6 +209,12 @@ class MemberReplacement(object):
             LOG.warning("Cluster %s: member %s is lost (%s); its datastore "
                         "%s has no repair plugin.", db_cluster.id, lost.id,
                         reason, manager)
+            return None
+        failed = db_cluster.get_properties().get(FAILED) or {}
+        if failed.get('lost') == lost.id:
+            LOG.debug("Cluster %s: member %s is lost (%s); its replacement "
+                      "failed (%s): the operator's.", db_cluster.id,
+                      lost.id, reason, failed.get('error'))
             return None
         others = [m for m in members if m.id != lost.id]
         ok, why = plugin.can_replace(context, db_cluster, lost, others)
@@ -371,7 +381,13 @@ class MemberReplacement(object):
                 synchronize_session=False)
 
     def _end(self, db_cluster, state, error, new=()):
-        self._save(db_cluster, None)
+        props = db_cluster.get_properties()
+        props.pop(STATE, None)
+        props.pop(FAILED, None)
+        if error:
+            props[FAILED] = {'lost': state['lost'], 'name': state['name'],
+                             'error': error, 'at': self._now().isoformat()}
+        db_cluster.save_properties(props)
         gone = Gone(state['lost'], state['name'])
         if error:
             LOG.error("Cluster %s: the replacement of member %s ended: %s.",

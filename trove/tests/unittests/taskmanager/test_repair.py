@@ -523,6 +523,24 @@ class TestReplacement(ReplaceTestBase):
         self.assertIsNone(self._state(cluster))
         self.assertEqual([repair.EVENT_START, repair.EVENT_ERROR],
                          self._events())
+        # Not again by itself: the operator's (production: every two
+        # minutes, a shrink that could not remove it).
+        self.now += datetime.timedelta(seconds=120)
+        self.assertIsNone(self.repair.check_now(
+            mock.Mock(), DBCluster.find_by(id=cluster.id), manager='valkey'))
+        self.assertEqual(1, self.task_api.return_value.
+                         shrink_cluster.call_count)
+        failed = DBCluster.find_by(id=cluster.id).get_properties()[
+            replace.FAILED]
+        self.assertEqual((members[0].id, 'the shrink did not remove it'),
+                         (failed['lost'], failed['error']))
+
+    def test_another_member_lost_after_a_failure_is_replaced(self):
+        cluster, members = self._lost_cluster()
+        cluster.save_properties({replace.FAILED: {
+            'lost': 'a member gone since', 'error': 'the grow failed'}})
+        self.repair.check_now(mock.Mock(), cluster, manager='valkey')
+        self.assertEqual(members[0].id, self._state(cluster)['lost'])
 
     def test_a_new_member_that_failed_ends_it(self):
         cluster, members = self._lost_cluster()
