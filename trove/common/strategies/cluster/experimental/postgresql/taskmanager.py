@@ -29,6 +29,7 @@ from trove.common import utils
 from trove.guestagent.common import cluster_probe
 from trove.instance.models import DBInstance
 from trove.instance.models import Instance
+from trove.instance.models import load_any_instance
 from trove.taskmanager import api as task_api
 import trove.taskmanager.models as task_models
 
@@ -282,10 +283,14 @@ class PostgresqlClusterTasks(common_taskmanager.ClusterEntryTasksMixin,
             leftover_instances = [Instance.load(context, db_inst.id)
                                   for db_inst in db_instances
                                   if db_inst.id not in removal_instance_ids]
-            removal_instances = [Instance.load(context, instance_id)
+            # A member whose server is gone (one the repair replaces) goes
+            # too: loaded without its server, and not asked (its slot on
+            # the primary is dropped all the same).
+            removal_instances = [load_any_instance(context, instance_id)
                                  for instance_id in removal_instance_ids]
             primary, cluster_context = self._primary(
-                leftover_instances + removal_instances)
+                leftover_instances +
+                [i for i in removal_instances if i.server is not None])
             mode = cluster_context.get('mode') or pg_api.SYNC
             if primary.id in removal_instance_ids:
                 # The primary goes: a standby that stays takes over
@@ -298,7 +303,8 @@ class PostgresqlClusterTasks(common_taskmanager.ClusterEntryTasksMixin,
                 # Its ports close before it goes: nothing new is sent to
                 # it.
                 try:
-                    self.get_guest(instance).leave_cluster()
+                    if instance.server is not None:
+                        self.get_guest(instance).leave_cluster()
                 except Exception:
                     LOG.exception("Instance %s could not leave the "
                                   "cluster.", instance.id)

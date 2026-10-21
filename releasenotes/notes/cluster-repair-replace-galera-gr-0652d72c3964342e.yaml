@@ -8,9 +8,15 @@ features:
     group that keeps its majority (Group Replication), and sees every
     member the configuration names but the lost one. The plugins share
     ``common.replace.PeersHoldItOut``, which a datastore whose members tell
-    the members they see out can use as it is or narrow.
+    the members they see out can use as it is or narrow. A PostgreSQL
+    cluster's lost member is replaced when its primary holds that member
+    out and no other, and every standby streams (only the primary sees the
+    others); a lost primary is replaced once the recovery has promoted a
+    standby.
 fixes:
   - |
-    The shrink of a Galera or Group Replication cluster removes a member
-    whose server is gone: loading it with its server failed ("Instance ...
-    is not ready."), and the shrink removed nothing.
+    The shrink of a Galera, Group Replication or PostgreSQL cluster
+    removes a member whose server is gone: loading it with its server
+    failed ("Instance ... is not ready."), and the shrink removed nothing.
+    A PostgreSQL member gone so has its slot on the primary dropped all
+    the same.

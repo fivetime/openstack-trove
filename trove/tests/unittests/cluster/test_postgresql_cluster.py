@@ -311,6 +311,14 @@ class PostgresqlTasksTest(trove_testtools.TestCase):
         mock.patch.object(pg_taskmanager.utils, 'generate_random_password',
                           return_value='pw').start()
         mock.patch.object(pg_taskmanager.utils, 'poll_until').start()
+        # The members that leave a shrink, loaded with their servers, but
+        # one whose server is gone (self.gone).
+        self.gone = set()
+        mock.patch.object(
+            pg_taskmanager, 'load_any_instance', create=True,
+            side_effect=lambda ctx, i: mock.Mock(
+                id=i, server=None if i in self.gone else mock.Mock())
+        ).start()
         self.addCleanup(mock.patch.stopall)
 
     def _instances(self, *ids):
@@ -412,6 +420,36 @@ class PostgresqlTasksTest(trove_testtools.TestCase):
             self.calls)
         instance.delete.assert_called_once()
         self.tasks.reset_task.assert_called_once()
+
+    @mock.patch.object(pg_taskmanager, 'Instance')
+    @mock.patch.object(pg_taskmanager, 'DBInstance')
+    def test_shrink_a_standby_whose_server_is_gone(self, db_instance,
+                                                   instance):
+        # The repair's replacement of a member lost for good: loaded with
+        # its server it fails ("Instance ... is not ready."); it is not
+        # asked, and its slot on the primary goes all the same.
+        db_instance.find_all.return_value.all.return_value = (
+            self._instances('i1', 'i2', 'i3'))
+
+        def load(ctx, instance_id):
+            if instance_id == 'i3':
+                raise exception.UnprocessableEntity(
+                    "Instance %s is not ready." % instance_id)
+            return mock.Mock(id=instance_id)
+        instance.load.side_effect = load
+        self.gone.add('i3')
+        self.tasks.shrink_cluster('ctx', 'c1', ['i3'])
+        members = {'i1': '10.0.0.1', 'i2': '10.0.0.2'}
+        self.assertEqual(
+            [('drop_member_slot', 'i1', 'i3'),
+             ('update_cluster_members', 'i1', members, 'strict'),
+             ('update_cluster_members', 'i2', members, 'strict'),
+             ('sync', ('i1', 'i2'))],
+            self.calls)
+        # Never asked anything: no guest client made for it.
+        self.assertNotIn('i3', self.guests)
+        instance.delete.assert_called_once()
+        self.tasks.update_statuses_on_failure.assert_not_called()
 
     @mock.patch.object(pg_taskmanager, 'Instance')
     @mock.patch.object(pg_taskmanager, 'DBInstance')

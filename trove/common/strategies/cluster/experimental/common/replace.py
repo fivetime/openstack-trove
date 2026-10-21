@@ -135,7 +135,10 @@ class PeersHoldItOut(ReplacePlugin):
         if len(others) < self.min_others:
             return False, 'fewer than %d members would be left' % (
                 self.min_others)
-        timeout = CONF.get(self.manager).cluster_health_timeout
+        # A datastore whose health its recovery records has no such
+        # option: the guest's own timeout for the call then.
+        timeout = getattr(CONF.get(self.manager), 'cluster_health_timeout',
+                          None)
         views = []
         for member in others:
             try:

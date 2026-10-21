@@ -36,6 +36,8 @@ from trove.common.strategies.cluster.experimental.galera_common import (
     repair as galera_repair)
 from trove.common.strategies.cluster.experimental.group_replication import (
     repair as gr_repair)
+from trove.common.strategies.cluster.experimental.postgresql import (
+    repair as pg_repair)
 from trove.common.strategies.cluster.experimental.redis import (
     repair as redis_repair)
 from trove.common import utils
@@ -871,10 +873,62 @@ class TestGroupReplicationReplace(_PeerViews):
                 ('mariadb', galera_repair.GaleraReplace),
                 ('pxc', galera_repair.GaleraReplace),
                 ('mysql', gr_repair.GroupReplicationReplace),
-                ('percona', gr_repair.GroupReplicationReplace)):
+                ('percona', gr_repair.GroupReplicationReplace),
+                ('postgresql', pg_repair.PostgresqlReplace)):
             plugin = replace.plugin_for(manager)
             self.assertIsInstance(plugin, cls)
             self.assertEqual(manager, plugin.manager)
+
+
+class TestPostgresqlReplace(_PeerViews):
+    """PostgreSQL's word on a lost member: only the primary sees the
+    others (PostgreSQL 18; the views the guest's tests pin).
+    """
+
+    manager = 'postgresql'
+    ips = ('172.31.250.132', '172.31.250.130', '172.31.250.131')
+
+    def setUp(self):
+        super(TestPostgresqlReplace, self).setUp()
+        # As its recovery records it: the names never learnt.
+        common_health.record(self.cluster.id, ch.combine(
+            [(m.name, ch.view(ch.HEALTHY)) for m in self.members], []))
+
+    def _primary_sees_it_gone(self):
+        self._tell(1, ch.view(ch.DEGRADED, ['172.31.250.132'],
+                              'not streaming from the primary',
+                              '172.31.250.130'))
+
+    def test_the_primary_holds_it_out_the_standby_streams(self):
+        self._primary_sees_it_gone()
+        self._tell(2, ch.view(ch.HEALTHY, me='172.31.250.131'))
+        self.assertEqual(
+            (True, 'every other member holds 172.31.250.132 out'),
+            self._ask())
+
+    def test_not_while_the_standby_does_not_stream(self):
+        self._primary_sees_it_gone()
+        self._tell(2, ch.view(ch.DEGRADED, ['172.31.250.131'],
+                              'not streaming', '172.31.250.131'))
+        self.assertFalse(self._ask()[0])
+
+    def test_not_without_a_primary_that_holds_it_out(self):
+        # The lost one was the primary, no standby promoted yet: both
+        # see themselves out.
+        self._tell(1, ch.view(ch.DEGRADED, ['172.31.250.130'],
+                              'not streaming', '172.31.250.130'))
+        self._tell(2, ch.view(ch.DEGRADED, ['172.31.250.131'],
+                              'not streaming', '172.31.250.131'))
+        self.assertEqual((False, 'its address is not known'), self._ask())
+        # A primary that sees every standby streaming: nothing is lost.
+        self._tell(1, ch.view(ch.HEALTHY, me='172.31.250.130'))
+        self._tell(2, ch.view(ch.HEALTHY, me='172.31.250.131'))
+        self.assertFalse(self._ask()[0])
+        # Even where the health learnt its name.
+        common_health.record(self.cluster.id, ch.combine(
+            [(m.name, ch.view(ch.HEALTHY, me=ip))
+             for m, ip in zip(self.members, self.ips)], []))
+        self.assertFalse(self._ask()[0])
 
 
 def DBInstance_all(cluster_id):
