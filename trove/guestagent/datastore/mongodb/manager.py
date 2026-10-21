@@ -216,6 +216,10 @@ class Manager(cluster_member.ClusterWatchMixin, manager.Manager):
     def add_members(self, context, members):
         self._cluster_action('add_members', self.app.add_members, members)
 
+    def remove_members(self, context, members):
+        self._cluster_action('remove_members', self.app.remove_members,
+                             members)
+
     def add_config_servers(self, context, config_servers):
         self._cluster_action('add_config_servers',
                              self.app.add_config_servers, config_servers)

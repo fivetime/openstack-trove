@@ -17,12 +17,15 @@ from eventlet.timeout import Timeout
 from oslo_log import log as logging
 
 from trove.common import cfg
+from trove.common import exception
 from trove.common.exception import PollTimeOut
+from trove.common.i18n import _
 from trove.common.strategies.cluster import base
 from trove.common import utils
 from trove.instance import models
 from trove.instance.models import DBInstance
 from trove.instance.models import Instance
+from trove.instance.models import load_any_instance
 from trove.instance.service_status import ServiceStatuses
 from trove.instance import tasks as inst_tasks
 from trove.taskmanager import api as task_api
@@ -45,7 +48,19 @@ class MongoDbTaskManagerStrategy(base.BaseTaskManagerStrategy):
 
     @property
     def task_manager_manager_actions(self):
-        return {'add_shard_cluster': self._manager_add_shard}
+        return {'add_shard_cluster': self._manager_add_shard,
+                'remove_member': self._manager_remove_member,
+                'add_member': self._manager_add_member}
+
+    def _manager_remove_member(self, context, cluster_id, instance_id, host):
+        cluster_tasks = task_models.ClusterTasks.load(
+            context, cluster_id, MongoDbClusterTasks)
+        cluster_tasks.remove_member(context, cluster_id, instance_id, host)
+
+    def _manager_add_member(self, context, cluster_id, instance_id):
+        cluster_tasks = task_models.ClusterTasks.load(
+            context, cluster_id, MongoDbClusterTasks)
+        cluster_tasks.add_member(context, cluster_id, instance_id)
 
     def _manager_add_shard(self, context, cluster_id, shard_id,
                            replica_set_name):
@@ -303,6 +318,120 @@ class MongoDbClusterTasks(task_models.ClusterTasks):
 
         LOG.debug("end shrink_cluster for MongoDB cluster %s", self.id)
 
+    # The repair's replacement of a member of a shard lost for good: the
+    # cluster's shrink and grow take whole shards, a replica set loses and
+    # gets one member here.
+
+    def _shard_primary(self, context, cluster_id, shard_id, but=()):
+        """The primary of a shard's replica set among its members that
+        stay, as they tell (get_member_role).
+        """
+        for db_instance in DBInstance.find_all(
+                cluster_id=cluster_id, shard_id=shard_id,
+                deleted=False).all():
+            if db_instance.id in but:
+                continue
+            instance = Instance.load(context, db_instance.id)
+            try:
+                answer = self.get_guest(instance).get_member_role() or {}
+            except Exception as err:
+                LOG.info("Member %s did not tell its role: %s",
+                         db_instance.id, err)
+                continue
+            if answer.get('role') == 'PRIMARY':
+                return instance
+        raise exception.TroveError(
+            _("Shard %s has no primary among the members that stay.")
+            % shard_id)
+
+    def remove_member(self, context, cluster_id, instance_id, host):
+        """A member lost for good leaves its shard's replica set: the
+        primary drops it (``host:port``) from the set's configuration,
+        and it is deleted. The shard goes on with the members that stay
+        until one replaces it (``add_member``).
+        """
+        LOG.debug("begin remove_member %(instance)s of MongoDB cluster "
+                  "%(cluster)s", {'instance': instance_id,
+                                  'cluster': cluster_id})
+
+        def _remove_member():
+            lost = DBInstance.find_by(id=instance_id, deleted=False)
+            primary = self._shard_primary(context, cluster_id,
+                                          lost.shard_id, but=(instance_id,))
+            self.get_guest(primary).remove_members([host])
+            Instance.delete(load_any_instance(context, instance_id))
+
+            def marked_deleted():
+                return instance_id not in [
+                    db_instance.id for db_instance in DBInstance.find_all(
+                        cluster_id=cluster_id, deleted=False).all()]
+            utils.poll_until(marked_deleted, sleep_time=2,
+                             time_out=CONF.cluster_delete_time_out)
+
+        timeout = Timeout(CONF.cluster_usage_timeout)
+        try:
+            _remove_member()
+            self.reset_task()
+        except Timeout as t:
+            if t is not timeout:
+                raise  # not my timeout
+            LOG.exception("timeout removing member %s.", instance_id)
+            self.update_statuses_on_failure(
+                cluster_id, status=inst_tasks.InstanceTasks.SHRINKING_ERROR,
+                instance_ids=[instance_id])
+        except Exception:
+            LOG.exception("error removing member %s.", instance_id)
+            self.update_statuses_on_failure(
+                cluster_id, status=inst_tasks.InstanceTasks.SHRINKING_ERROR,
+                instance_ids=[instance_id])
+        finally:
+            timeout.cancel()
+        LOG.debug("end remove_member %s", instance_id)
+
+    def add_member(self, context, cluster_id, instance_id):
+        """The member in place of a lost one joins its shard's replica
+        set: once it is ready the primary adds it, it gets the set's
+        admin password (the members take the users of the primary with
+        its data), and it is complete.
+        """
+        LOG.debug("begin add_member %(instance)s to MongoDB cluster "
+                  "%(cluster)s", {'instance': instance_id,
+                                  'cluster': cluster_id})
+
+        def _add_member():
+            new = DBInstance.find_by(id=instance_id, deleted=False)
+            if not self._all_instances_ready([instance_id], cluster_id,
+                                             new.shard_id):
+                return
+            primary = self._shard_primary(context, cluster_id, new.shard_id,
+                                          but=(instance_id,))
+            instance = Instance.load(context, instance_id)
+            primary_guest = self.get_guest(primary)
+            primary_guest.add_members([self.get_ip(instance)])
+            guest = self.get_guest(instance)
+            guest.store_admin_password(primary_guest.get_admin_password())
+            guest.cluster_complete()
+
+        timeout = Timeout(CONF.cluster_usage_timeout)
+        try:
+            _add_member()
+            self.reset_task()
+        except Timeout as t:
+            if t is not timeout:
+                raise  # not my timeout
+            LOG.exception("timeout adding member %s.", instance_id)
+            self.update_statuses_on_failure(
+                cluster_id, status=inst_tasks.InstanceTasks.GROWING_ERROR,
+                instance_ids=[instance_id])
+        except Exception:
+            LOG.exception("error adding member %s.", instance_id)
+            self.update_statuses_on_failure(
+                cluster_id, status=inst_tasks.InstanceTasks.GROWING_ERROR,
+                instance_ids=[instance_id])
+        finally:
+            timeout.cancel()
+        LOG.debug("end add_member %s", instance_id)
+
     def get_cluster_admin_password(self, context):
         """The cluster admin's user credentials are stored on all query
         routers. Find one and get the guest to return the password.
@@ -409,6 +538,22 @@ class MongoDbClusterTasks(task_models.ClusterTasks):
 
 
 class MongoDbTaskManagerAPI(task_api.API):
+
+    def mongodb_remove_member(self, cluster_id, instance_id, host):
+        """The repair: a member lost for good leaves its shard."""
+        LOG.debug("Making async call to remove member %s of cluster %s",
+                  instance_id, cluster_id)
+        cctxt = self.client.prepare(version=task_api.API.API_BASE_VERSION)
+        cctxt.cast(self.context, "remove_member", cluster_id=cluster_id,
+                   instance_id=instance_id, host=host)
+
+    def mongodb_add_member(self, cluster_id, instance_id):
+        """The repair: a member in place of a lost one joins its shard."""
+        LOG.debug("Making async call to add member %s to cluster %s",
+                  instance_id, cluster_id)
+        cctxt = self.client.prepare(version=task_api.API.API_BASE_VERSION)
+        cctxt.cast(self.context, "add_member", cluster_id=cluster_id,
+                   instance_id=instance_id)
 
     def mongodb_add_shard_cluster(self, cluster_id, shard_id,
                                   replica_set_name):

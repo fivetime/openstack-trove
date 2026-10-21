@@ -497,7 +497,8 @@ class TestMongoDBAppLifecycle(MongoDBGuestTestCase):
         app.apply_initial_guestagent_configuration(
             {'instance_type': 'member', 'replica_set_name': 'rs1'})
         app.adm = mock.Mock()
-        app.adm.count_healthy_members.side_effect = [1, 2, 3]
+        # This primary alone before, then the three.
+        app.adm.count_healthy_members.side_effect = [1, 1, 2, 3]
 
         with mock.patch.object(mongodb_service.utils, 'poll_until',
                                side_effect=lambda fn, **kw: [fn() for _ in
@@ -506,7 +507,34 @@ class TestMongoDBAppLifecycle(MongoDBGuestTestCase):
 
         app.adm.rs_add_members.assert_called_once_with(
             ['10.0.0.6:27017', '10.0.0.7:27017'])
-        self.assertEqual(3, app.adm.count_healthy_members.call_count)
+        self.assertEqual(4, app.adm.count_healthy_members.call_count)
+
+    def test_add_a_member_to_a_set_that_has_members(self):
+        # The repair's member in place of a lost one joins a set of two:
+        # the members healthy before count (expected 2 + 1, not 1 + 1,
+        # which the set would never reach).
+        app = _app(_render())
+        app.apply_initial_guestagent_configuration(
+            {'instance_type': 'member', 'replica_set_name': 'rs1'})
+        app.adm = mock.Mock()
+        app.adm.count_healthy_members.side_effect = [2, 2, 2, 3]
+        waited = []
+        with mock.patch.object(
+                mongodb_service.utils, 'poll_until',
+                side_effect=lambda fn, **kw: waited.extend(
+                    fn() for _ in range(3))):
+            app.add_members(['10.0.0.8'])
+        app.adm.rs_add_members.assert_called_once_with(['10.0.0.8:27017'])
+        self.assertEqual([False, False, True], waited)
+
+    def test_remove_members(self):
+        app = _app(_render())
+        app.apply_initial_guestagent_configuration(
+            {'instance_type': 'member', 'replica_set_name': 'rs1'})
+        app.adm = mock.Mock()
+        app.remove_members(['10.0.0.7:27017'])
+        app.adm.rs_remove_members.assert_called_once_with(
+            ['10.0.0.7:27017'])
 
     @mock.patch.object(mongodb_service.MongoDBApp, 'start_db')
     @mock.patch.object(mongodb_service.MongoDBApp, 'store_key')
@@ -689,6 +717,22 @@ class TestMongoDBAdmin(MongoDBGuestTestCase):
         client['admin'].command.return_value = {'isWritablePrimary': False}
         with mock.patch.object(adm, '_client', return_value=client):
             self.assertFalse(adm.is_primary())
+
+    def test_remove_members_from_the_set(self):
+        # The repair drops a member lost for good: the configuration
+        # without it, its version up by one.
+        adm, client = self._adm()
+        members = [{'_id': 0, 'host': '10.0.0.5:27017'},
+                   {'_id': 1, 'host': '10.0.0.6:27017'},
+                   {'_id': 2, 'host': '10.0.0.7:27017'}]
+        client['admin'].command.side_effect = [
+            {'config': {'version': 3, 'members': list(members)}},
+            {'ok': 1}]
+        with mock.patch.object(adm, '_client', return_value=client):
+            adm.rs_remove_members(['10.0.0.7:27017'])
+        reconfig = client['admin'].command.call_args_list[1].args
+        self.assertEqual('replSetReconfig', reconfig[0])
+        self.assertEqual({'version': 4, 'members': members[:2]}, reconfig[1])
 
     def test_replica_set(self):
         adm, client = self._adm()
@@ -979,6 +1023,12 @@ class TestMongoDBManager(MongoDBGuestTestCase):
                     cluster_config=None, snapshot=None, ds_version='8.2')
         args.update(kwargs)
         manager.do_prepare(**args)
+
+    def test_remove_members(self):
+        manager = self._manager()
+        manager.remove_members(mock.Mock(), ['10.0.0.7:27017'])
+        manager.app.remove_members.assert_called_once_with(
+            ['10.0.0.7:27017'])
 
     def test_single_instance_gets_its_admin_user(self):
         manager = self._manager()

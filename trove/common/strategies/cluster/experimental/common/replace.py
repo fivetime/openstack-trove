@@ -92,6 +92,39 @@ class ReplacePlugin(object):
         """
         raise NotImplementedError()
 
+    def remember(self, context, db_cluster, lost, others):
+        """What the steps will need of the lost member, kept in the
+        replacement's state: nothing by default.
+        """
+        return {}
+
+    def remove(self, context, db_cluster, state):
+        """The removal step: the cluster's shrink of the lost member, as
+        the API would cast it. The cluster's task is SHRINKING_CLUSTER
+        already; the step ends it. Raises when the step was not sent.
+        """
+        from trove.taskmanager import api as task_api
+        with StartNotification(context, cluster_id=db_cluster.id,
+                               instance_ids=[state['lost']]):
+            task_api.load(context, self.manager).shrink_cluster(
+                db_cluster.id, [state['lost']])
+
+    def add(self, context, db_cluster, state):
+        """The addition step: the cluster's grow of a member like the
+        lost one. The cluster's task is GROWING_CLUSTER already (the
+        grow is told so); the step ends it. Raises when it failed.
+        """
+        from trove.cluster import models as cluster_models
+        from trove.common import glance as common_glance
+        cluster = cluster_models.Cluster.load(context, db_cluster.id)
+        image_id = cluster.ds_version.image_id
+        if not image_id:
+            image_id = common_glance.get_image_id(
+                clients.create_glance_client(context), None,
+                cluster.ds_version.image_tags)
+        with StartNotification(context, cluster_id=db_cluster.id):
+            cluster.grow([dict(state['spec'])], image_id, held=True)
+
 
 class PeersHoldItOut(ReplacePlugin):
     """The plugin of a datastore whose members each tell the members they
@@ -333,6 +366,13 @@ class MemberReplacement(object):
                  'before': sorted(m.id for m in others),
                  'since': self._now().isoformat(),
                  'reason': '%s; %s' % (reason, why)}
+        try:
+            state.update(plugin.remember(context, db_cluster, lost, others))
+        except Exception as err:
+            LOG.warning("Cluster %s: member %s is lost (%s), but what its "
+                        "replacement needs of it is not known: %s",
+                        db_cluster.id, lost.id, reason, err)
+            return FOLLOW_EVERY * 4
         if not self._take(db_cluster, ClusterTasks.SHRINKING_CLUSTER):
             return None
         self._save(db_cluster, state)
@@ -341,13 +381,9 @@ class MemberReplacement(object):
         self.notify('trove.cluster.repair.start', db_cluster, lost,
                     'replace', state['reason'])
         try:
-            from trove.taskmanager import api as task_api
-            context = tenant_context(db_cluster, DBaaSClusterShrink,
-                                     state['user'])
-            with StartNotification(context, cluster_id=db_cluster.id,
-                                   instance_ids=[lost.id]):
-                task_api.load(context, manager).shrink_cluster(
-                    db_cluster.id, [lost.id])
+            plugin.remove(tenant_context(db_cluster, DBaaSClusterShrink,
+                                         state['user']),
+                          db_cluster, state)
         except Exception as err:
             self._end(db_cluster, state, 'the removal was not sent: %s' % err)
             self._release(db_cluster)
@@ -392,27 +428,19 @@ class MemberReplacement(object):
         return None
 
     def _add(self, db_cluster, manager, state):
-        from trove.cluster import models as cluster_models
-        from trove.common import glance as common_glance
         context = tenant_context(db_cluster, DBaaSClusterGrow,
                                  state.get('user'))
+        plugin = self.plugins(manager)
         # The step is the grow's task, taken as the shrink's was: of two
         # task managers that heard the shrink end, one adds.
         if not self._take(db_cluster, ClusterTasks.GROWING_CLUSTER):
             return FOLLOW_EVERY
         state = dict(state, phase=ADDING)
+        # Saved before the cluster is loaded for the step: a grow saves
+        # the cluster as it loaded it, properties too.
         self._save(db_cluster, state)
         try:
-            # Loaded after the step is taken: the grow saves the cluster
-            # as it loaded it, properties too.
-            cluster = cluster_models.Cluster.load(context, db_cluster.id)
-            image_id = cluster.ds_version.image_id
-            if not image_id:
-                image_id = common_glance.get_image_id(
-                    clients.create_glance_client(context), None,
-                    cluster.ds_version.image_tags)
-            with StartNotification(context, cluster_id=db_cluster.id):
-                cluster.grow([dict(state['spec'])], image_id, held=True)
+            plugin.add(context, db_cluster, state)
         except Exception as err:
             LOG.exception("Cluster %s: the member replacing %s was not "
                           "added.", db_cluster.id, state['lost'])

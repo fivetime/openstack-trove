@@ -64,6 +64,17 @@ class MongoDbGuestAgentAPI(guest_api.API):
         return self._call("add_members", CONF.mongodb.add_members_timeout,
                           version=version, members=members)
 
+    def remove_members(self, members):
+        """Take members (host:port) out of the replica set this primary
+        leads: the cluster's replacement of a member lost for good.
+        """
+        LOG.debug("Removing members %(members)s on instance %(id)s", {
+            'members': members, 'id': self.id})
+        version = guest_api.API.API_BASE_VERSION
+
+        return self._call("remove_members", CONF.mongodb.add_members_timeout,
+                          version=version, members=members)
+
     def add_config_servers(self, config_servers):
         LOG.debug("Adding config servers %(config_servers)s for instance "
                   "%(id)s", {'config_servers': config_servers,

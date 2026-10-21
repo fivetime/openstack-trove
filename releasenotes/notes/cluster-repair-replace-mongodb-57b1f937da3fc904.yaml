@@ -1,0 +1,18 @@
+---
+features:
+  - |
+    The cluster repair replaces a lost member of a MongoDB shard's replica
+    set. The cluster's shrink and grow take whole shards, so the member is
+    replaced within its set: the set's primary drops it from the set's
+    configuration and it is deleted, then a member like it is made for the
+    same shard and the primary adds it. The set's other members vouch: each
+    answers, their set has a primary, and each holds the lost member out
+    and no other. A member of the config server set and a query router are
+    not replaced yet. A repair plugin may give the two steps of a
+    replacement itself (``remove``, ``add``, and what it needs of the lost
+    member, ``remember``) where the cluster's shrink and grow do not fit.
+fixes:
+  - |
+    A MongoDB primary adding members to a replica set that has members
+    already waited for the wrong count (the new members plus one) and
+    timed out; it counts the members healthy before.

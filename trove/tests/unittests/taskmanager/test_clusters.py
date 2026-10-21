@@ -15,6 +15,7 @@
 
 import datetime
 
+from unittest.mock import ANY
 from unittest.mock import MagicMock
 from unittest.mock import Mock
 from unittest.mock import patch
@@ -373,6 +374,134 @@ class MongoDbClusterTasksTest(trove_testtools.TestCase):
                                             self.cluster_id,
                                             "shard-1", "rs1")
         mock_guest.return_value.cluster_complete.assert_called_with()
+        mock_reset_task.assert_called_with()
+
+    def _member(self, instance_id, name):
+        return DBInstance(InstanceTasks.NONE, id=instance_id, name=name,
+                          compute_instance_id="compute-%s" % instance_id,
+                          task_id=InstanceTasks.NONE._code,
+                          task_description=InstanceTasks.NONE._db_text,
+                          volume_id="volume-%s" % instance_id,
+                          datastore_version_id="1",
+                          cluster_id=self.cluster_id,
+                          shard_id="shard-1", type="member")
+
+    def _guests(self, mock_guest, roles):
+        guests = {}
+
+        def guest(instance):
+            g = guests.setdefault(instance.id, Mock())
+            g.get_member_role.return_value = roles.get(instance.id)
+            return g
+        mock_guest.side_effect = guest
+        return guests
+
+    @patch('trove.common.strategies.cluster.experimental.mongodb.'
+           'taskmanager.utils.poll_until')
+    @patch('trove.common.strategies.cluster.experimental.mongodb.'
+           'taskmanager.load_any_instance')
+    @patch.object(ClusterTasks, 'update_statuses_on_failure')
+    @patch.object(ClusterTasks, 'reset_task')
+    @patch.object(ClusterTasks, 'get_guest')
+    @patch.object(Instance, 'delete')
+    @patch.object(Instance, 'load')
+    @patch.object(DBInstance, 'find_by')
+    @patch.object(DBInstance, 'find_all')
+    def test_remove_member(self, mock_find_all, mock_find_by, mock_load,
+                           mock_delete, mock_guest, mock_reset_task,
+                           mock_update, mock_load_any, mock_poll):
+        # The repair: a member of the shard lost for good is dropped from
+        # the set by its primary, asked among the members that stay, and
+        # deleted (without its server: loaded as any instance is).
+        lost = self._member("5", "member3")
+        mock_find_by.return_value = lost
+        mock_find_all.return_value.all.return_value = [
+            self.dbinst1, self.dbinst2, lost]
+        mock_load.side_effect = lambda ctx, i: Mock(id=i)
+        guests = self._guests(mock_guest, {'1': {'role': 'SECONDARY'},
+                                           '2': {'role': 'PRIMARY'}})
+        self.clustertasks.remove_member(Mock(), self.cluster_id, "5",
+                                        "10.0.0.15:27017")
+        guests['2'].remove_members.assert_called_once_with(
+            ['10.0.0.15:27017'])
+        self.assertNotIn('5', guests)
+        mock_load_any.assert_called_once_with(ANY, "5")
+        mock_delete.assert_called_once_with(mock_load_any.return_value)
+        mock_reset_task.assert_called_with()
+        mock_update.assert_not_called()
+
+    @patch.object(ClusterTasks, 'update_statuses_on_failure')
+    @patch.object(ClusterTasks, 'reset_task')
+    @patch.object(ClusterTasks, 'get_guest')
+    @patch.object(Instance, 'delete')
+    @patch.object(Instance, 'load')
+    @patch.object(DBInstance, 'find_by')
+    @patch.object(DBInstance, 'find_all')
+    def test_remove_member_without_a_primary(self, mock_find_all,
+                                             mock_find_by, mock_load,
+                                             mock_delete, mock_guest,
+                                             mock_reset_task, mock_update):
+        # Nothing is dropped or deleted; the lost member alone is marked.
+        lost = self._member("5", "member3")
+        mock_find_by.return_value = lost
+        mock_find_all.return_value.all.return_value = [
+            self.dbinst1, self.dbinst2, lost]
+        mock_load.side_effect = lambda ctx, i: Mock(id=i)
+        guests = self._guests(mock_guest, {'1': {'role': 'SECONDARY'},
+                                           '2': {'role': 'SECONDARY'}})
+        self.clustertasks.remove_member(Mock(), self.cluster_id, "5",
+                                        "10.0.0.15:27017")
+        for g in guests.values():
+            g.remove_members.assert_not_called()
+        mock_delete.assert_not_called()
+        mock_update.assert_called_once_with(
+            self.cluster_id, status=InstanceTasks.SHRINKING_ERROR,
+            instance_ids=["5"])
+
+    @patch.object(ClusterTasks, 'update_statuses_on_failure')
+    @patch.object(ClusterTasks, 'reset_task')
+    @patch.object(ClusterTasks, 'get_guest')
+    @patch.object(ClusterTasks, 'get_ip')
+    @patch.object(ClusterTasks, '_all_instances_ready')
+    @patch.object(Instance, 'load')
+    @patch.object(DBInstance, 'find_by')
+    @patch.object(DBInstance, 'find_all')
+    def test_add_member(self, mock_find_all, mock_find_by, mock_load,
+                        mock_ready, mock_get_ip, mock_guest,
+                        mock_reset_task, mock_update):
+        # The repair: the member in place of a lost one, once ready, is
+        # added by the set's primary, given its admin password, complete.
+        new = self._member("6", "member-new")
+        mock_find_by.return_value = new
+        mock_find_all.return_value.all.return_value = [
+            self.dbinst1, self.dbinst2, new]
+        mock_load.side_effect = lambda ctx, i: Mock(id=i)
+        mock_ready.return_value = True
+        mock_get_ip.return_value = '10.0.0.16'
+        guests = self._guests(mock_guest, {'1': {'role': 'SECONDARY'},
+                                           '2': {'role': 'PRIMARY'}})
+        guests.setdefault('6', Mock())
+        guests.setdefault('2', Mock()).get_admin_password.return_value = 'pw'
+        self.clustertasks.add_member(Mock(), self.cluster_id, "6")
+        mock_ready.assert_called_once_with(["6"], self.cluster_id, "shard-1")
+        guests['2'].add_members.assert_called_once_with(['10.0.0.16'])
+        guests['6'].store_admin_password.assert_called_once_with('pw')
+        guests['6'].cluster_complete.assert_called_once_with()
+        mock_reset_task.assert_called_with()
+        mock_update.assert_not_called()
+
+    @patch.object(ClusterTasks, 'update_statuses_on_failure')
+    @patch.object(ClusterTasks, 'reset_task')
+    @patch.object(ClusterTasks, 'get_guest')
+    @patch.object(ClusterTasks, '_all_instances_ready')
+    @patch.object(DBInstance, 'find_by')
+    def test_add_member_that_is_not_ready(self, mock_find_by, mock_ready,
+                                          mock_guest, mock_reset_task,
+                                          mock_update):
+        mock_find_by.return_value = self._member("6", "member-new")
+        mock_ready.return_value = False
+        self.clustertasks.add_member(Mock(), self.cluster_id, "6")
+        mock_guest.assert_not_called()
         mock_reset_task.assert_called_with()
 
     @patch.object(DBCluster, 'save')

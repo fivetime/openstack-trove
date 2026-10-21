@@ -585,14 +585,26 @@ class MongoDBApp(service.BaseDbApp):
         member_hosts = ['%s:%s' % (member, self.port) for member in members]
         LOG.info("Adding members %s to replica set %s.", member_hosts,
                  self.replica_set_name)
+        # The members healthy before, this primary alone at first, and
+        # the new ones (the set may have members already: one replacing
+        # a lost member joins it).
+        expected = self.adm.count_healthy_members() + len(members)
         self.adm.rs_add_members(member_hosts)
-        expected = len(members) + 1
 
         def _all_members_healthy():
             return self.adm.count_healthy_members() == expected
 
         utils.poll_until(_all_members_healthy, sleep_time=10,
                          time_out=CONF.mongodb.add_members_timeout)
+
+    def remove_members(self, hosts):
+        """Take the given hosts (host:port) out of the replica set this
+        primary leads: a member lost for good, which the cluster
+        replaces. The set goes on with the majority that stays.
+        """
+        LOG.info("Removing members %s from replica set %s.", hosts,
+                 self.replica_set_name)
+        self.adm.rs_remove_members(hosts)
 
     def add_config_servers(self, config_server_hosts):
         """Configure the config servers on a query router and start it."""
@@ -1018,6 +1030,13 @@ class MongoDBAdmin(object):
         for host in hosts:
             config['members'].append({'_id': next_id, 'host': host})
             next_id += 1
+        self._run('replSetReconfig', config)
+
+    def rs_remove_members(self, hosts):
+        config = self._run('replSetGetConfig')['config']
+        config['version'] += 1
+        config['members'] = [m for m in config['members']
+                             if m['host'] not in hosts]
         self._run('replSetReconfig', config)
 
     def add_shard(self, url):

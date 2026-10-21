@@ -36,6 +36,8 @@ from trove.common.strategies.cluster.experimental.galera_common import (
     repair as galera_repair)
 from trove.common.strategies.cluster.experimental.group_replication import (
     repair as gr_repair)
+from trove.common.strategies.cluster.experimental.mongodb import (
+    repair as mongodb_repair)
 from trove.common.strategies.cluster.experimental.postgresql import (
     repair as pg_repair)
 from trove.common.strategies.cluster.experimental.redis import (
@@ -734,6 +736,43 @@ class TestReplacement(ReplaceTestBase):
         self.assertIn('dbaas.cluster_grow.start', sent)
         self.assertIn('dbaas.cluster_grow.end', sent)
 
+    def test_the_plugins_own_steps(self):
+        # A datastore whose steps are not the cluster's shrink and grow
+        # (MongoDB: a replica set loses and gets one member): what it
+        # remembers of the lost member is kept, its steps are called with
+        # the tenant's context and the state, the tasks taken as ever.
+        cluster, members = self._lost_cluster()
+        self.plugin.remember = lambda c, db, lost, others: {
+            'extra': lost.name}
+        self.plugin.remove = mock.Mock()
+        self.plugin.add = mock.Mock()
+        self.repair.check_now(mock.Mock(), cluster, manager='valkey')
+        state = self._state(cluster)
+        self.assertEqual(members[0].name, state['extra'])
+        context, db, given = self.plugin.remove.call_args.args
+        self.assertEqual(('t', members[0].id, ADMIN_USER),
+                         (context.project_id, given['lost'], context.user_id))
+        self.task_api.return_value.shrink_cluster.assert_not_called()
+        self.assertEqual(ClusterTasks.SHRINKING_CLUSTER,
+                         DBCluster.find_by(id=cluster.id).task_status)
+        db = self._removed(cluster, members)
+        self.repair.check_now(mock.Mock(), db, manager='valkey')
+        context, db, given = self.plugin.add.call_args.args
+        self.assertEqual((replace.ADDING, members[0].name),
+                         (given['phase'], given['extra']))
+        self.assertEqual(ClusterTasks.GROWING_CLUSTER,
+                         DBCluster.find_by(id=cluster.id).task_status)
+
+    def test_a_plugin_that_cannot_remember_holds(self):
+        cluster, _members = self._lost_cluster()
+        self.plugin.remember = mock.Mock(side_effect=RuntimeError('no rs'))
+        self.assertEqual(replace.FOLLOW_EVERY * 4, self.repair.check_now(
+            mock.Mock(), cluster, manager='valkey'))
+        self.assertIsNone(self._state(cluster))
+        self.assertEqual(ClusterTasks.NONE,
+                         DBCluster.find_by(id=cluster.id).task_status)
+        self.assertEqual([], self._events())
+
     def test_a_replacement_is_followed_while_its_task_runs(self):
         cluster, _members = self._lost_cluster()
         self.repair.check_now(mock.Mock(), cluster, manager='valkey')
@@ -931,6 +970,114 @@ class TestPostgresqlReplace(_PeerViews):
         self.assertFalse(self._ask()[0])
 
 
+class TestMongoDbReplace(_PeerViews):
+    """MongoDB's word on a lost member of a shard: the set's other
+    members vouch (names as the set has them, host:port); the config
+    servers and the query routers see nothing of it; the steps are the
+    set's own, on the task manager.
+    """
+
+    manager = 'mongodb'
+    ips = ('10.0.0.11:27017', '10.0.0.12:27017', '10.0.0.13:27017')
+
+    def setUp(self):
+        super(TestMongoDbReplace, self).setUp()
+        for member in self.members:
+            member.shard_id = 'shard-1'
+            member.type = 'member'
+            member.save()
+        self.rest = []
+        for name, kind, shard in (('c-configsvr-1', 'config_server', 'cfg'),
+                                  ('c-mongos-1', 'query_router', None)):
+            db = DBInstance(InstanceTasks.NONE, id=utils.generate_uuid(),
+                            name=name, tenant_id='t',
+                            cluster_id=self.cluster.id,
+                            datastore_version_id='v1', deleted=False,
+                            created=timeutils.utcnow(), shard_id=shard,
+                            type=kind)
+            db.save()
+            self.made.append(db)
+            self.rest.append(db)
+        self._tell(1, ch.view(ch.DEGRADED, ['10.0.0.11:27017'],
+                              'replica set rs1: 10.0.0.11:27017 out',
+                              '10.0.0.12:27017'))
+        self._tell(2, ch.view(ch.DEGRADED, ['10.0.0.11:27017'],
+                              'replica set rs1: 10.0.0.11:27017 out',
+                              '10.0.0.13:27017'))
+
+    def _ask(self, lost=None):
+        plugin = replace.plugin_for(self.manager)
+        # No guest for the config server or the router: asking one fails.
+        plugin.guest_factory = lambda c, i, m: self.guests[i]
+        lost = lost or self.members[0]
+        others = [m for m in self.members + self.rest if m.id != lost.id]
+        return plugin.can_replace(mock.Mock(), self.cluster, lost, others)
+
+    def test_the_sets_other_members_vouch(self):
+        self.assertEqual(
+            (True, 'every other member holds 10.0.0.11:27017 out'),
+            self._ask())
+
+    def test_not_a_config_server_or_a_query_router(self):
+        for lost in self.rest:
+            ok, why = self._ask(lost)
+            self.assertFalse(ok)
+            self.assertIn(lost.type, why)
+
+    def test_not_while_the_set_has_no_primary(self):
+        self._tell(1, ch.view(ch.DOWN, ['10.0.0.11:27017'],
+                              'replica set rs1 has no primary',
+                              '10.0.0.12:27017'))
+        self.assertFalse(self._ask()[0])
+
+    def test_what_the_steps_need(self):
+        plugin = replace.plugin_for(self.manager)
+        plugin.guest_factory = lambda c, i, m: self.guests[i]
+        self.guests[self.members[1].id].get_replica_set_name.\
+            return_value = 'rs1'
+        self.assertEqual(
+            {'shard_id': 'shard-1', 'host': '10.0.0.11:27017',
+             'replica_set_name': 'rs1'},
+            plugin.remember(mock.Mock(), self.cluster, self.members[0],
+                            self.members[1:] + self.rest))
+        common_health.record(self.cluster.id, ch.combine(
+            [(m.name, ch.view(ch.HEALTHY)) for m in self.members], []))
+        self.assertRaises(exception.TroveError, plugin.remember,
+                          mock.Mock(), self.cluster, self.members[0],
+                          self.members[1:])
+
+    def test_the_sets_own_steps(self):
+        plugin = replace.plugin_for(self.manager)
+        api = mock.patch.object(task_api, 'load').start().return_value
+        state = {'lost': self.members[0].id, 'host': '10.0.0.11:27017',
+                 'shard_id': 'shard-1', 'replica_set_name': 'rs1',
+                 'spec': {'flavor_id': 'f1', 'volume_size': 10}}
+        plugin.remove('ctx', self.cluster, state)
+        api.mongodb_remove_member.assert_called_once_with(
+            self.cluster.id, self.members[0].id, '10.0.0.11:27017')
+        load = mock.patch.object(cluster_models.Cluster, 'load').start()
+        cluster = load.return_value
+        cluster.name = 'c'
+        cluster._create_instances.return_value = ['new']
+        with mock.patch.object(mongodb_repair.time, 'time',
+                               return_value=1792600000.0):
+            plugin.add('ctx', self.cluster, state)
+        (spec,), config, tag, _locality = (
+            cluster._create_instances.call_args.args)
+        self.assertEqual({'flavor_id': 'f1', 'volume_size': 10,
+                          'name': 'c-rs1-1792600000'}, spec)
+        self.assertEqual({'shard_id': 'shard-1', 'instance_type': 'member',
+                          'replica_set_name': 'rs1'}, config)
+        self.assertEqual('rs1', tag)
+        api.mongodb_add_member.assert_called_once_with(self.cluster.id,
+                                                       'new')
+
+    def test_the_plugin_is_found_by_its_entry_point(self):
+        replace._plugins.clear()
+        self.assertIsInstance(replace.plugin_for('mongodb'),
+                              mongodb_repair.MongoDbReplace)
+
+
 def DBInstance_all(cluster_id):
     return DBInstance.find_all(cluster_id=cluster_id, deleted=False).all()
 
@@ -994,4 +1141,4 @@ class TestSentinelReplace(test_health.HealthTestBase):
             plugin = replace.plugin_for(manager)
             self.assertIsInstance(plugin, redis_repair.SentinelReplace)
             self.assertEqual(manager, plugin.manager)
-        self.assertIsNone(replace.plugin_for('mongodb'))
+        self.assertIsNone(replace.plugin_for('cassandra'))
