@@ -802,8 +802,25 @@ class TestMemberView(trove_testtools.TestCase):
         self.container.exec_run.side_effect = self._exec
         mock.patch.object(galera_service.time, 'monotonic',
                           return_value=1000.0).start()
+        # The members whose ready port answers (they take writes); the
+        # others refuse it, nothing listening there.
+        self.holders = set()
+        self.connect = mock.patch(
+            'socket.create_connection', side_effect=self._connect).start()
         self.addCleanup(mock.patch.stopall)
         self.patch_datastore_manager('pxc')
+
+    def _connect(self, address, timeout=None):
+        if address[0] in self.holders:
+            return mock.Mock()
+        raise ConnectionRefusedError(111, 'Connection refused')
+
+    def _probed(self):
+        return [c.args[0][0] for c in self.connect.call_args_list]
+
+    def _hold(self, holding=True):
+        self.app.ready_port = mock.Mock()
+        self.app.ready_port.held.return_value = holding
 
     def _exec(self, command, environment=None):
         host = [a for a in command if a.startswith('--host=')][0][7:]
@@ -880,6 +897,84 @@ class TestMemberView(trove_testtools.TestCase):
                          self.container.exec_run.call_args.kwargs[
                              'environment'])
         self.assertNotIn('p', command)
+
+    def test_a_new_lower_member_follows_the_writer(self):
+        # Production (2026-10-21): a member replacing a lost one had the
+        # lowest address and took the writes once synced (25 s without
+        # writes). It follows the member that takes them now.
+        self.sections['mysqld']['wsrep_node_address'] = '10.0.0.1'
+        self.holders.add('10.0.0.2')
+        self.assertEqual(('Synced', 'SECONDARY', False, False),
+                         tuple(self.app.member_view())[:4])
+        self.assertEqual(['10.0.0.2'], self._probed())
+        self.connect.assert_called_with(('10.0.0.2', 3307), timeout=3)
+        # Nobody asked whether it is synced: the writer keeps them.
+        self.assertEqual([], self._asked())
+
+    def test_a_member_follows_a_higher_writer(self):
+        # The writer is above (the lower ones came back or joined after):
+        # this member does not take the writes either.
+        self.holders.add('10.0.0.3')
+        self.assertEqual('SECONDARY', self.app.member_view().role)
+        self.assertEqual(['10.0.0.1', '10.0.0.3'], self._probed())
+        self.assertEqual([], self._asked())
+
+    def test_the_writer_keeps_writes(self):
+        # 10.0.0.1 is synced and below, but does not take writes: this
+        # member, which does, keeps them; only the lower ones are probed.
+        self._hold()
+        self.assertEqual(('Synced', 'PRIMARY', True, False),
+                         tuple(self.app.member_view())[:4])
+        self.assertEqual(['10.0.0.1'], self._probed())
+        self.assertEqual([], self._asked())
+
+    def test_two_writers_end_with_the_lower(self):
+        # One did not see the other in time: the higher gives way.
+        self._hold()
+        self.holders.add('10.0.0.1')
+        self.assertEqual('SECONDARY', self.app.member_view().role)
+
+    def test_the_writer_keeps_writes_while_it_donates(self):
+        # Experiment (2026-10-21): the writer donated the state of a
+        # member that joined, gave its writes up, and nobody took them
+        # (12.7 s without a writer). It keeps them: a transfer does not
+        # block writes.
+        self._hold()
+        self.status = _status(wsrep_local_state_comment='Donor/Desynced')
+        self.assertEqual(('Donor/Desynced', 'PRIMARY', True, False),
+                         tuple(self.app.member_view())[:4])
+
+    def test_a_donor_that_does_not_take_writes_takes_none(self):
+        self._hold(False)
+        self.status = _status(wsrep_local_state_comment='Donor/Desynced')
+        self.assertEqual(('Donor/Desynced', None, False, False),
+                         tuple(self.app.member_view())[:4])
+        self.assertEqual([], self._probed())
+        # Nor in multi writer mode: there every synced member takes them.
+        self._hold()
+        self.sections['trove'] = {'cluster_writer_mode': 'multi'}
+        self.assertIsNone(self.app.member_view().role)
+
+    def test_the_writer_does_not_keep_writes_out_of_the_component(self):
+        self._hold()
+        self.status = _status(wsrep_cluster_status='non-Primary',
+                              wsrep_local_state_comment='Initialized',
+                              wsrep_ready='OFF')
+        self.assertEqual(('Initialized', None, False, False),
+                         tuple(self.app.member_view())[:4])
+        self.assertEqual([], self._probed())
+
+    def test_a_new_answer_once_it_takes_or_gives_writes(self):
+        # The lowest synced member takes the writes when none does; once
+        # its port is open the answer is worked out again (it is the one
+        # that keeps them now), not kept from before.
+        self.assertEqual('SECONDARY', self.app.member_view().role)
+        self.assertEqual(['10.0.0.1'], self._asked())
+        self.app.member_view()
+        self.assertEqual(2, len(self._probed()))
+        self._hold()
+        self.app.member_view()
+        self.assertEqual(3, len(self._probed()))
 
     def test_the_lowest_member_asks_nobody(self):
         self.sections['mysqld']['wsrep_node_address'] = '10.0.0.1'

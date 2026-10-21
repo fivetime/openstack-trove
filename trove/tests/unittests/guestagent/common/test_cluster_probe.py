@@ -935,6 +935,12 @@ class TestClusterEntry(ProbeTestBase):
                           'writable': False, 'ready_port': None},
                          self.entry.snapshot())
 
+    def test_the_app_is_given_the_port(self):
+        # A Galera writer keeps its writes while it holds the port.
+        entry = probe.ClusterEntry(self.app, mock.MagicMock(),
+                                   conf=self.conf)
+        self.assertIs(entry.port, self.app.ready_port)
+
     def test_a_member_out_of_the_cluster_is_left_to_its_datastore(self):
         self.app.member_view.return_value = _view('OFFLINE', None)
         for seconds in (0, 61, 92, 200):

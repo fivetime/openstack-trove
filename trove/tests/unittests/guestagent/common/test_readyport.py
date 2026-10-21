@@ -62,6 +62,22 @@ class TestReadyPort(trove_testtools.TestCase):
         # An open port: the redirect there, the reset not.
         self._rules(redirect=False, reset=False)
 
+    def test_held_in_the_container_that_runs(self):
+        self.assertFalse(self.port.held())
+        self._rule_absent()
+        self.port.ensure(True)
+        self.assertTrue(self.port.held())
+        # The database container started again: a new namespace without
+        # the rule, whatever was applied in the one before.
+        self.docker.containers.get.return_value.attrs = {
+            'State': {'Pid': 5151}}
+        self.assertFalse(self.port.held())
+        self.docker.containers.get.side_effect = Exception('no such')
+        self.assertFalse(self.port.held())
+        self.docker.containers.get.side_effect = None
+        self.port.ensure(False)
+        self.assertFalse(self.port.held())
+
     def test_no_container(self):
         self.docker.containers.get.side_effect = Exception('no such')
         self.assertIsNone(self.port.ensure(True))

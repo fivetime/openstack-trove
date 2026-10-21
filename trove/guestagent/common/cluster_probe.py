@@ -512,6 +512,9 @@ class ClusterEntry(ClusterWatch):
         self.reconcile_every = conf.cluster_ready_port_reconcile
         self.port = readyport.ReadyPort(
             docker_client, conf.cluster_ready_port, app.DATABASE_PORT)
+        # The app may ask whether the member holds the port (a writer that
+        # keeps writes while it can).
+        app.ready_port = self.port
         # A second port, open on a member that serves reads (a standby of
         # a primary), for a datastore whose conf has one.
         read_port = getattr(conf, 'cluster_read_port', 0)

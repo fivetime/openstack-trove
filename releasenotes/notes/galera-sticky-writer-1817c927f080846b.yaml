@@ -1,0 +1,15 @@
+---
+fixes:
+  - |
+    In single writer mode a Galera cluster's writer keeps the writes while
+    it can (synced in the primary component, or donating a state
+    transfer): a member that joins or comes back with a lower address
+    follows it instead of taking them over. A member that does not take
+    writes asks the synced members of its component whether one does (its
+    ready port answers), and only when none does the lowest of them takes
+    them, as before. Each takeover had the clients without a writer while
+    the load balancer moved (25 s on a production cluster whose member
+    was replaced); a writer that came back after a failure took the
+    writes back, a second time. A writer that donated the state of a
+    member that joined gave its writes up, and nobody took them until it
+    was synced again.

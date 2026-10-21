@@ -21,6 +21,7 @@ each member in turn, the first with ``bootstrap=True``, and
 import datetime
 import os
 import re
+import socket
 import threading
 import time
 
@@ -74,6 +75,7 @@ WSREP_STATUS = (
     "'wsrep_last_committed', 'wsrep_cluster_state_uuid', "
     "'wsrep_local_state_uuid', 'wsrep_cluster_size')")
 SYNCED = 'Synced'
+DONOR = 'Donor/Desynced'
 PRIMARY = 'Primary'
 # Where the server keeps where it stands between two runs.
 GRASTATE_FILE = 'grastate.dat'
@@ -405,59 +407,97 @@ class GaleraAppMixin(object):
                 if member.strip()]
 
     _writer = None
+    # The member's ready port (cluster_probe.ClusterEntry gives it): its
+    # rule there or not is whether it takes writes now.
+    ready_port = None
+
+    def _holds_ready_port(self):
+        return self.ready_port is not None and self.ready_port.held()
+
+    def _peer_holds_ready_port(self, ip, port, timeout):
+        """Whether a peer takes writes: its ready port redirects to the
+        database port only there; elsewhere nothing listens on it.
+        """
+        try:
+            socket.create_connection((ip, port), timeout=timeout).close()
+            return True
+        except OSError:
+            return False
 
     def _elect_writer(self, status):
-        """The member that takes writes in single writer mode: the one
-        with the lowest address among the synced members of the primary
-        component. Every member works it out the same way from the same
-        view, asking only the members below it whether they are synced;
-        the answer is kept until the view changes or for a while, except
-        when a member below is not synced yet (it may be about to): then
-        it is asked again next time.
+        """The member that takes writes in single writer mode. The member
+        that takes them keeps them while it can (synced in the primary
+        component), so that a member that joins or comes back does not
+        take them over: a member that does not take them asks the synced
+        members of its component whether one does (its ready port), and
+        follows it. Only when none does, the one with the lowest address
+        among the synced members takes them, as every member works out
+        alike from the same view, asking the members below it whether
+        they are synced. Two that take them (one did not see the other in
+        time) end with the lower one. The answer is kept until the view
+        changes or for a while, except when a member below is not synced
+        yet (it may be about to): then it is asked again next time.
         """
         conf = CONF.get(CONF.datastore_manager or 'mysql')
         keep_for = (conf.cluster_ready_port_reconcile *
                     conf.cluster_probe_interval)
         conf_id = status.get('wsrep_cluster_conf_id')
+        holding = self._holds_ready_port()
         now = time.monotonic()
         cached = self._writer
         if (cached and cached['conf_id'] == conf_id and cached['stable'] and
+                cached.get('holding') == holding and
                 now - cached['when'] < keep_for):
             return cached['writer']
         self_ip = self._self_ip()
         ip_key = cluster_probe.ip_key
-        below = sorted({ip for ip, port in self._incoming(status)
-                        if port != '0' and ip_key(ip) < ip_key(self_ip)},
-                       key=ip_key)
-        writer, stable = self_ip, True
-        if below:
-            try:
-                user, password = self._recovery_credentials()
-            except Exception as err:
-                # No cluster account yet: the cluster is being built
-                # (install_cluster writes it), and no member takes writes
-                # before it is complete.
-                if self.is_cluster_complete():
-                    LOG.warning("Cannot ask the members below which takes "
-                                "writes: %s", err)
-                else:
-                    LOG.debug("No cluster account yet to ask the members "
-                              "below: %s", err)
-                self._writer = {'conf_id': conf_id, 'writer': None,
-                                'stable': False, 'when': now}
-                return None
-            for ip in below:
-                peer = self._peer_status(ip, user, password,
-                                         conf.cluster_peer_timeout)
-                if (peer and peer.get('wsrep_local_state_comment') == SYNCED
-                        and peer.get('wsrep_cluster_status') == PRIMARY):
-                    writer = ip
-                    break
-                stable = False
+        # A joiner receiving a state transfer has port 0: not synced.
+        peers = sorted({ip for ip, port in self._incoming(status)
+                        if port != '0' and ip != self_ip}, key=ip_key)
+        below = [ip for ip in peers if ip_key(ip) < ip_key(self_ip)]
+        writer, stable = None, True
+        # The one that takes writes now: this member, or a peer whose
+        # ready port answers (only the lower ones, for a member that
+        # holds it: two holders end with the lower one).
+        for ip in (below if holding else peers):
+            if self._peer_holds_ready_port(ip, conf.cluster_ready_port,
+                                           conf.cluster_peer_timeout):
+                writer = ip
+                break
+        if writer is None and holding:
+            writer = self_ip
+        if writer is None:
+            writer = self_ip
+            if below:
+                try:
+                    user, password = self._recovery_credentials()
+                except Exception as err:
+                    # No cluster account yet: the cluster is being built
+                    # (install_cluster writes it), and no member takes
+                    # writes before it is complete.
+                    if self.is_cluster_complete():
+                        LOG.warning("Cannot ask the members below which "
+                                    "takes writes: %s", err)
+                    else:
+                        LOG.debug("No cluster account yet to ask the "
+                                  "members below: %s", err)
+                    self._writer = {'conf_id': conf_id, 'writer': None,
+                                    'stable': False, 'holding': holding,
+                                    'when': now}
+                    return None
+                for ip in below:
+                    peer = self._peer_status(ip, user, password,
+                                             conf.cluster_peer_timeout)
+                    if (peer and
+                            peer.get('wsrep_local_state_comment') == SYNCED
+                            and peer.get('wsrep_cluster_status') == PRIMARY):
+                        writer = ip
+                        break
+                    stable = False
         if not cached or cached['writer'] != writer:
             LOG.info("The writer of the cluster is %s.", writer)
         self._writer = {'conf_id': conf_id, 'writer': writer,
-                        'stable': stable, 'when': now}
+                        'stable': stable, 'holding': holding, 'when': now}
         return writer
 
     def member_view(self):
@@ -473,10 +513,16 @@ class GaleraAppMixin(object):
             return cluster_probe.UNKNOWN_MEMBER
         state = status.get('wsrep_local_state_comment')
         primary = status.get('wsrep_cluster_status') == PRIMARY
-        synced = (primary and state == SYNCED and
-                  status.get('wsrep_ready') == 'ON')
+        ready = primary and status.get('wsrep_ready') == 'ON'
+        synced = ready and state == SYNCED
+        # The writer that donates a state transfer to a member that joins
+        # goes on taking writes (the transfer does not block them): it
+        # keeps them, and nobody waits for it to be synced again.
+        donating = (ready and state == DONOR and
+                    self.writer_mode == SINGLE_WRITER and
+                    self._holds_ready_port())
         role = None
-        if synced:
+        if synced or donating:
             if self.writer_mode == MULTI_WRITER:
                 role = 'PRIMARY'
             else:
@@ -529,7 +575,7 @@ class GaleraAppMixin(object):
                                  'cluster_size':
                                      status.get('wsrep_cluster_size')})
         state = status.get('wsrep_local_state_comment')
-        if state in (SYNCED, 'Donor/Desynced'):
+        if state in (SYNCED, DONOR):
             self._unsynced_since = None
             return cluster_probe.NORMAL
         now = time.monotonic()

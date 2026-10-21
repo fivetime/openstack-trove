@@ -76,6 +76,14 @@ class ReadyPort(object):
             LOG.debug("No database container: %s", err)
             return None
 
+    def held(self):
+        """Whether the rule is there now: applied, in the container that
+        runs now (a container that started again has none, whatever was
+        applied in the one before).
+        """
+        return (bool(self.applied) and self.pid is not None and
+                self.pid == self.container_pid())
+
     def _iptables(self, pid, action, table='nat', rule=None):
         # -w waits for the xtables lock instead of failing on it.
         utils.execute_with_timeout(
