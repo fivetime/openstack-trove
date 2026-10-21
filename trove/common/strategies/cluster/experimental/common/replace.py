@@ -53,6 +53,9 @@ from trove.common import cfg
 from trove.common import clients
 from trove.common import cluster_health
 from trove.common import context as trove_context
+from trove.common.notification import DBaaSClusterGrow
+from trove.common.notification import DBaaSClusterShrink
+from trove.common.notification import StartNotification
 from trove.common.strategies.cluster.experimental.common import health
 
 LOG = logging.getLogger(__name__)
@@ -61,6 +64,9 @@ CONF = cfg.CONF
 NAMESPACE = 'trove.cluster.repair'
 STATE = 'repair'
 REMOVING, ADDING = 'removing', 'adding'
+# The cluster's task while a step is under way.
+STEP_TASKS = {REMOVING: ClusterTasks.SHRINKING_CLUSTER,
+              ADDING: ClusterTasks.GROWING_CLUSTER}
 # Seconds between two looks while a step is under way.
 FOLLOW_EVERY = 30
 
@@ -113,12 +119,20 @@ class Gone(object):
         self.name = name
 
 
-def tenant_context(db_cluster):
+def tenant_context(db_cluster, action=None):
     """The task manager acting on the tenant's cluster: its project, the
-    service's rights.
+    service's rights; with the notification of the cluster's ``action``
+    (a ``DBaaSCluster...`` class), as the API sets one on a request: the
+    task manager's step of the action ends it.
     """
-    return trove_context.TroveContext(project_id=db_cluster.tenant_id,
-                                      is_admin=True)
+    context = trove_context.TroveContext(project_id=db_cluster.tenant_id,
+                                         is_admin=True)
+    if action is not None:
+        context.notification = action(
+            context, request_id=context.request_id,
+            server_type='taskmanager', tenant_id=db_cluster.tenant_id,
+            client_ip=CONF.host, server_ip=CONF.host)
+    return context
 
 
 class MemberReplacement(object):
@@ -219,8 +233,11 @@ class MemberReplacement(object):
                     'replace', state['reason'])
         try:
             from trove.taskmanager import api as task_api
-            task_api.load(tenant_context(db_cluster), manager).shrink_cluster(
-                db_cluster.id, [lost.id])
+            context = tenant_context(db_cluster, DBaaSClusterShrink)
+            with StartNotification(context, cluster_id=db_cluster.id,
+                                   instance_ids=[lost.id]):
+                task_api.load(context, manager).shrink_cluster(
+                    db_cluster.id, [lost.id])
         except Exception as err:
             self._end(db_cluster, state, 'the removal was not sent: %s' % err)
             self._release(db_cluster)
@@ -230,15 +247,21 @@ class MemberReplacement(object):
         """The next step of a replacement under way. Returns the seconds
         until the next look, or None once it ended.
         """
-        if db_cluster.task_status != ClusterTasks.NONE:
-            return FOLLOW_EVERY
         since = timeutils.normalize_time(
             timeutils.parse_isotime(state['since']))
         if (self._now() - since).total_seconds() > \
                 CONF.cluster_repair_replace_timeout:
+            held = db_cluster.task_status == STEP_TASKS[state['phase']]
             self._end(db_cluster, state, 'not done within %d s' %
                       CONF.cluster_repair_replace_timeout)
+            if held:
+                # A step whose task never ended (it failed before it
+                # could end it) holds the cluster no longer: the task of
+                # the step is the replacement's, taken by it.
+                self._release(db_cluster)
             return None
+        if db_cluster.task_status != ClusterTasks.NONE:
+            return FOLLOW_EVERY
         ids = {m.id for m in members}
         if state['phase'] == REMOVING:
             if state['lost'] in ids:
@@ -261,7 +284,7 @@ class MemberReplacement(object):
     def _add(self, db_cluster, manager, state):
         from trove.cluster import models as cluster_models
         from trove.common import glance as common_glance
-        context = tenant_context(db_cluster)
+        context = tenant_context(db_cluster, DBaaSClusterGrow)
         try:
             cluster = cluster_models.Cluster.load(context, db_cluster.id)
             image_id = cluster.ds_version.image_id
@@ -271,7 +294,8 @@ class MemberReplacement(object):
                     cluster.ds_version.image_tags)
             state = dict(state, phase=ADDING)
             self._save(db_cluster, state)
-            cluster.grow([dict(state['spec'])], image_id)
+            with StartNotification(context, cluster_id=db_cluster.id):
+                cluster.grow([dict(state['spec'])], image_id)
         except Exception as err:
             LOG.exception("Cluster %s: the member replacing %s was not "
                           "added.", db_cluster.id, state['lost'])

@@ -23,7 +23,9 @@ from trove.cluster import models as cluster_models
 from trove.cluster.models import DBCluster
 from trove.cluster.tasks import ClusterTasks
 from trove.common import cluster_health as ch
+from trove.common import context as trove_context
 from trove.common import exception
+from trove.common.notification import EndNotification
 from trove.common.strategies.cluster.experimental.common import (
     api as common_api)
 from trove.common.strategies.cluster.experimental.common import (
@@ -411,8 +413,9 @@ class TestReplacement(ReplaceTestBase):
         self.task_api.return_value.shrink_cluster.assert_called_once_with(
             cluster.id, [members[0].id])
         self.assertEqual([repair.EVENT_START], self._events())
-        self.assertEqual('replace',
-                         self.notifier.info.call_args.args[2]['action'])
+        self.assertEqual('replace', [
+            c.args[2] for c in self.notifier.info.call_args_list
+            if c.args[1] == repair.EVENT_START][0]['action'])
 
     def test_nothing_when_off_without_a_plugin_or_refused(self):
         cluster, _members = self._lost_cluster()
@@ -546,6 +549,57 @@ class TestReplacement(ReplaceTestBase):
             mock.Mock(), DBCluster.find_by(id=cluster.id), manager='valkey'))
         self.assertIn('not done within',
                       self.notifier.info.call_args.args[2]['reason'])
+
+    def test_a_step_whose_task_never_ended_is_let_go_in_time(self):
+        cluster, _members = self._lost_cluster()
+        self.repair.check_now(mock.Mock(), cluster, manager='valkey')
+        # The shrink failed before it could end its task.
+        self.now += datetime.timedelta(seconds=3601)
+        self.assertIsNone(self.repair.check_now(
+            mock.Mock(), DBCluster.find_by(id=cluster.id), manager='valkey'))
+        self.assertIsNone(self._state(cluster))
+        self.assertEqual(ClusterTasks.NONE,
+                         DBCluster.find_by(id=cluster.id).task_status)
+        self.assertEqual([repair.EVENT_START, repair.EVENT_ERROR],
+                         self._events())
+
+    def test_a_task_not_the_steps_is_left_alone_in_time(self):
+        cluster, _members = self._lost_cluster()
+        self.repair.check_now(mock.Mock(), cluster, manager='valkey')
+        DBCluster.find_by(id=cluster.id).update(
+            task_status=ClusterTasks.DELETING)
+        self.now += datetime.timedelta(seconds=3601)
+        self.repair.check_now(
+            mock.Mock(), DBCluster.find_by(id=cluster.id), manager='valkey')
+        self.assertEqual(ClusterTasks.DELETING,
+                         DBCluster.find_by(id=cluster.id).task_status)
+
+    def _ended_by_the_task_manager(self, context, **kwargs):
+        # The cast carries the context to the task manager, whose step
+        # of the action ends its notification (manager.shrink_cluster).
+        carried = trove_context.TroveContext.from_dict(context.to_dict())
+        with EndNotification(carried, **kwargs):
+            pass
+        return [c.args[1] for c in self.notifier.info.call_args_list]
+
+    def test_the_shrink_and_the_grow_are_the_clusters_actions(self):
+        cluster, members = self._lost_cluster()
+        self.repair.check_now(mock.Mock(), cluster, manager='valkey')
+        context = self.task_api.call_args.args[0]
+        self.assertEqual('taskmanager', context.notification.server_type)
+        sent = self._ended_by_the_task_manager(
+            context, cluster_id=cluster.id, instance_ids=[members[0].id])
+        self.assertIn('dbaas.cluster_shrink.start', sent)
+        self.assertIn('dbaas.cluster_shrink.end', sent)
+        db = self._removed(cluster, members)
+        load = mock.patch.object(cluster_models.Cluster, 'load').start()
+        load.return_value.ds_version.image_id = 'image-1'
+        self.repair.check_now(mock.Mock(), db, manager='valkey')
+        context = load.call_args.args[0]
+        sent = self._ended_by_the_task_manager(
+            context, cluster_id=cluster.id, instance_ids=['new'])
+        self.assertIn('dbaas.cluster_grow.start', sent)
+        self.assertIn('dbaas.cluster_grow.end', sent)
 
     def test_a_replacement_is_followed_while_its_task_runs(self):
         cluster, _members = self._lost_cluster()
