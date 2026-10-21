@@ -135,12 +135,8 @@ class PeersHoldItOut(ReplacePlugin):
         if len(others) < self.min_others:
             return False, 'fewer than %d members would be left' % (
                 self.min_others)
-        lost_name = next((name for name, trove_name in
-                          health.known_members(db_cluster.id).items()
-                          if trove_name == lost.name), None)
-        if not lost_name:
-            return False, 'its address is not known'
         timeout = CONF.get(self.manager).cluster_health_timeout
+        views = []
         for member in others:
             try:
                 view = self.guest_factory(
@@ -151,10 +147,36 @@ class PeersHoldItOut(ReplacePlugin):
                     member.name, err)
             if not view:
                 return False, 'member %s tells nothing' % member.name
+            views.append((member, view))
+        lost_name = self.name_of(db_cluster, lost, views)
+        if not lost_name:
+            return False, 'its address is not known'
+        for member, view in views:
             ok, why = self.vouches(member, view, lost_name)
             if not ok:
                 return False, why
         return True, 'every other member holds %s out' % lost_name
+
+    @staticmethod
+    def name_of(db_cluster, lost, views):
+        """The lost member's name as the datastore names it: as the
+        cluster's health learnt it, or, where that never learnt it (the
+        health a recovery records, from views without ``me``), the one
+        member every other holds out, alike, and none of them is.
+        """
+        known = next((name for name, trove_name in
+                      health.known_members(db_cluster.id).items()
+                      if trove_name == lost.name), None)
+        if known:
+            return known
+        outs = {frozenset(view.get('out') or []) for _m, view in views}
+        mine = {view.get('me') for _m, view in views}
+        if len(outs) != 1:
+            return None
+        out = next(iter(outs))
+        if len(out) != 1 or out & mine:
+            return None
+        return next(iter(out))
 
 
 _plugins = {}

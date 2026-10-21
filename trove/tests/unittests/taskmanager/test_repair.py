@@ -810,6 +810,20 @@ class TestGaleraReplace(_PeerViews):
             (True, 'every other member holds 172.31.250.100 out'),
             self._ask())
 
+    def test_a_cluster_whose_health_its_recovery_records(self):
+        # Production (gl1, 2026-10-21): Galera's health is recorded from
+        # the recovery's views, which carry no 'me': the members' names
+        # never learnt, the lost one is the one both others hold out.
+        common_health.record(self.cluster.id, ch.combine(
+            [(m.name, ch.view(ch.HEALTHY)) for m in self.members], []))
+        self.assertEqual({}, common_health.known_members(self.cluster.id))
+        self.test_out_of_the_primary_component_of_both_others()
+        # Not when they hold out different members, or one of them.
+        self._tell(2, ch.view(ch.DEGRADED, ['172.31.250.98'],
+                              'not in the primary component',
+                              '172.31.250.99'))
+        self.assertEqual((False, 'its address is not known'), self._ask())
+
     def test_not_while_another_is_alone_or_out_itself(self):
         self._tell(1, ch.view(ch.DEGRADED, ['172.31.250.100'],
                               'not in the primary component',
