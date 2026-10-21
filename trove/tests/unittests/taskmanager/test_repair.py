@@ -77,6 +77,18 @@ def _server(status='SHUTOFF', host='kvm-worker3.cloud.local'):
         'id': SERVER, 'status': status, 'OS-EXT-SRV-ATTR:host': host})
 
 
+def _peer_server(server_id):
+    # As GET /servers/{id} gave a member's metadata on production
+    # (2026-10-21): the user the cluster was made for.
+    return servers.Server(mock.Mock(), {
+        'id': server_id, 'status': 'ACTIVE',
+        'OS-EXT-SRV-ATTR:host': 'kvm-worker4.cloud.local',
+        'metadata': {'trove_project_id': 'ac19c812536b4b06bd8c394353d683f3',
+                     'trove_user_id': ADMIN_USER,
+                     'trove_instance_id':
+                         '045d957c-fce3-421a-b5e2-6ff711a3db94'}})
+
+
 def _compute(state='up'):
     # As GET /os-services gave it on production (2026-10-21).
     return services.Service(mock.Mock(), {
@@ -334,10 +346,18 @@ class ReplaceTestBase(RepairTestBase):
             replace.clients, 'create_neutron_client').start().return_value
         self.neutron.list_ports.return_value = {'ports': [
             {'network_id': '68ade15f-b2f1-4d58-903a-e5477c9755b8'}]}
+        mock.patch.object(replace.clients, 'create_nova_client',
+                          return_value=self.nova).start()
         # The member's server is gone; Nova lists it among the deleted,
-        # on a host whose compute service is up.
-        self.nova.servers.get.side_effect = nova_exceptions.NotFound(404)
+        # on a host whose compute service is up. Its peers' servers run.
+        self.nova.servers.get.side_effect = (
+            lambda server_id: _peer_server(server_id)
+            if server_id != SERVER else self._gone())
         self.nova.servers.list.return_value = [_server('DELETED')]
+
+    @staticmethod
+    def _gone():
+        raise nova_exceptions.NotFound(404)
 
     def _lost_cluster(self):
         cluster, members = self._quiet_cluster()
@@ -419,10 +439,25 @@ class TestReplacement(ReplaceTestBase):
                          DBCluster.find_by(id=cluster.id).task_status)
         self.task_api.return_value.shrink_cluster.assert_called_once_with(
             cluster.id, [members[0].id])
+        # The user the cluster was made for, as its members' servers tell
+        # (production: a new member's server without one, HTTP 400).
+        self.assertEqual(ADMIN_USER, state['user'])
+        self.assertEqual(ADMIN_USER,
+                         self.task_api.call_args.args[0].user_id)
         self.assertEqual([repair.EVENT_START], self._events())
         self.assertEqual('replace', [
             c.args[2] for c in self.notifier.info.call_args_list
             if c.args[1] == repair.EVENT_START][0]['action'])
+
+    def test_nothing_when_no_member_tells_its_user(self):
+        cluster, _members = self._lost_cluster()
+        self.nova.servers.get.side_effect = (
+            lambda server_id: servers.Server(mock.Mock(), {
+                'id': server_id, 'status': 'ACTIVE', 'metadata': {}})
+            if server_id != SERVER else self._gone())
+        self.repair.check_now(mock.Mock(), cluster, manager='valkey')
+        self.assertIsNone(self._state(cluster))
+        self.task_api.return_value.shrink_cluster.assert_not_called()
 
     def test_nothing_when_off_without_a_plugin_or_refused(self):
         cluster, _members = self._lost_cluster()
@@ -486,7 +521,13 @@ class TestReplacement(ReplaceTestBase):
         self.assertEqual(replace.FOLLOW_EVERY, self.repair.check_now(
             mock.Mock(), db, manager='valkey'))
         spec = self._state(cluster)['spec']
-        load.return_value.grow.assert_called_once_with([spec], 'image-1')
+        load.return_value.grow.assert_called_once_with([spec], 'image-1',
+                                                       held=True)
+        # The grow's task, taken by the step (of two task managers, one).
+        self.assertEqual(ClusterTasks.GROWING_CLUSTER,
+                         DBCluster.find_by(id=cluster.id).task_status)
+        self.assertEqual(ADMIN_USER, load.call_args.args[0].user_id)
+        DBCluster.find_by(id=cluster.id).update(task_status=ClusterTasks.NONE)
         self.assertEqual(replace.ADDING, self._state(cluster)['phase'])
         # The tenant's cluster, as the service: its project.
         context = load.call_args.args[0]
@@ -522,6 +563,29 @@ class TestReplacement(ReplaceTestBase):
         other.check_now(mock.Mock(), second, manager='valkey')
         load.return_value.grow.assert_called_once()
         self.assertEqual(replace.ADDING, self._state(cluster)['phase'])
+
+    def test_a_step_whose_grow_runs_is_not_ended(self):
+        # Production: the other task manager looked between the step
+        # taken and the grow's first member, and ended it ('the grow
+        # added no member'); the grow went on.
+        cluster, members = self._lost_cluster()
+        self.repair.check_now(mock.Mock(), cluster, manager='valkey')
+        self._removed(cluster, members)
+        load = mock.patch.object(cluster_models.Cluster, 'load').start()
+        load.return_value.ds_version.image_id = 'image-1'
+        other = repair.ClusterRepair(nova_factory=lambda c: self.nova,
+                                     now=lambda: self.now)
+        other.replacement.plugins = lambda manager: self.plugin
+
+        def a_look_meanwhile(*args, **kwargs):
+            self.assertEqual(replace.FOLLOW_EVERY, other.check_now(
+                mock.Mock(), DBCluster.find_by(id=cluster.id),
+                manager='valkey'))
+        load.return_value.grow.side_effect = a_look_meanwhile
+        self.repair.check_now(mock.Mock(), DBCluster.find_by(id=cluster.id),
+                              manager='valkey')
+        self.assertEqual(replace.ADDING, self._state(cluster)['phase'])
+        self.assertEqual([repair.EVENT_START], self._events())
 
     def test_one_task_manager_of_two_tells_the_end(self):
         cluster, members = self._lost_cluster()
@@ -590,6 +654,8 @@ class TestReplacement(ReplaceTestBase):
         new = self._member_of(cluster)
         new.task_status = InstanceTasks.BUILDING_ERROR_SERVER
         new.save()
+        # The grow ended its task.
+        DBCluster.find_by(id=cluster.id).update(task_status=ClusterTasks.NONE)
         self.assertIsNone(self.repair.check_now(
             mock.Mock(), DBCluster.find_by(id=cluster.id), manager='valkey'))
         self.assertEqual(repair.EVENT_ERROR, self._events()[-1])
@@ -662,6 +728,29 @@ class TestReplacement(ReplaceTestBase):
         self.assertEqual(replace.FOLLOW_EVERY, self.repair.check_now(
             mock.Mock(), DBCluster.find_by(id=cluster.id), manager='valkey'))
         self.assertIsNotNone(self._state(cluster))
+
+
+class TestAFailedGrow(test_health.HealthTestBase):
+    """A grow whose new member fails marks the new member, not the members
+    that serve (production: all three of a cluster in ERROR).
+    """
+
+    def test_only_the_members_waited_for(self):
+        from trove.taskmanager import models as task_models
+        cluster, members = self._cluster(3)
+        with InstanceServiceStatus.query() as query:
+            query.filter_by(instance_id=members[2].id).update(
+                {'status_id': ServiceStatuses.FAILED._code})
+        tasks = task_models.ClusterTasks.__new__(task_models.ClusterTasks)
+        tasks.reset_task = mock.Mock()
+        mock.patch.object(task_models.utils, 'poll_until').start()
+        self.addCleanup(mock.patch.stopall)
+        self.assertFalse(tasks._all_instances_ready([members[2].id],
+                                                    cluster.id))
+        self.assertEqual(
+            [InstanceTasks.NONE, InstanceTasks.NONE,
+             InstanceTasks.BUILDING_ERROR_SERVER],
+            [DBInstance.find_by(id=m.id).task_status for m in members])
 
 
 def DBInstance_all(cluster_id):

@@ -225,10 +225,14 @@ class HomogeneousCluster(ClusterModeMixin, cluster_models.Cluster):
 
         return cls(context, db_info, datastore, datastore_version)
 
-    def grow(self, instances, image_id=None):
+    def grow(self, instances, image_id=None, held=False):
+        """Adds members. ``held``: the caller holds the cluster's grow task
+        already (the repair, which takes it to be the one that adds).
+        """
         LOG.debug("Growing cluster %s.", self.id)
 
-        self.validate_cluster_available()
+        self.validate_cluster_available(
+            [ClusterTasks.GROWING_CLUSTER] if held else [ClusterTasks.NONE])
 
         context = self.context
         db_info = self.db_info

@@ -125,14 +125,15 @@ class Gone(object):
         self.name = name
 
 
-def tenant_context(db_cluster, action=None):
+def tenant_context(db_cluster, action=None, user_id=None):
     """The task manager acting on the tenant's cluster: its project, the
-    service's rights; with the notification of the cluster's ``action``
-    (a ``DBaaSCluster...`` class), as the API sets one on a request: the
-    task manager's step of the action ends it.
+    service's rights, the user the cluster's members were made for (a new
+    member's server names it, as theirs do); with the notification of
+    the cluster's ``action`` (a ``DBaaSCluster...`` class), as the API
+    sets one on a request: the task manager's step of the action ends it.
     """
     context = trove_context.TroveContext(project_id=db_cluster.tenant_id,
-                                         is_admin=True)
+                                         user_id=user_id, is_admin=True)
     if action is not None:
         context.notification = action(
             context, request_id=context.request_id,
@@ -231,9 +232,16 @@ class MemberReplacement(object):
                         db_cluster.id, lost.id, len(self.lately),
                         CONF.cluster_repair_window)
             return FOLLOW_EVERY * 4
+        user_id = self._user_of(context, others)
+        if not user_id:
+            LOG.warning("Cluster %s: member %s is lost (%s), but no member "
+                        "tells the user it was made for: not replaced.",
+                        db_cluster.id, lost.id, reason)
+            return FOLLOW_EVERY * 4
         spec = self._spec(context, db_cluster, lost, others)
         state = {'phase': REMOVING, 'lost': lost.id, 'name': lost.name,
-                 'spec': spec, 'before': sorted(m.id for m in others),
+                 'spec': spec, 'user': user_id,
+                 'before': sorted(m.id for m in others),
                  'since': self._now().isoformat(),
                  'reason': '%s; %s' % (reason, why)}
         if not self._take(db_cluster, ClusterTasks.SHRINKING_CLUSTER):
@@ -245,7 +253,8 @@ class MemberReplacement(object):
                     'replace', state['reason'])
         try:
             from trove.taskmanager import api as task_api
-            context = tenant_context(db_cluster, DBaaSClusterShrink)
+            context = tenant_context(db_cluster, DBaaSClusterShrink,
+                                     state['user'])
             with StartNotification(context, cluster_id=db_cluster.id,
                                    instance_ids=[lost.id]):
                 task_api.load(context, manager).shrink_cluster(
@@ -296,13 +305,14 @@ class MemberReplacement(object):
     def _add(self, db_cluster, manager, state):
         from trove.cluster import models as cluster_models
         from trove.common import glance as common_glance
-        context = tenant_context(db_cluster, DBaaSClusterGrow)
-        state = dict(state, phase=ADDING)
-        props = db_cluster.get_properties()
-        props[STATE] = state
-        if not self._swap(db_cluster, props):
-            # The other task manager, on the same report, took the step.
+        context = tenant_context(db_cluster, DBaaSClusterGrow,
+                                 state.get('user'))
+        # The step is the grow's task, taken as the shrink's was: of two
+        # task managers that heard the shrink end, one adds.
+        if not self._take(db_cluster, ClusterTasks.GROWING_CLUSTER):
             return FOLLOW_EVERY
+        state = dict(state, phase=ADDING)
+        self._save(db_cluster, state)
         try:
             # Loaded after the step is taken: the grow saves the cluster
             # as it loaded it, properties too.
@@ -313,15 +323,34 @@ class MemberReplacement(object):
                     clients.create_glance_client(context), None,
                     cluster.ds_version.image_tags)
             with StartNotification(context, cluster_id=db_cluster.id):
-                cluster.grow([dict(state['spec'])], image_id)
+                cluster.grow([dict(state['spec'])], image_id, held=True)
         except Exception as err:
             LOG.exception("Cluster %s: the member replacing %s was not "
                           "added.", db_cluster.id, state['lost'])
             self._end(db_cluster, state, 'the grow failed: %s' % err)
+            self._release(db_cluster)
             return None
         LOG.info("Cluster %s: adding a member in place of %s.",
                  db_cluster.id, state['name'])
         return FOLLOW_EVERY
+
+    @staticmethod
+    def _user_of(context, others):
+        """The user the cluster's members were made for, as their
+        servers tell (``trove_user_id``).
+        """
+        nova = clients.create_nova_client(context)
+        for peer in others:
+            try:
+                server = nova.servers.get(peer.compute_instance_id)
+            except Exception as err:
+                LOG.debug("The server of %s not looked up: %s", peer.id, err)
+                continue
+            user_id = (getattr(server, 'metadata', None) or {}).get(
+                'trove_user_id')
+            if user_id:
+                return user_id
+        return None
 
     def _spec(self, context, db_cluster, lost, others):
         """The new member, like the lost one: its flavor and volume, its

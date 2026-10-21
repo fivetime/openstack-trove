@@ -98,7 +98,8 @@ class VerticaClusterTasksTest(trove_testtools.TestCase):
          get_task_status.return_value) = InstanceTasks.BUILDING_ERROR_SERVER
         ret_val = self.clustertasks._all_instances_ready(["1", "2", "3", "4"],
                                                          self.cluster_id)
-        mock_update.assert_called_with(self.cluster_id, None)
+        mock_update.assert_called_with(
+            self.cluster_id, None, instance_ids=["1", "2", "3", "4"])
         self.assertFalse(ret_val)
 
     @patch.object(ClusterTasks, 'update_statuses_on_failure')
@@ -114,7 +115,8 @@ class VerticaClusterTasksTest(trove_testtools.TestCase):
          get_task_status.return_value) = InstanceTasks.NONE
         ret_val = self.clustertasks._all_instances_ready(["1", "2", "3", "4"],
                                                          self.cluster_id)
-        mock_update.assert_called_with(self.cluster_id, None)
+        mock_update.assert_called_with(
+            self.cluster_id, None, instance_ids=["1", "2", "3", "4"])
         self.assertFalse(ret_val)
 
     @patch.object(DBInstance, 'find_by')

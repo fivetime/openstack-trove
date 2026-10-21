@@ -194,7 +194,7 @@ class ConfigurationMixin(object):
 class ClusterTasks(Cluster):
 
     def update_statuses_on_failure(self, cluster_id, shard_id=None,
-                                   status=None):
+                                   status=None, instance_ids=None):
 
         if CONF.update_status_on_fail:
             if shard_id:
@@ -203,6 +203,11 @@ class ClusterTasks(Cluster):
             else:
                 db_instances = DBInstance.find_all(
                     cluster_id=cluster_id).all()
+            if instance_ids is not None:
+                # Only the members waited for: a grow's new members, not
+                # the members that serve.
+                db_instances = [db for db in db_instances
+                                if db.id in instance_ids]
 
             for db_instance in db_instances:
                 db_instance.set_task_status(
@@ -333,13 +338,15 @@ class ClusterTasks(Cluster):
         except PollTimeOut:
             LOG.exception("Timed out while waiting for all instances "
                           "to become %s.", expected_status)
-            self.update_statuses_on_failure(cluster_id, shard_id)
+            self.update_statuses_on_failure(cluster_id, shard_id,
+                                            instance_ids=instance_ids)
             return False
 
         failed_ids = _instance_ids_with_failures(instance_ids)
         if failed_ids:
             LOG.error("Some instances failed: %s", failed_ids)
-            self.update_statuses_on_failure(cluster_id, shard_id)
+            self.update_statuses_on_failure(cluster_id, shard_id,
+                                            instance_ids=instance_ids)
             return False
 
         LOG.debug("All instances have acquired the expected status %s.",
