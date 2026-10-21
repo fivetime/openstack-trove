@@ -29,6 +29,7 @@ from trove.common import exception
 from trove.common.i18n import _
 from trove.common import loadbalancer
 from trove.common import server_group as srv_grp
+from trove.common.strategies.cluster.experimental.common import repair
 from trove.common.strategies.cluster.experimental.common import topology
 from trove.instance.models import DBInstance
 from trove.instance.models import Instance
@@ -121,7 +122,8 @@ class HomogeneousCluster(ClusterModeMixin, cluster_models.Cluster):
 
     ``KEPT_PROPERTIES``: the extended properties the cluster keeps in its
     properties, for its task manager and its later actions; its topology
-    (``common.topology``) is kept too.
+    (``common.topology``) and what the repair may do (``common.repair``)
+    are kept too.
     """
 
     KEPT_PROPERTIES = ()
@@ -131,8 +133,22 @@ class HomogeneousCluster(ClusterModeMixin, cluster_models.Cluster):
         props = extended_properties
         if not isinstance(props, dict):
             return {}
-        keys = (topology.TOPOLOGY,) + tuple(cls.KEPT_PROPERTIES)
+        keys = ((topology.TOPOLOGY, repair.AUTO_REPAIR) +
+                tuple(cls.KEPT_PROPERTIES))
         return {key: props[key] for key in keys if key in props}
+
+    @staticmethod
+    def _validate_repair(extended_properties):
+        """What the repair may do to the cluster, as the tenant asks."""
+        if not isinstance(extended_properties, dict):
+            return
+        wanted = extended_properties.get(repair.AUTO_REPAIR)
+        if wanted is not None and wanted not in repair.LEVELS:
+            raise exception.BadRequest(_(
+                "The extended property %(key)s is one of %(levels)s, not "
+                "%(wanted)s.") % {'key': repair.AUTO_REPAIR,
+                                  'levels': ', '.join(repair.LEVELS),
+                                  'wanted': wanted})
 
     @staticmethod
     def _validate_cluster_instances(context, instances, datastore,
@@ -186,6 +202,7 @@ class HomogeneousCluster(ClusterModeMixin, cluster_models.Cluster):
             raise exception.ClusterNumInstancesNotLargeEnough(
                 num_instances=ds_conf.min_cluster_member_count)
         extended_properties = cls._validate_mode(extended_properties)
+        cls._validate_repair(extended_properties)
         cls._validate_cluster_instances(context, instances, datastore,
                                         datastore_version)
         # Updating Cluster Task

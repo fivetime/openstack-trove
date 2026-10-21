@@ -43,10 +43,16 @@ Usage::
     curl -XPOST 'localhost:9800/outage?n=100&down=60'   # whole clusters
     curl -XPOST 'localhost:9800/outage?n=100&down=60&members=2'
     curl -XPOST 'localhost:9800/outage?n=100&down=60&members=1'
+    curl -XPOST 'localhost:9800/agent_restart?n=100'   # the agents only
     curl localhost:9800/stats
 
 ``members`` is how many members of each cluster lose power (3 by default);
-they come back ``down`` seconds later.
+they come back ``down`` seconds later, each with a new event reporter, as
+a guest agent that starts. ``agent_restart`` starts the agents of every
+member of the first n clusters again, the databases untouched (an agent
+upgrade). With ``--first-heartbeat`` an agent that starts sends a
+heartbeat at once, as the guest agent does since it serves
+(``Manager.service_started``); without it, at the next heartbeat round.
 """
 
 import argparse
@@ -239,7 +245,8 @@ class FakeEndpoint(object):
 
 class FakeGuests(object):
 
-    def __init__(self, first, count):
+    def __init__(self, first, count, first_heartbeat=False):
+        self.first_heartbeat = first_heartbeat
         self.stats = collections.Counter()
         self.events = collections.Counter()
         self.clusters = {n: FakeCluster(n, self.stats)
@@ -260,14 +267,24 @@ class FakeGuests(object):
                          'view': member.recovery_view(time.monotonic())})
         return send
 
-    def start(self):
+    def _new_reporter(self, member):
         conf = CONF.get(MANAGER)
+        return cluster_probe.ClusterEventReporter(
+            conf.cluster_event_interval, conf.cluster_event_min_interval,
+            send=self._event(member))
+
+    def _agent_starts(self, member):
+        """A guest agent that starts: a new reporter, and its first
+        heartbeat at once when the agent sends one.
+        """
+        member.reporter = self._new_reporter(member)
+        if self.first_heartbeat:
+            eventlet.spawn_n(self._heartbeat, member)
+
+    def start(self):
         for cluster in self.clusters.values():
             for member in cluster.members:
-                member.reporter = cluster_probe.ClusterEventReporter(
-                    conf.cluster_event_interval,
-                    conf.cluster_event_min_interval,
-                    send=self._event(member))
+                member.reporter = self._new_reporter(member)
                 # A server of the shared topic, named after the instance,
                 # like the production guests.
                 target = messaging.Target(
@@ -296,24 +313,23 @@ class FakeGuests(object):
                 eventlet.sleep(0)
             eventlet.sleep(TICK)
 
+    def _heartbeat(self, member):
+        try:
+            conductor_api.API(trove_context.TroveContext()).heartbeat(
+                member.id, {'service_status': 'healthy'},
+                sent=timeutils.utcnow_ts(microsecond=True))
+            self.stats['heartbeats'] += 1
+        except Exception as err:
+            self.stats['heartbeat errors'] += 1
+            print('heartbeat %s: %s' % (member.id, err), file=sys.stderr)
+
     def _heartbeats(self):
         interval = CONF.report_interval
         while True:
             for cluster in self.clusters.values():
                 for member in cluster.members:
-                    if not member.alive:
-                        continue
-                    try:
-                        conductor_api.API(trove_context.TroveContext()).\
-                            heartbeat(member.id,
-                                      {'service_status': 'healthy'},
-                                      sent=timeutils.utcnow_ts(
-                                          microsecond=True))
-                        self.stats['heartbeats'] += 1
-                    except Exception as err:
-                        self.stats['heartbeat errors'] += 1
-                        print('heartbeat %s: %s' % (member.id, err),
-                              file=sys.stderr)
+                    if member.alive:
+                        self._heartbeat(member)
                     eventlet.sleep(0)
             eventlet.sleep(interval)
 
@@ -358,7 +374,25 @@ class FakeGuests(object):
             m.in_group = False
             m.bootstrapped = False
             m.known_at = now + random.uniform(0, POSITION_DELAY)
+            self._agent_starts(m)
         self.stats['powered on'] += len(victims)
+
+    def agent_restart(self, count):
+        """The agents of every member of the first count clusters that are
+        up start again; the databases go on as they were.
+        """
+        hit = []
+        for n in sorted(self.clusters):
+            if len(hit) >= count:
+                break
+            c = self.clusters[n]
+            if c.lost_at is not None or not all(m.alive for m in c.members):
+                continue
+            for m in c.members:
+                self._agent_starts(m)
+                self.stats['agent restarts'] += 1
+            hit.append(c.id)
+        return hit
 
     def snapshot(self):
         now = time.monotonic()
@@ -436,6 +470,10 @@ class Control(http_server.BaseHTTPRequestHandler):
                                          int(query.get('members', 3)))
                 self._reply({'hit': len(hit), 'first': hit[:3],
                              'at': datetime.datetime.utcnow().isoformat()})
+            elif url.path == '/agent_restart':
+                hit = self.guests.agent_restart(int(query['n']))
+                self._reply({'hit': len(hit), 'first': hit[:3],
+                             'at': datetime.datetime.utcnow().isoformat()})
             else:
                 self._reply({'error': 'unknown'}, 404)
         except Exception as err:
@@ -449,6 +487,7 @@ def main():
     parser.add_argument('--port', type=int, default=9800)
     parser.add_argument('--version', default='11.4')
     parser.add_argument('--seed', action='store_true')
+    parser.add_argument('--first-heartbeat', action='store_true')
     args, rest = parser.parse_known_args()
     CONF(rest, project='trove')
     rpc.init(CONF)
@@ -456,7 +495,8 @@ def main():
         from trove.db import get_db_api
         get_db_api().configure_db()
         seed(args.first, args.clusters, args.version)
-    guests = FakeGuests(args.first, args.clusters)
+    guests = FakeGuests(args.first, args.clusters,
+                        first_heartbeat=args.first_heartbeat)
     guests.start()
     Control.guests = guests
     httpd = http_server.HTTPServer(('0.0.0.0', args.port), Control)

@@ -1,0 +1,17 @@
+---
+features:
+  - |
+    The task manager starts again the server of a cluster member that Nova
+    shut off by itself (its domain went away: the server was powered off
+    or killed), for the clusters of every datastore. Neither the datastores
+    nor the cluster recovery started such a member, and the cluster went
+    on short of it. A server stopped through the API stays stopped, and
+    nothing is done on a host whose compute service is not up or while the
+    cluster or a member has a task. A start that does not bring the server
+    up is tried again after ``cluster_repair_start_interval`` seconds (300)
+    at most ``cluster_repair_start_attempts`` times (3); the notifications
+    ``trove.cluster.repair.start``, ``.end`` and ``.error`` tell of it.
+    ``cluster_repair_start`` (on by default) turns it off for the
+    operator; a cluster of a datastore with the common cluster API
+    (Galera, PostgreSQL, Redis sentinel) keeps it off with the extended
+    property ``auto_repair=off``.

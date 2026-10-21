@@ -345,6 +345,19 @@ common_opts = [
                     'whose heartbeat is older than agent_heartbeat_expiry, '
                     'or a recovery under way. The scan asks no member; the '
                     'clusters it finds are looked at. 0 turns it off.'),
+    cfg.BoolOpt('cluster_repair_start', default=True,
+                help='Start the server of a cluster member that Nova shut '
+                     'off by itself (its domain went away: powered off, '
+                     'killed), on a host whose compute service is up. A '
+                     'server stopped through the API stays stopped. A '
+                     'cluster can keep it off with the extended property '
+                     'auto_repair=off.'),
+    cfg.IntOpt('cluster_repair_start_attempts', default=3, min=1,
+               help='Starts of a member\'s server since Nova shut it off '
+                    'after which the repair gives up on it.'),
+    cfg.IntOpt('cluster_repair_start_interval', default=300, min=30,
+               help='Seconds after a start of a member\'s server before it '
+                    'is started again if it is still off.'),
     cfg.IntOpt('cluster_recovery_workers', default=16, min=1,
                help='Clusters the task manager looks at at a time: a look '
                     'waits on the members of the cluster, up to their '

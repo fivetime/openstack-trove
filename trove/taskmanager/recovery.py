@@ -27,7 +27,9 @@ The looks of one cluster are coalesced: however many members report
 within ``cluster_event_coalesce`` seconds, the cluster is looked at
 once; a report that arrives while a look is under way makes one more
 look after it. The looks run on a bounded pool
-(``cluster_recovery_workers``).
+(``cluster_recovery_workers``). Every look also runs the repair
+(``common.repair``), for the clusters of every datastore: what none of
+them brings back by itself, a member Nova shut off.
 """
 
 from concurrent import futures
@@ -50,6 +52,7 @@ from trove.common import cluster_health
 from trove.common import coordination
 from trove.common import exception
 from trove.common.strategies.cluster.experimental.common import health
+from trove.common.strategies.cluster.experimental.common import repair
 from trove.common.strategies.cluster import strategy
 from trove.datastore import models as datastore_models
 from trove.instance.models import DBInstance
@@ -130,6 +133,9 @@ class RecoveryHub(object):
         self.recoveries = {}
         self.managers = {}
         self.cluster_manager = {}
+        # What no datastore brings back by itself (a member Nova shut
+        # off), for the clusters of every datastore.
+        self.repair = repair.ClusterRepair()
         # The looks asked for: cluster -> (due, reason); the clusters
         # being looked at; when each was last looked at.
         self.pending = {}
@@ -343,12 +349,18 @@ class RecoveryHub(object):
             self._forget(cluster_id)
             return
         recovery = self._recovery_of(db_cluster)
-        if recovery is None:
-            return
-        recovery.check_now(self.context, db_cluster, reason)
-        if recovery.still_watching(cluster_id):
-            self.request_look(cluster_id, 'still watching',
-                              delay=recovery.look_again_in(cluster_id))
+        if recovery is not None:
+            recovery.check_now(self.context, db_cluster, reason)
+            if recovery.still_watching(cluster_id):
+                self.request_look(cluster_id, 'still watching',
+                                  delay=recovery.look_again_in(cluster_id))
+        try:
+            again = self.repair.check_now(self.context, db_cluster)
+        except Exception:
+            LOG.exception("The repair of cluster %s failed.", cluster_id)
+            again = None
+        if again is not None:
+            self.request_look(cluster_id, 'repair', delay=again)
 
     def _forget(self, cluster_id):
         with self._lock:
