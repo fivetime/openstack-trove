@@ -544,7 +544,8 @@ class MongoDbTaskManagerAPI(task_api.API):
         LOG.debug("Making async call to remove member %s of cluster %s",
                   instance_id, cluster_id)
         cctxt = self.client.prepare(version=task_api.API.API_BASE_VERSION)
-        cctxt.cast(self.context, "remove_member", cluster_id=cluster_id,
+        cctxt.cast(self.context, "mongodb_remove_member",
+                   cluster_id=cluster_id,
                    instance_id=instance_id, host=host)
 
     def mongodb_add_member(self, cluster_id, instance_id):
@@ -552,7 +553,8 @@ class MongoDbTaskManagerAPI(task_api.API):
         LOG.debug("Making async call to add member %s to cluster %s",
                   instance_id, cluster_id)
         cctxt = self.client.prepare(version=task_api.API.API_BASE_VERSION)
-        cctxt.cast(self.context, "add_member", cluster_id=cluster_id,
+        cctxt.cast(self.context, "mongodb_add_member",
+                   cluster_id=cluster_id,
                    instance_id=instance_id)
 
     def mongodb_add_shard_cluster(self, cluster_id, shard_id,
@@ -561,7 +563,7 @@ class MongoDbTaskManagerAPI(task_api.API):
         version = task_api.API.API_BASE_VERSION
         cctxt = self.client.prepare(version=version)
         cctxt.cast(self.context,
-                   "add_shard_cluster",
+                   "mongodb_add_shard_cluster",
                    cluster_id=cluster_id,
                    shard_id=shard_id,
                    replica_set_name=replica_set_name)

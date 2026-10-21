@@ -16,3 +16,9 @@ fixes:
     A MongoDB primary adding members to a replica set that has members
     already waited for the wrong count (the new members plus one) and
     timed out; it counts the members healthy before.
+  - |
+    The MongoDB strategy's ``add_shard_cluster`` was cast under a name the
+    task manager does not answer (it takes the strategy from the first
+    word of the method, ``mongodb_add_shard_cluster``), so adding a shard
+    through it ended in ``NoSuchMethod``; the replacement's two steps were
+    cast the same way.

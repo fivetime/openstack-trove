@@ -25,6 +25,7 @@ from trove.common.strategies.cluster.experimental.mongodb.taskmanager import (
     MongoDbTaskManagerAPI)
 from trove.guestagent import models as agent_models
 from trove.taskmanager import api as task_api
+from trove.taskmanager.manager import Manager
 from trove.tests.unittests import trove_testtools
 
 
@@ -153,6 +154,41 @@ class ApiTest(trove_testtools.TestCase):
         self._verify_cast('upgrade',
                           instance_id='some-instance-id',
                           datastore_version_id='some-datastore-version')
+
+
+class MongoDbApiTest(ApiTest):
+    """The casts of a strategy's API name methods the task manager
+    answers: the manager takes the strategy from the first word of the
+    method ("mongodb_add_member"), and knows no "add_member".
+    """
+
+    @patch.object(task_api.API, 'get_client')
+    def setUp(self, *args):
+        super(MongoDbApiTest, self).setUp()
+        self.api = MongoDbTaskManagerAPI(self.context)
+        self._mock_rpc_client()
+
+    def _verify_the_manager_answers(self):
+        method = self.call_context.cast.call_args[0][1]
+        self.assertTrue(callable(getattr(Manager(), method)), method)
+
+    def test_remove_member(self):
+        self.api.mongodb_remove_member('c1', 'i1', '10.0.0.5:27017')
+        self._verify_cast('mongodb_remove_member', cluster_id='c1',
+                          instance_id='i1', host='10.0.0.5:27017')
+        self._verify_the_manager_answers()
+
+    def test_add_member(self):
+        self.api.mongodb_add_member('c1', 'i2')
+        self._verify_cast('mongodb_add_member', cluster_id='c1',
+                          instance_id='i2')
+        self._verify_the_manager_answers()
+
+    def test_add_shard_cluster(self):
+        self.api.mongodb_add_shard_cluster('c1', 's1', 'rs2')
+        self._verify_cast('mongodb_add_shard_cluster', cluster_id='c1',
+                          shard_id='s1', replica_set_name='rs2')
+        self._verify_the_manager_answers()
 
 
 class TestAPI(trove_testtools.TestCase):
