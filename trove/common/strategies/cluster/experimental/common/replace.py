@@ -44,6 +44,8 @@ A datastore takes part with a plugin in the namespace
 Without one, a lost member is only told.
 """
 
+import json
+
 from novaclient import exceptions as nova_exceptions
 from oslo_log import log as logging
 from oslo_utils import timeutils
@@ -295,15 +297,21 @@ class MemberReplacement(object):
         from trove.cluster import models as cluster_models
         from trove.common import glance as common_glance
         context = tenant_context(db_cluster, DBaaSClusterGrow)
+        state = dict(state, phase=ADDING)
+        props = db_cluster.get_properties()
+        props[STATE] = state
+        if not self._swap(db_cluster, props):
+            # The other task manager, on the same report, took the step.
+            return FOLLOW_EVERY
         try:
+            # Loaded after the step is taken: the grow saves the cluster
+            # as it loaded it, properties too.
             cluster = cluster_models.Cluster.load(context, db_cluster.id)
             image_id = cluster.ds_version.image_id
             if not image_id:
                 image_id = common_glance.get_image_id(
                     clients.create_glance_client(context), None,
                     cluster.ds_version.image_tags)
-            state = dict(state, phase=ADDING)
-            self._save(db_cluster, state)
             with StartNotification(context, cluster_id=db_cluster.id):
                 cluster.grow([dict(state['spec'])], image_id)
         except Exception as err:
@@ -344,11 +352,28 @@ class MemberReplacement(object):
                 LOG.debug("The ports of %s not looked up: %s", peer.id, err)
                 continue
             if ports:
-                spec['nics'] = [{'net-id': ports[0]['network_id']}]
+                spec['nics'] = [{'network_id': ports[0]['network_id']}]
                 break
         return spec
 
     # The state, the cluster's task
+
+    @staticmethod
+    def _swap(db_cluster, props):
+        """Saves the properties if they are still as the cluster was
+        read: of two task managers that follow the same step, one moves
+        it on. Returns whether this one did.
+        """
+        from trove.cluster import models as cluster_models
+        after = json.dumps(props, sort_keys=True) if props else None
+        with cluster_models.DBCluster.query() as query:
+            moved = query.filter_by(
+                id=db_cluster.id, properties=db_cluster.properties).update(
+                    {'properties': after, 'updated': timeutils.utcnow()},
+                    synchronize_session=False)
+        if moved:
+            db_cluster.properties = after
+        return bool(moved)
 
     @staticmethod
     def _save(db_cluster, state):
@@ -387,7 +412,9 @@ class MemberReplacement(object):
         if error:
             props[FAILED] = {'lost': state['lost'], 'name': state['name'],
                              'error': error, 'at': self._now().isoformat()}
-        db_cluster.save_properties(props)
+        if not self._swap(db_cluster, props):
+            # The other task manager ended it, and told.
+            return
         gone = Gone(state['lost'], state['name'])
         if error:
             LOG.error("Cluster %s: the replacement of member %s ended: %s.",

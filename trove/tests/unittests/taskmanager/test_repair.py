@@ -405,9 +405,16 @@ class TestReplacement(ReplaceTestBase):
         self.assertEqual({'flavor_id': '854b3e43-493b-4e14-830d-449edd211928',
                           'volume_size': 2, 'volume_type': 'nvme-rep3',
                           'availability_zone': 'nova',
-                          'nics': [{'net-id':
+                          'nics': [{'network_id':
                                     '68ade15f-b2f1-4d58-903a-e5477c9755b8'}]},
                          state['spec'])
+        # As the cluster's grow checks the members it adds (production:
+        # 'net-id' failed it, TypeError).
+        neutron = mock.patch.object(cluster_models.clients,
+                                    'create_neutron_client').start()
+        cluster_models.validate_instance_nics(mock.Mock(), [state['spec']])
+        neutron.return_value.find_resource.assert_called_once_with(
+            'network', '68ade15f-b2f1-4d58-903a-e5477c9755b8')
         self.assertEqual(ClusterTasks.SHRINKING_CLUSTER,
                          DBCluster.find_by(id=cluster.id).task_status)
         self.task_api.return_value.shrink_cluster.assert_called_once_with(
@@ -498,6 +505,36 @@ class TestReplacement(ReplaceTestBase):
         ended = [c.args[2] for c in self.notifier.info.call_args_list
                  if c.args[1] == repair.EVENT_END]
         self.assertIn(new.name, ended[0]['reason'])
+
+    def test_one_task_manager_of_two_adds(self):
+        # Both hear the shrink end, and look at once (production).
+        cluster, members = self._lost_cluster()
+        self.repair.check_now(mock.Mock(), cluster, manager='valkey')
+        self._removed(cluster, members)
+        other = repair.ClusterRepair(nova_factory=lambda c: self.nova,
+                                     now=lambda: self.now)
+        other.replacement.plugins = lambda manager: self.plugin
+        first = DBCluster.find_by(id=cluster.id)
+        second = DBCluster.find_by(id=cluster.id)
+        load = mock.patch.object(cluster_models.Cluster, 'load').start()
+        load.return_value.ds_version.image_id = 'image-1'
+        self.repair.check_now(mock.Mock(), first, manager='valkey')
+        other.check_now(mock.Mock(), second, manager='valkey')
+        load.return_value.grow.assert_called_once()
+        self.assertEqual(replace.ADDING, self._state(cluster)['phase'])
+
+    def test_one_task_manager_of_two_tells_the_end(self):
+        cluster, members = self._lost_cluster()
+        self.repair.check_now(mock.Mock(), cluster, manager='valkey')
+        DBCluster.find_by(id=cluster.id).update(task_status=ClusterTasks.NONE)
+        other = repair.ClusterRepair(nova_factory=lambda c: self.nova,
+                                     now=lambda: self.now)
+        first = DBCluster.find_by(id=cluster.id)
+        second = DBCluster.find_by(id=cluster.id)
+        self.repair.check_now(mock.Mock(), first, manager='valkey')
+        other.check_now(mock.Mock(), second, manager='valkey')
+        self.assertEqual([repair.EVENT_START, repair.EVENT_ERROR],
+                         self._events())
 
     def _member_of(self, cluster):
         member = DBInstance(InstanceTasks.NONE, id=utils.generate_uuid(),
