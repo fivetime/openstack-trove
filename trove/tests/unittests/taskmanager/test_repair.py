@@ -19,12 +19,25 @@ from novaclient.v2 import servers
 from novaclient.v2 import services
 from oslo_utils import timeutils
 
+from trove.cluster import models as cluster_models
+from trove.cluster.models import DBCluster
 from trove.cluster.tasks import ClusterTasks
+from trove.common import cluster_health as ch
 from trove.common import exception
 from trove.common.strategies.cluster.experimental.common import (
     api as common_api)
+from trove.common.strategies.cluster.experimental.common import (
+    health as common_health)
 from trove.common.strategies.cluster.experimental.common import repair
+from trove.common.strategies.cluster.experimental.common import replace
+from trove.common.strategies.cluster.experimental.redis import (
+    repair as redis_repair)
+from trove.common import utils
+from trove.instance.models import DBInstance
+from trove.instance.models import InstanceServiceStatus
+from trove.instance.service_status import ServiceStatuses
 from trove.instance.tasks import InstanceTasks
+from trove.taskmanager import api as task_api
 from trove.taskmanager import recovery
 from trove.tests.unittests.taskmanager import test_health
 
@@ -96,7 +109,10 @@ class RepairTestBase(test_health.HealthTestBase):
         return cluster, members
 
     def _events(self):
-        return [c.args[1] for c in self.notifier.info.call_args_list]
+        # The repair's: a health that changes is told through the same
+        # notifier (trove.cluster.health).
+        return [c.args[1] for c in self.notifier.info.call_args_list
+                if c.args[1].startswith('trove.cluster.repair.')]
 
 
 class TestStartDecision(RepairTestBase):
@@ -191,7 +207,6 @@ class TestClusterRepair(RepairTestBase):
         self.assertEqual({}, self.repair.started)
 
     def _heard_from(self, member):
-        from trove.instance.models import InstanceServiceStatus
         with InstanceServiceStatus.query() as query:
             query.filter_by(instance_id=member.id).update(
                 {'updated_at': timeutils.utcnow()})
@@ -286,3 +301,321 @@ class TestAutoRepairProperty(test_health.HealthTestBase):
         self.assertRaises(exception.BadRequest,
                           common_api.HomogeneousCluster._validate_repair,
                           {'auto_repair': 'replace-everything'})
+
+
+class _Plugin(replace.ReplacePlugin):
+
+    def __init__(self, ok=True, why='every other member holds it out'):
+        super(_Plugin, self).__init__('valkey')
+        self.ok, self.why = ok, why
+        self.asked = []
+
+    def can_replace(self, context, db_cluster, lost, others):
+        self.asked.append((lost.id, sorted(m.id for m in others)))
+        return self.ok, self.why
+
+
+class ReplaceTestBase(RepairTestBase):
+
+    def setUp(self):
+        super(ReplaceTestBase, self).setUp()
+        self.patch_conf_property('cluster_repair_replace', True)
+        self.plugin = _Plugin()
+        self.repair.replacement.plugins = lambda manager: self.plugin
+        self.task_api = mock.patch.object(
+            task_api, 'load').start()
+        self.cinder = mock.patch.object(
+            replace.clients, 'create_cinder_client').start().return_value
+        self.cinder.volumes.get.return_value = mock.Mock(
+            volume_type='nvme-rep3', availability_zone='nova')
+        self.neutron = mock.patch.object(
+            replace.clients, 'create_neutron_client').start().return_value
+        self.neutron.list_ports.return_value = {'ports': [
+            {'network_id': '68ade15f-b2f1-4d58-903a-e5477c9755b8'}]}
+        # The member's server is gone; Nova lists it among the deleted,
+        # on a host whose compute service is up.
+        self.nova.servers.get.side_effect = nova_exceptions.NotFound(404)
+        self.nova.servers.list.return_value = [_server('DELETED')]
+
+    def _lost_cluster(self):
+        cluster, members = self._quiet_cluster()
+        for member in members:
+            member.flavor_id = '854b3e43-493b-4e14-830d-449edd211928'
+            member.volume_size = 2
+            member.volume_id = 'vol-%s' % member.id[:8]
+            member.save()
+        return cluster, members
+
+    def _state(self, cluster):
+        return DBCluster.find_by(id=cluster.id).get_properties().get(
+            replace.STATE)
+
+
+class TestLostDecision(ReplaceTestBase):
+    """Nova's side of whether a quiet member is lost for good."""
+
+    def _decide(self, start_decision=None, up=True):
+        member = mock.Mock(compute_instance_id=SERVER)
+        return self.repair.replacement.lost_decision(
+            self.nova, member, start_decision, lambda host: up)
+
+    def test_a_server_gone_on_a_host_that_is_up(self):
+        self.assertTrue(self._decide().lost)
+        self.nova.servers.list.assert_called_once_with(search_opts={
+            'uuid': SERVER, 'deleted': True, 'all_tenants': True})
+
+    def test_a_server_gone_on_a_host_that_is_down_may_run_on(self):
+        verdict = self._decide(up=False)
+        self.assertFalse(verdict.lost)
+        self.assertIn('not up', verdict.reason)
+        self.nova.servers.list.return_value = []
+        self.assertFalse(self._decide().lost)
+
+    def test_in_error_or_off_and_given_up(self):
+        self.nova.servers.get.side_effect = None
+        self.nova.servers.get.return_value = _server('ERROR')
+        self.assertTrue(self._decide().lost)
+        self.assertFalse(self._decide(up=False).lost)
+        self.nova.servers.get.return_value = _server('SHUTOFF')
+        given_up = repair.StartDecision(
+            False, 'started 3 times since Nova shut it off; given up')
+        self.assertTrue(self._decide(given_up).lost)
+        waiting = repair.StartDecision(False, 'started 30 s ago', 271)
+        self.assertFalse(self._decide(waiting).lost)
+        for status in ('ACTIVE', 'BUILD', 'REBOOT'):
+            self.nova.servers.get.return_value = _server(status)
+            self.assertFalse(self._decide().lost)
+
+
+class TestReplacement(ReplaceTestBase):
+    """The replacement of a lost member, step by step."""
+
+    def test_it_begins_with_the_clusters_shrink(self):
+        cluster, members = self._lost_cluster()
+        again = self.repair.check_now(mock.Mock(), cluster,
+                                      manager='valkey')
+        self.assertEqual(replace.FOLLOW_EVERY, again)
+        self.assertEqual([(members[0].id, sorted(m.id for m in members[1:]))],
+                         self.plugin.asked)
+        state = self._state(cluster)
+        self.assertEqual(replace.REMOVING, state['phase'])
+        self.assertEqual(members[0].id, state['lost'])
+        self.assertEqual({'flavor_id': '854b3e43-493b-4e14-830d-449edd211928',
+                          'volume_size': 2, 'volume_type': 'nvme-rep3',
+                          'availability_zone': 'nova',
+                          'nics': [{'net-id':
+                                    '68ade15f-b2f1-4d58-903a-e5477c9755b8'}]},
+                         state['spec'])
+        self.assertEqual(ClusterTasks.SHRINKING_CLUSTER,
+                         DBCluster.find_by(id=cluster.id).task_status)
+        self.task_api.return_value.shrink_cluster.assert_called_once_with(
+            cluster.id, [members[0].id])
+        self.assertEqual([repair.EVENT_START], self._events())
+        self.assertEqual('replace',
+                         self.notifier.info.call_args.args[2]['action'])
+
+    def test_nothing_when_off_without_a_plugin_or_refused(self):
+        cluster, _members = self._lost_cluster()
+        self.patch_conf_property('cluster_repair_replace', False)
+        self.repair.check_now(mock.Mock(), cluster, manager='valkey')
+        self.patch_conf_property('cluster_repair_replace', True)
+        cluster.save_properties({repair.AUTO_REPAIR: repair.START})
+        self.repair.check_now(mock.Mock(), cluster, manager='valkey')
+        cluster.save_properties({})
+        self.repair.replacement.plugins = lambda manager: None
+        self.repair.check_now(mock.Mock(), cluster, manager='mongodb')
+        self.repair.replacement.plugins = lambda manager: self.plugin
+        self.plugin.ok = False
+        self.repair.check_now(mock.Mock(), cluster, manager='valkey')
+        self.assertIsNone(self._state(cluster))
+        self.task_api.return_value.shrink_cluster.assert_not_called()
+        self.assertEqual([], self._events())
+
+    def test_the_breaker_holds_when_many_clusters_lose_members(self):
+        self.patch_conf_property('cluster_repair_breaker', 1)
+        first, _m = self._lost_cluster()
+        second, _m = self._lost_cluster()
+        self.repair.check_now(mock.Mock(), first, manager='valkey')
+        self.repair.check_now(mock.Mock(), second, manager='valkey')
+        self.assertIsNotNone(self._state(first))
+        self.assertIsNone(self._state(second))
+        self.assertEqual(1, self.task_api.return_value.
+                         shrink_cluster.call_count)
+
+    def test_one_task_manager_of_two_begins(self):
+        cluster, _members = self._lost_cluster()
+        other = repair.ClusterRepair(nova_factory=lambda c: self.nova,
+                                     now=lambda: self.now)
+        other.replacement.plugins = lambda manager: self.plugin
+        stale_view = DBCluster.find_by(id=cluster.id)
+        self.repair.check_now(mock.Mock(), cluster, manager='valkey')
+        # The other read the cluster before the first took it.
+        stale_view.task_status = ClusterTasks.NONE
+        stale_view.properties = None
+        self.assertIsNone(other.replacement.begin(
+            mock.Mock(), stale_view, 'valkey',
+            [m for m in DBInstance_all(cluster.id)],
+            DBInstance_all(cluster.id)[0], 'its server is gone'))
+        self.assertEqual(1, self.task_api.return_value.
+                         shrink_cluster.call_count)
+
+    def _removed(self, cluster, members):
+        members[0].deleted = True
+        members[0].save()
+        db = DBCluster.find_by(id=cluster.id)
+        db.update(task_status=ClusterTasks.NONE)
+        return DBCluster.find_by(id=cluster.id)
+
+    def test_then_the_grow_then_done_when_healthy(self):
+        cluster, members = self._lost_cluster()
+        self.repair.check_now(mock.Mock(), cluster, manager='valkey')
+        db = self._removed(cluster, members)
+        load = mock.patch.object(cluster_models.Cluster,
+                                 'load').start()
+        load.return_value.ds_version.image_id = 'image-1'
+        self.assertEqual(replace.FOLLOW_EVERY, self.repair.check_now(
+            mock.Mock(), db, manager='valkey'))
+        spec = self._state(cluster)['spec']
+        load.return_value.grow.assert_called_once_with([spec], 'image-1')
+        self.assertEqual(replace.ADDING, self._state(cluster)['phase'])
+        # The tenant's cluster, as the service: its project.
+        context = load.call_args.args[0]
+        self.assertEqual(('t', True), (context.project_id, context.is_admin))
+        # The new member, built; the cluster not healthy yet.
+        new = self._member_of(cluster)
+        db = DBCluster.find_by(id=cluster.id)
+        self.assertEqual(replace.FOLLOW_EVERY, self.repair.check_now(
+            mock.Mock(), db, manager='valkey'))
+        common_health.record(cluster.id, ch.view(ch.HEALTHY))
+        self.assertIsNone(self.repair.check_now(mock.Mock(), db,
+                                                manager='valkey'))
+        self.assertIsNone(self._state(cluster))
+        self.assertEqual([repair.EVENT_START, repair.EVENT_END],
+                         self._events())
+        ended = [c.args[2] for c in self.notifier.info.call_args_list
+                 if c.args[1] == repair.EVENT_END]
+        self.assertIn(new.name, ended[0]['reason'])
+
+    def _member_of(self, cluster):
+        member = DBInstance(InstanceTasks.NONE, id=utils.generate_uuid(),
+                            name='c-member-new', tenant_id='t',
+                            cluster_id=cluster.id, datastore_version_id='v1',
+                            deleted=False, created=timeutils.utcnow())
+        member.save()
+        self.made.append(member)
+        status = InstanceServiceStatus(ServiceStatuses.HEALTHY,
+                                       id=utils.generate_uuid(),
+                                       instance_id=member.id)
+        status.save()
+        self.made.append(status)
+        return member
+
+    def test_a_shrink_that_left_the_member_ends_it(self):
+        cluster, members = self._lost_cluster()
+        self.repair.check_now(mock.Mock(), cluster, manager='valkey')
+        DBCluster.find_by(id=cluster.id).update(task_status=ClusterTasks.NONE)
+        db = DBCluster.find_by(id=cluster.id)
+        self.assertIsNone(self.repair.check_now(mock.Mock(), db,
+                                                manager='valkey'))
+        self.assertIsNone(self._state(cluster))
+        self.assertEqual([repair.EVENT_START, repair.EVENT_ERROR],
+                         self._events())
+
+    def test_a_new_member_that_failed_ends_it(self):
+        cluster, members = self._lost_cluster()
+        self.repair.check_now(mock.Mock(), cluster, manager='valkey')
+        db = self._removed(cluster, members)
+        load = mock.patch.object(cluster_models.Cluster,
+                                 'load').start()
+        load.return_value.ds_version.image_id = 'image-1'
+        self.repair.check_now(mock.Mock(), db, manager='valkey')
+        new = self._member_of(cluster)
+        new.task_status = InstanceTasks.BUILDING_ERROR_SERVER
+        new.save()
+        self.assertIsNone(self.repair.check_now(
+            mock.Mock(), DBCluster.find_by(id=cluster.id), manager='valkey'))
+        self.assertEqual(repair.EVENT_ERROR, self._events()[-1])
+        self.assertIsNone(self._state(cluster))
+
+    def test_too_long_ends_it(self):
+        cluster, _members = self._lost_cluster()
+        self.repair.check_now(mock.Mock(), cluster, manager='valkey')
+        DBCluster.find_by(id=cluster.id).update(task_status=ClusterTasks.NONE)
+        self.now += datetime.timedelta(seconds=3601)
+        self.assertIsNone(self.repair.check_now(
+            mock.Mock(), DBCluster.find_by(id=cluster.id), manager='valkey'))
+        self.assertIn('not done within',
+                      self.notifier.info.call_args.args[2]['reason'])
+
+    def test_a_replacement_is_followed_while_its_task_runs(self):
+        cluster, _members = self._lost_cluster()
+        self.repair.check_now(mock.Mock(), cluster, manager='valkey')
+        self.assertEqual(replace.FOLLOW_EVERY, self.repair.check_now(
+            mock.Mock(), DBCluster.find_by(id=cluster.id), manager='valkey'))
+        self.assertIsNotNone(self._state(cluster))
+
+
+def DBInstance_all(cluster_id):
+    return DBInstance.find_all(cluster_id=cluster_id, deleted=False).all()
+
+
+class TestSentinelReplace(test_health.HealthTestBase):
+    """The Redis family's word on a lost member of a sentinel cluster,
+    from what the other members' sentinels see (common sentinel_health
+    reasons).
+    """
+
+    def setUp(self):
+        super(TestSentinelReplace, self).setUp()
+        self.guests = {}
+        self.plugin = redis_repair.SentinelReplace(
+            'valkey', guest_factory=lambda c, i, m: self.guests[i])
+        self.cluster, self.members = self._cluster(3, stale=(0,))
+        self.cluster.save_properties({'topology': 'sentinel'})
+        common_health.record(self.cluster.id, ch.combine(
+            [(m.name, ch.view(ch.HEALTHY, me='192.168.1.%d' % (11 + i)))
+             for i, m in enumerate(self.members)], []))
+        for i, m in enumerate(self.members[1:], start=1):
+            self.guests[m.id] = mock.Mock()
+            self.guests[m.id].get_cluster_health.return_value = ch.view(
+                ch.DEGRADED, ['192.168.1.11'], 'down as the sentinel sees it',
+                me='192.168.1.%d' % (11 + i))
+
+    def _ask(self):
+        return self.plugin.can_replace(mock.Mock(), self.cluster,
+                                       self.members[0], self.members[1:])
+
+    def test_held_out_by_every_other_member(self):
+        ok, why = self._ask()
+        self.assertTrue(ok)
+        self.assertEqual('every other member holds 192.168.1.11 out', why)
+
+    def test_not_while_a_peer_does_not_answer_or_sees_more(self):
+        guest = self.guests[self.members[2].id]
+        guest.get_cluster_health.side_effect = RuntimeError('timeout')
+        self.assertFalse(self._ask()[0])
+        guest.get_cluster_health.side_effect = None
+        guest.get_cluster_health.return_value = ch.view(
+            ch.DEGRADED, ['192.168.1.11', '192.168.1.12'],
+            'down as the sentinel sees it', me='192.168.1.13')
+        self.assertFalse(self._ask()[0])
+        guest.get_cluster_health.return_value = ch.view(
+            ch.DOWN, ['192.168.1.11'],
+            'the sentinels hold the primary down', me='192.168.1.13')
+        self.assertFalse(self._ask()[0])
+        # A peer that sees it in: not lost.
+        guest.get_cluster_health.return_value = ch.view(
+            ch.HEALTHY, me='192.168.1.13')
+        self.assertFalse(self._ask()[0])
+
+    def test_only_the_sentinel_topology(self):
+        self.cluster.save_properties({'topology': 'cluster'})
+        self.assertFalse(self._ask()[0])
+
+    def test_the_plugin_is_found_by_its_entry_point(self):
+        replace._plugins.clear()
+        for manager in ('redis', 'valkey', 'keydb'):
+            plugin = replace.plugin_for(manager)
+            self.assertIsInstance(plugin, redis_repair.SentinelReplace)
+            self.assertEqual(manager, plugin.manager)
+        self.assertIsNone(replace.plugin_for('mongodb'))

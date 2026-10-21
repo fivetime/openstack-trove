@@ -1,0 +1,27 @@
+---
+features:
+  - |
+    The cluster repair replaces a member that is lost for good, when the
+    operator turns ``cluster_repair_replace`` on (off by default) and the
+    datastore has a plugin in the namespace ``trove.cluster.repair``. A
+    member is lost when Nova and its peers both say so: its server is gone,
+    in ERROR, or off and given up on, on a host whose compute service is
+    up, and every other member holds it out of the cluster. It is removed
+    with the cluster's shrink (its server and ports go before the cluster
+    forgets it) and one like it (flavor, volume size and type, zone,
+    network) is added with the cluster's grow, so the cluster is never
+    larger than it was. The steps are kept in the cluster's properties and
+    followed by any task manager; a step that does not come out as it
+    should, or ``cluster_repair_replace_timeout`` seconds, ends the
+    replacement with ``trove.cluster.repair.error``. More than
+    ``cluster_repair_breaker`` clusters with a lost member within
+    ``cluster_repair_window`` seconds hold every replacement (an outage of
+    the platform, not of members). The Redis family (Redis, Valkey, KeyDB)
+    has the plugin, for clusters of the sentinel topology. A cluster keeps
+    the replacement off with ``auto_repair=start`` or ``off``.
+fixes:
+  - |
+    A normal report of a member of a cluster whose health is recorded
+    HEALTHY no longer brings the cluster a look: every agent that starts
+    says normal once, and an upgrade of every guest agent looked at every
+    cluster for nothing.

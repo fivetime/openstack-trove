@@ -47,6 +47,9 @@ class HubTest(trove_testtools.TestCase):
             k for k in keys if k != 'elsewhere'}
         self.hub = recovery.RecoveryHub(self.coordinator)
         self.hub.context = 'ctx'
+        # The repair has tests of its own (test_repair).
+        self.hub.repair = mock.Mock()
+        self.hub.repair.check_now.return_value = None
         self.now = 1000.0
         mock.patch.object(recovery.time, 'monotonic',
                           side_effect=lambda: self.now).start()
@@ -338,3 +341,20 @@ class SuspectClustersTest(trove_testtools.TestCase):
         self.assertTrue({fresh, stale, recovering} <= every)
         self.assertNotIn(busy, every)
         self.assertNotIn(gone, every)
+
+    def test_a_replacement_under_way_is_a_suspect(self):
+        # Its grow running, every heartbeat fresh, the health recorded
+        # HEALTHY: found by its state alone (a task manager started again
+        # follows it).
+        replacing = self._cluster(task=ClusterTasks.GROWING_CLUSTER)
+        health.record(replacing, cluster_health.view(cluster_health.HEALTHY))
+        self.made.append(DBClusterHealth.find_by(id=replacing))
+        DBCluster.find_by(id=replacing).save_properties(
+            {'repair': {'phase': 'adding'}, 'topology': 'sentinel'})
+        busy = self._cluster(task=ClusterTasks.GROWING_CLUSTER)
+        DBCluster.find_by(id=busy).save_properties(
+            {'auto_repair': 'replace', 'topology': 'sentinel'})
+        stale_before = timeutils.utcnow() - datetime.timedelta(seconds=90)
+        found = {row[0] for row in recovery.suspect_clusters(stale_before)}
+        self.assertIn(replacing, found)
+        self.assertNotIn(busy, found)

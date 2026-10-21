@@ -40,6 +40,7 @@ from oslo_log import log as logging
 import oslo_messaging as messaging
 from oslo_service import loopingcall
 from oslo_utils import timeutils
+from sqlalchemy import and_
 from sqlalchemy import func
 from sqlalchemy import or_
 from sqlalchemy.sql import expression
@@ -53,6 +54,7 @@ from trove.common import coordination
 from trove.common import exception
 from trove.common.strategies.cluster.experimental.common import health
 from trove.common.strategies.cluster.experimental.common import repair
+from trove.common.strategies.cluster.experimental.common import replace
 from trove.common.strategies.cluster import strategy
 from trove.datastore import models as datastore_models
 from trove.instance.models import DBInstance
@@ -90,10 +92,12 @@ def suspect_clusters(stale_before=None):
     and has no task but a recovery, with a member whose heartbeat is
     older than ``stale_before``, a recovery under way, or a health that
     is not recorded yet or not healthy (a task manager started again
-    does not remember what it was watching); every such cluster when
-    ``stale_before`` is None.
+    does not remember what it was watching), or a member replacement
+    under way (``common.replace``, kept in its properties); every such
+    cluster when ``stale_before`` is None.
     """
     oldest = func.min(InstanceServiceStatus.updated_at)
+    replacing = DBCluster.properties.like('%%"%s"%%' % replace.STATE)
     with DBCluster.query() as query:
         rows = query.session.query(
             DBCluster.id, DBCluster.task_id, DBCluster.datastore_version_id,
@@ -108,8 +112,12 @@ def suspect_clusters(stale_before=None):
         ).filter(
             DBCluster.deleted == expression.false(),
             DBInstance.deleted == expression.false(),
-            DBCluster.task_id.in_([ClusterTasks.NONE.code,
-                                   ClusterTasks.RECOVERING_CLUSTER.code])
+            or_(DBCluster.task_id.in_([ClusterTasks.NONE.code,
+                                       ClusterTasks.RECOVERING_CLUSTER.code]),
+                # A replacement's shrink or grow: followed by the repair.
+                and_(DBCluster.task_id.in_([
+                    ClusterTasks.SHRINKING_CLUSTER.code,
+                    ClusterTasks.GROWING_CLUSTER.code]), replacing))
         ).group_by(DBCluster.id, DBCluster.task_id,
                    DBCluster.datastore_version_id)
         if stale_before is not None:
@@ -117,7 +125,9 @@ def suspect_clusters(stale_before=None):
                 oldest < stale_before,
                 DBCluster.task_id == ClusterTasks.RECOVERING_CLUSTER.code,
                 func.count(DBClusterHealth.id) == 0,
-                func.max(DBClusterHealth.status) != cluster_health.HEALTHY))
+                func.max(DBClusterHealth.status) != cluster_health.HEALTHY,
+                func.max(DBCluster.properties).like(
+                    '%%"%s"%%' % replace.STATE)))
         return rows.all()
 
 
@@ -373,7 +383,9 @@ class RecoveryHub(object):
                 self.request_look(cluster_id, 'still watching',
                                   delay=recovery.look_again_in(cluster_id))
         try:
-            again = self.repair.check_now(self.context, db_cluster)
+            again = self.repair.check_now(
+                self.context, db_cluster,
+                manager=self.cluster_manager.get(cluster_id))
         except Exception:
             LOG.exception("The repair of cluster %s failed.", cluster_id)
             again = None

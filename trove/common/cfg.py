@@ -358,6 +358,27 @@ common_opts = [
     cfg.IntOpt('cluster_repair_start_interval', default=300, min=30,
                help='Seconds after a start of a member\'s server before it '
                     'is started again if it is still off.'),
+    cfg.BoolOpt('cluster_repair_replace', default=False,
+                help='Replace a cluster member that is lost for good: its '
+                     'server gone, in ERROR, or off and given up on, on a '
+                     'host whose compute service is up, and held out by '
+                     'every other member. The member is removed (the '
+                     'cluster\'s shrink) and one like it added (its grow). '
+                     'Only for a datastore with a plugin in the namespace '
+                     'trove.cluster.repair. A cluster keeps it off with the '
+                     'extended property auto_repair=off or start.'),
+    cfg.IntOpt('cluster_repair_replace_timeout', default=3600, min=60,
+               help='Seconds a replacement has to remove the lost member '
+                    'and add the new one before it is given up and told '
+                    'as an error.'),
+    cfg.IntOpt('cluster_repair_breaker', default=3, min=0,
+               help='More clusters than this with a lost member within '
+                    'cluster_repair_window seconds is an outage of the '
+                    'platform, not of members: no member is replaced '
+                    'until fewer are. Counted by each task manager for the '
+                    'clusters it watches.'),
+    cfg.IntOpt('cluster_repair_window', default=900, min=60,
+               help='Seconds over which cluster_repair_breaker counts.'),
     cfg.IntOpt('cluster_recovery_workers', default=16, min=1,
                help='Clusters the task manager looks at at a time: a look '
                     'waits on the members of the cluster, up to their '

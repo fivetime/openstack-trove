@@ -31,9 +31,14 @@ again after ``cluster_repair_start_interval`` seconds, at most
 counted from the server's actions in Nova, so every task manager counts
 the same and a task manager that starts again forgets nothing.
 
+A member that is lost for good (its server gone, in ERROR, or off and
+given up on) is replaced, when the operator lets it
+(``cluster_repair_replace``) and its datastore has a plugin:
+``common.replace``.
+
 The recovery hub runs the repair on every look at a cluster, after the
-datastore's recovery; a look that started a member asks for another one,
-for the start to be followed.
+datastore's recovery; a look that started a member, or a replacement
+under way, asks for another one, for it to be followed.
 """
 
 import datetime
@@ -48,6 +53,7 @@ from trove.common import cfg
 from trove.common import clients
 from trove.common import context as trove_context
 from trove.common.strategies.cluster.experimental.common import health
+from trove.common.strategies.cluster.experimental.common import replace
 from trove import rpc
 
 LOG = logging.getLogger(__name__)
@@ -56,23 +62,32 @@ CONF = cfg.CONF
 # The extended property of a cluster that keeps the repair off it, or
 # lets only some of it on: no more than the operator lets on.
 AUTO_REPAIR = 'auto_repair'
-OFF, START = 'off', 'start'
-LEVELS = (OFF, START)
+OFF, START, REPLACE = 'off', 'start', 'replace'
+LEVELS = (OFF, START, REPLACE)
 
 EVENT_START = 'trove.cluster.repair.start'
 EVENT_END = 'trove.cluster.repair.end'
 EVENT_ERROR = 'trove.cluster.repair.error'
 
 
+def _wanted(db_cluster):
+    try:
+        return db_cluster.get_properties().get(AUTO_REPAIR)
+    except Exception:
+        return None
+
+
 def allows_start(db_cluster):
     """Whether the operator and the cluster let a member be started."""
-    if not CONF.cluster_repair_start:
-        return False
-    try:
-        wanted = db_cluster.get_properties().get(AUTO_REPAIR)
-    except Exception:
-        wanted = None
-    return wanted != OFF
+    return bool(CONF.cluster_repair_start) and _wanted(db_cluster) != OFF
+
+
+def allows_replace(db_cluster):
+    """Whether the operator and the cluster let a lost member be
+    replaced (``common.replace``).
+    """
+    return (bool(CONF.cluster_repair_replace) and
+            _wanted(db_cluster) not in (OFF, START))
 
 
 def notify(event_type, db_cluster, member, action, reason):
@@ -120,19 +135,26 @@ class ClusterRepair(object):
         # The members this task manager started, and when: the end of the
         # repair is told when one is heard from again.
         self.started = {}
+        self.replacement = replace.MemberReplacement(notify, now=self._now)
 
-    def check_now(self, context, db_cluster, members=None):
+    def check_now(self, context, db_cluster, members=None, manager=None):
         """One look at a cluster. Returns the seconds until the cluster
         is worth another look for the repair, or None.
         """
-        if not allows_start(db_cluster):
-            return None
-        if db_cluster.task_status != ClusterTasks.NONE:
-            return None
         if members is None:
             from trove.instance.models import DBInstance
             members = DBInstance.find_all(cluster_id=db_cluster.id,
                                           deleted=False).all()
+        state = db_cluster.get_properties().get(replace.STATE)
+        if state:
+            # A replacement under way is followed to its end, whatever
+            # the switches say now.
+            return self.replacement.follow(context, db_cluster, manager,
+                                           members, state)
+        if not allows_start(db_cluster) and not allows_replace(db_cluster):
+            return None
+        if db_cluster.task_status != ClusterTasks.NONE:
+            return None
         if not members or any(m.task_status not in health.SETTLED_TASKS
                               for m in members):
             return None
@@ -144,23 +166,52 @@ class ClusterRepair(object):
             return None
         nova = self.nova_factory(context)
         computes = {}
+
+        def compute_up(host):
+            if host not in computes:
+                computes[host] = self._compute_up(nova, host)
+            return computes[host]
+
         again = None
+        lost = []
         for member in quiet:
+            decision = None
             try:
                 decision = self.start_decision(nova, member, computes)
+            except nova_exceptions.NotFound:
+                pass
             except Exception as err:
                 LOG.warning("Cluster %s: member %s not looked at for a "
                             "start: %s", db_cluster.id, member.id, err)
                 continue
-            if decision.start:
+            if decision is not None and decision.start and \
+                    allows_start(db_cluster):
                 self._start(nova, db_cluster, member, decision.reason)
                 decision.again_in = CONF.cluster_repair_start_interval
-            else:
+            elif decision is not None:
                 LOG.debug("Cluster %s: member %s not started: %s",
                           db_cluster.id, member.id, decision.reason)
-            if decision.again_in is not None:
+            if decision is not None and decision.again_in is not None:
                 again = (decision.again_in if again is None
                          else min(again, decision.again_in))
+            if allows_replace(db_cluster):
+                try:
+                    verdict = self.replacement.lost_decision(
+                        nova, member, decision, compute_up)
+                except Exception as err:
+                    LOG.warning("Cluster %s: member %s not looked at for a "
+                                "replacement: %s", db_cluster.id,
+                                member.id, err)
+                    continue
+                if verdict.lost:
+                    lost.append((member, verdict.reason))
+        if lost and manager:
+            # One at a time: the cluster is looked at again after it.
+            member, reason = lost[0]
+            later = self.replacement.begin(context, db_cluster, manager,
+                                           members, member, reason)
+            if later is not None:
+                again = later if again is None else min(again, later)
         return again
 
     def start_decision(self, nova, member, computes=None):
