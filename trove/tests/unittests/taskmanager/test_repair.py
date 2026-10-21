@@ -344,7 +344,13 @@ class ReplaceTestBase(RepairTestBase):
             volume_type='nvme-rep3', availability_zone='nova')
         self.neutron = mock.patch.object(
             replace.clients, 'create_neutron_client').start().return_value
+        # A member's two ports, named alike, the management network's
+        # first (production, 2026-10-21: the new member got two ports on
+        # the management network and never reached its primary).
+        self.patch_conf_property('management_networks',
+                                 ['e70354a0-3f16-45ef-81e4-5d815b43a765'])
         self.neutron.list_ports.return_value = {'ports': [
+            {'network_id': 'e70354a0-3f16-45ef-81e4-5d815b43a765'},
             {'network_id': '68ade15f-b2f1-4d58-903a-e5477c9755b8'}]}
         mock.patch.object(replace.clients, 'create_nova_client',
                           return_value=self.nova).start()

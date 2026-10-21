@@ -380,8 +380,12 @@ class MemberReplacement(object):
             except Exception as err:
                 LOG.debug("The ports of %s not looked up: %s", peer.id, err)
                 continue
-            if ports:
-                spec['nics'] = [{'network_id': ports[0]['network_id']}]
+            # A member's ports are named alike: the management network's
+            # too, which Trove adds to every member by itself.
+            tenant = [p['network_id'] for p in ports
+                      if p['network_id'] not in CONF.management_networks]
+            if tenant:
+                spec['nics'] = [{'network_id': tenant[0]}]
                 break
         return spec
 
