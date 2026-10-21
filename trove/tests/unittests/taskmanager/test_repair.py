@@ -37,12 +37,15 @@ from trove.common.strategies.cluster.experimental.galera_common import (
 from trove.common.strategies.cluster.experimental.group_replication import (
     repair as gr_repair)
 from trove.common.strategies.cluster.experimental.mongodb import (
+    api as mongodb_api)
+from trove.common.strategies.cluster.experimental.mongodb import (
     repair as mongodb_repair)
 from trove.common.strategies.cluster.experimental.postgresql import (
     repair as pg_repair)
 from trove.common.strategies.cluster.experimental.redis import (
     repair as redis_repair)
 from trove.common import utils
+from trove.instance import models as inst_models
 from trove.instance.models import DBInstance
 from trove.instance.models import InstanceServiceStatus
 from trove.instance.service_status import ServiceStatuses
@@ -1055,20 +1058,35 @@ class TestMongoDbReplace(_PeerViews):
         plugin.remove('ctx', self.cluster, state)
         api.mongodb_remove_member.assert_called_once_with(
             self.cluster.id, self.members[0].id, '10.0.0.11:27017')
-        load = mock.patch.object(cluster_models.Cluster, 'load').start()
-        cluster = load.return_value
-        cluster.name = 'c'
-        cluster._create_instances.return_value = ['new']
+        # The real cluster, as the API loads it: the new member is made
+        # as the grow makes one, with the cluster's key, which the grow
+        # has of a query router it looked up first and the step asks of
+        # a member of the set that stays.
+        datastore_version = mock.Mock(manager='mongodb', image_id='img-1')
+        cluster = mongodb_api.MongoDbCluster(
+            mock.Mock(), self.cluster, mock.Mock(), datastore_version)
+        cluster._server_group_loaded = True
+        mock.patch.object(cluster_models.Cluster, 'load',
+                          return_value=cluster).start()
+        plugin.guest_factory = lambda c, i, m: self.guests[i]
+        lost_guest = self.guests.setdefault(self.members[0].id, mock.Mock())
+        for member in self.members[1:]:
+            self.guests[member.id].get_key.return_value = 'the-key'
+        create = mock.patch.object(inst_models.Instance, 'create').start()
+        create.return_value.id = 'new'
         with mock.patch.object(mongodb_repair.time, 'time',
                                return_value=1792600000.0):
             plugin.add('ctx', self.cluster, state)
-        (spec,), config, tag, _locality = (
-            cluster._create_instances.call_args.args)
-        self.assertEqual({'flavor_id': 'f1', 'volume_size': 10,
-                          'name': 'c-rs1-1792600000'}, spec)
+        create.assert_called_once()
+        name, flavor, image = create.call_args.args[1:4]
+        self.assertEqual((self.cluster.name + '-rs1-1792600000', 'f1',
+                          'img-1'), (name, flavor, image))
+        self.assertEqual(10, create.call_args.args[8])
         self.assertEqual({'shard_id': 'shard-1', 'instance_type': 'member',
-                          'replica_set_name': 'rs1'}, config)
-        self.assertEqual('rs1', tag)
+                          'replica_set_name': 'rs1', 'id': self.cluster.id,
+                          'key': 'the-key'},
+                         create.call_args.kwargs['cluster_config'])
+        lost_guest.get_key.assert_not_called()
         api.mongodb_add_member.assert_called_once_with(self.cluster.id,
                                                        'new')
 

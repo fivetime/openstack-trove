@@ -27,11 +27,13 @@ config server set and a query router are not replaced (yet).
 
 import time
 
+from trove.common import cfg
 from trove.common import exception
 from trove.common.i18n import _
 from trove.common.strategies.cluster.experimental.common import health
 from trove.common.strategies.cluster.experimental.common import replace
 
+CONF = cfg.CONF
 MEMBER = 'member'
 
 
@@ -81,7 +83,19 @@ class MongoDbReplace(replace.PeersHoldItOut):
                           'instance_type': MEMBER,
                           'replica_set_name': state['replica_set_name']}
         locality = srv_grp.ServerGroup.convert_to_hint(cluster.server_group)
+        # The cluster's key, for the new member: _create_instances asks
+        # it of a query router the grow looks up first (_prep_resize),
+        # which no step of a replacement does. A member of the set that
+        # stays has it too.
+        key = None
+        if CONF.get(self.manager).cluster_secure:
+            peer = next(i for i in cluster.db_instances
+                        if i.type == MEMBER
+                        and i.shard_id == state['shard_id']
+                        and i.id != state['lost'])
+            key = self.guest_factory(context, peer.id, self.manager).get_key()
         instance_ids = cluster._create_instances(
-            [spec], cluster_config, state['replica_set_name'], locality)
+            [spec], cluster_config, state['replica_set_name'], locality,
+            key=key)
         task_api.load(context, self.manager).mongodb_add_member(
             db_cluster.id, instance_ids[0])
