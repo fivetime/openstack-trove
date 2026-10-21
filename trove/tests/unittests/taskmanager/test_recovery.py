@@ -131,6 +131,36 @@ class HubTest(trove_testtools.TestCase):
         self.assertEqual({'c1': (1000.0, 'event abnormal from member i1 '
                                          '(detached)')}, self.hub.pending)
 
+    def test_a_normal_member_of_a_healthy_cluster_brings_no_look(self):
+        # Every agent of an upgrade says normal once when it starts
+        # (0f986aff): 2486 looks for 1008 clusters on the test bed.
+        status = mock.patch.object(recovery.health, 'status_of').start()
+        status.return_value = cluster_health.HEALTHY
+        self.hub.on_event('c1', 'i1', 'normal')
+        self.assertEqual({}, self.hub.pending)
+        # Not healthy: a look.
+        status.return_value = cluster_health.DEGRADED
+        self.hub.on_event('c1', 'i1', 'normal')
+        self.assertIn('c1', self.hub.pending)
+        # Healthy as recorded, but a recovery here waits on it: a look.
+        self.hub.pending.clear()
+        status.return_value = cluster_health.HEALTHY
+        waiting = mock.Mock()
+        waiting.still_watching.side_effect = lambda c: c == 'c1'
+        self.hub.recoveries = {'mariadb': None, 'postgresql': waiting}
+        self.hub.on_event('c1', 'i1', 'normal')
+        self.assertIn('c1', self.hub.pending)
+        # Any other kind always brings a look.
+        self.hub.pending.clear()
+        self.hub.recoveries = {}
+        self.hub.on_event('c1', 'i1', 'abnormal')
+        self.assertIn('c1', self.hub.pending)
+        # No record (a cluster never looked at): a look.
+        self.hub.pending.clear()
+        status.return_value = None
+        self.hub.on_event('c1', 'i1', 'normal')
+        self.assertIn('c1', self.hub.pending)
+
     def test_the_looks_at_one_cluster_are_coalesced(self):
         self.hub.last_look['c1'] = 998.0
         self.hub.on_event('c1', 'i1', 'abnormal')

@@ -39,6 +39,7 @@ for the start to be followed.
 import datetime
 import time
 
+from novaclient import exceptions as nova_exceptions
 from oslo_log import log as logging
 from oslo_utils import timeutils
 
@@ -220,6 +221,12 @@ class ClusterRepair(object):
                  db_cluster.id, member.name, member.id, reason)
         try:
             nova.servers.start(member.compute_instance_id)
+        except nova_exceptions.Conflict as err:
+            # The other task manager that watches the cluster started it
+            # a moment before (both look on the same report): no error.
+            LOG.info("Cluster %s: member %s is being started already: %s",
+                     db_cluster.id, member.id, err)
+            return
         except Exception as err:
             LOG.warning("Cluster %s: member %s was not started: %s",
                         db_cluster.id, member.id, err)

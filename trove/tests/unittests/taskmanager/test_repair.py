@@ -13,6 +13,7 @@
 import datetime
 from unittest import mock
 
+from novaclient import exceptions as nova_exceptions
 from novaclient.v2 import instance_action
 from novaclient.v2 import servers
 from novaclient.v2 import services
@@ -219,6 +220,18 @@ class TestClusterRepair(RepairTestBase):
                                  repair.AUTO_REPAIR: repair.OFF})
         self.assertIsNone(self.repair.check_now(mock.Mock(), cluster))
         self.nova.servers.start.assert_not_called()
+
+    def test_a_start_another_task_manager_made_is_no_error(self):
+        # Both task managers that watch the cluster looked on the same
+        # report and started it 48 ms apart (production, 2026-10-21).
+        cluster, _members = self._quiet_cluster()
+        self.nova.servers.start.side_effect = nova_exceptions.Conflict(
+            409, "Cannot 'start' instance 49ed7829-69a7-4e34-a3c7-"
+                 "7c75e2ea9be2 while it is in task_state powering-on",
+            request_id='req-55acd4aa-dd20-405d-8cf4-6b2bd9988c31')
+        self.repair.check_now(mock.Mock(), cluster)
+        self.assertEqual([], self._events())
+        self.assertEqual({}, self.repair.started)
 
     def test_a_start_nova_refuses_is_told(self):
         cluster, _members = self._quiet_cluster()

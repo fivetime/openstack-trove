@@ -259,9 +259,27 @@ class RecoveryHub(object):
             LOG.debug("Cluster %s: event %s from member %s; not watched "
                       "here.", cluster_id, kind, instance_id)
             return
+        if kind == 'normal' and self._settled(cluster_id):
+            # A member that starts as it should (every agent of an upgrade
+            # says so once) of a cluster that is HEALTHY: nothing to see.
+            LOG.debug("Cluster %s: event normal from member %s; the "
+                      "cluster is healthy.", cluster_id, instance_id)
+            return
         reason = 'event %s from member %s (%s)' % (
             kind, instance_id, (payload or {}).get('reason') or 'no reason')
         self.request_look(cluster_id, reason)
+
+    def _settled(self, cluster_id):
+        """Whether the cluster's health is recorded HEALTHY and no
+        recovery here waits on it.
+        """
+        if any(r is not None and r.still_watching(cluster_id)
+               for r in list(self.recoveries.values())):
+            return False
+        try:
+            return health.status_of(cluster_id) == cluster_health.HEALTHY
+        except Exception:
+            return False
 
     def scan(self):
         """The clusters the database says may need a look: a member

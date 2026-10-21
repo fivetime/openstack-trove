@@ -82,7 +82,8 @@ def known_members(cluster_id):
         return {}
 
 
-def _status_of(cluster_id):
+def status_of(cluster_id):
+    """The cluster's recorded health, or None."""
     try:
         return cluster_models.DBClusterHealth.find_by(id=cluster_id).status
     except exception.NotFound:
@@ -121,7 +122,7 @@ def record(cluster_id, health):
     detail = _detail(health)
     now = timeutils.utcnow()
     model = cluster_models.DBClusterHealth
-    previous = _status_of(cluster_id)
+    previous = status_of(cluster_id)
     with model.query() as query:
         changed = query.filter(model.id == cluster_id).filter(
             (model.status != health['status']) |
