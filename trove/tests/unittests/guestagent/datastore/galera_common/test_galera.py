@@ -805,18 +805,15 @@ class TestMemberView(trove_testtools.TestCase):
         # The members whose ready port answers (they take writes); the
         # others refuse it, nothing listening there.
         self.holders = set()
-        self.connect = mock.patch(
-            'socket.create_connection', side_effect=self._connect).start()
         self.addCleanup(mock.patch.stopall)
         self.patch_datastore_manager('pxc')
 
-    def _connect(self, address, timeout=None):
-        if address[0] in self.holders:
-            return mock.Mock()
-        raise ConnectionRefusedError(111, 'Connection refused')
-
     def _probed(self):
-        return [c.args[0][0] for c in self.connect.call_args_list]
+        # The peers asked on their ready port, from the container: the
+        # tenant network is there (network_isolation), not in the guest.
+        return [[a for a in c.args[0] if a.startswith('--host=')][0][7:]
+                for c in self.container.exec_run.call_args_list
+                if '--port=3307' in c.args[0]]
 
     def _hold(self, holding=True):
         self.app.ready_port = mock.Mock()
@@ -824,14 +821,17 @@ class TestMemberView(trove_testtools.TestCase):
 
     def _exec(self, command, environment=None):
         host = [a for a in command if a.startswith('--host=')][0][7:]
+        port = [a for a in command if a.startswith('--port=')][0][7:]
         peer = self.peers.get(host)
-        if peer is None:
+        if peer is None or (port == '3307' and host not in self.holders):
             return 1, b"ERROR 2003 (HY000): Can't connect to MySQL server"
         return 0, _batch(peer).encode()
 
     def _asked(self):
+        # The peers asked whether they are synced, on the database port.
         return [[a for a in c.args[0] if a.startswith('--host=')][0][7:]
-                for c in self.container.exec_run.call_args_list]
+                for c in self.container.exec_run.call_args_list
+                if '--port=3306' in c.args[0]]
 
     def test_no_cluster_account_yet(self):
         # While the cluster is built: no account to ask the members below
@@ -903,11 +903,15 @@ class TestMemberView(trove_testtools.TestCase):
         # lowest address and took the writes once synced (25 s without
         # writes). It follows the member that takes them now.
         self.sections['mysqld']['wsrep_node_address'] = '10.0.0.1'
+        self.peers['10.0.0.2'] = _status()
         self.holders.add('10.0.0.2')
         self.assertEqual(('Synced', 'SECONDARY', False, False),
                          tuple(self.app.member_view())[:4])
         self.assertEqual(['10.0.0.2'], self._probed())
-        self.connect.assert_called_with(('10.0.0.2', 3307), timeout=3)
+        command = self.container.exec_run.call_args.args[0]
+        self.assertIn('--port=3307', command)
+        self.assertIn('--connect-timeout=3', command)
+        self.assertIn('--user=r', command)
         # Nobody asked whether it is synced: the writer keeps them.
         self.assertEqual([], self._asked())
 
@@ -976,11 +980,13 @@ class TestMemberView(trove_testtools.TestCase):
         self.app.member_view()
         self.assertEqual(3, len(self._probed()))
 
-    def test_the_lowest_member_asks_nobody(self):
+    def test_the_lowest_member_asks_nobody_whether_synced(self):
+        # Only whether one of the others takes writes already.
         self.sections['mysqld']['wsrep_node_address'] = '10.0.0.1'
         self.assertEqual(('Synced', 'PRIMARY', True, False),
                          tuple(self.app.member_view())[:4])
         self.assertEqual([], self._asked())
+        self.assertEqual(['10.0.0.2', '10.0.0.3'], self._probed())
 
     def test_the_writer_is_asked_once_per_view(self):
         self.app.member_view()

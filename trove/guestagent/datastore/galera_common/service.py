@@ -21,7 +21,6 @@ each member in turn, the first with ``bootstrap=True``, and
 import datetime
 import os
 import re
-import socket
 import threading
 import time
 
@@ -366,13 +365,15 @@ class GaleraAppMixin(object):
         return [_address(member)[0] for member in members.split(',')
                 if member.strip()]
 
-    def _peer_status(self, ip, user, password, timeout):
-        """The wsrep status of a peer, asked over its database port with
-        the cluster account from inside the database container; None
-        when it does not answer.
+    def _peer_status(self, ip, user, password, timeout, port=None):
+        """The wsrep status of a peer, asked over its database port (or
+        ``port``) with the cluster account from inside the database
+        container (the tenant network is there, not in the guest's own
+        namespace); None when it does not answer.
         """
         command = [self.PEER_CLIENT, '--connect-timeout=%d' % timeout,
-                   '--host=%s' % ip, '--port=%d' % self.DATABASE_PORT,
+                   '--host=%s' % ip,
+                   '--port=%d' % (port or self.DATABASE_PORT),
                    '--user=%s' % user, '--batch', '--skip-column-names',
                    '--execute=%s' % WSREP_STATUS]
         try:
@@ -414,15 +415,14 @@ class GaleraAppMixin(object):
     def _holds_ready_port(self):
         return self.ready_port is not None and self.ready_port.held()
 
-    def _peer_holds_ready_port(self, ip, port, timeout):
+    def _peer_holds_ready_port(self, ip, user, password, timeout):
         """Whether a peer takes writes: its ready port redirects to the
-        database port only there; elsewhere nothing listens on it.
+        database port only there (the client's handshake goes through);
+        elsewhere nothing listens on it.
         """
-        try:
-            socket.create_connection((ip, port), timeout=timeout).close()
-            return True
-        except OSError:
-            return False
+        conf = CONF.get(CONF.datastore_manager or 'mysql')
+        return self._peer_status(ip, user, password, timeout,
+                                 port=conf.cluster_ready_port) is not None
 
     def _elect_writer(self, status):
         """The member that takes writes in single writer mode. The member
@@ -459,41 +459,43 @@ class GaleraAppMixin(object):
         # The one that takes writes now: this member, or a peer whose
         # ready port answers (only the lower ones, for a member that
         # holds it: two holders end with the lower one).
-        for ip in (below if holding else peers):
-            if self._peer_holds_ready_port(ip, conf.cluster_ready_port,
-                                           conf.cluster_peer_timeout):
-                writer = ip
-                break
+        asked = below if holding else peers
+        if asked:
+            try:
+                user, password = self._recovery_credentials()
+            except Exception as err:
+                # No cluster account yet: the cluster is being built
+                # (install_cluster writes it). Nobody can be asked: the
+                # lowest member takes writes alone, the others wait.
+                if self.is_cluster_complete():
+                    LOG.warning("Cannot ask the members which takes "
+                                "writes: %s", err)
+                else:
+                    LOG.debug("No cluster account yet to ask the members "
+                              "which takes writes: %s", err)
+                writer = None if below else self_ip
+                self._writer = {'conf_id': conf_id, 'writer': writer,
+                                'stable': False, 'holding': holding,
+                                'when': now}
+                return writer
+            for ip in asked:
+                if self._peer_holds_ready_port(ip, user, password,
+                                               conf.cluster_peer_timeout):
+                    writer = ip
+                    break
         if writer is None and holding:
             writer = self_ip
         if writer is None:
             writer = self_ip
-            if below:
-                try:
-                    user, password = self._recovery_credentials()
-                except Exception as err:
-                    # No cluster account yet: the cluster is being built
-                    # (install_cluster writes it), and no member takes
-                    # writes before it is complete.
-                    if self.is_cluster_complete():
-                        LOG.warning("Cannot ask the members below which "
-                                    "takes writes: %s", err)
-                    else:
-                        LOG.debug("No cluster account yet to ask the "
-                                  "members below: %s", err)
-                    self._writer = {'conf_id': conf_id, 'writer': None,
-                                    'stable': False, 'holding': holding,
-                                    'when': now}
-                    return None
-                for ip in below:
-                    peer = self._peer_status(ip, user, password,
-                                             conf.cluster_peer_timeout)
-                    if (peer and
-                            peer.get('wsrep_local_state_comment') == SYNCED
-                            and peer.get('wsrep_cluster_status') == PRIMARY):
-                        writer = ip
-                        break
-                    stable = False
+            for ip in below:
+                peer = self._peer_status(ip, user, password,
+                                         conf.cluster_peer_timeout)
+                if (peer and
+                        peer.get('wsrep_local_state_comment') == SYNCED
+                        and peer.get('wsrep_cluster_status') == PRIMARY):
+                    writer = ip
+                    break
+                stable = False
         if not cached or cached['writer'] != writer:
             LOG.info("The writer of the cluster is %s.", writer)
         self._writer = {'conf_id': conf_id, 'writer': writer,
