@@ -501,7 +501,21 @@ class TestReplacement(ReplaceTestBase):
                           mock.call(members[2].volume_id)],
                          self.cinder.volumes.get.call_args_list)
 
-    def test_nothing_when_no_member_tells_its_user(self):
+    def test_the_notification_of_a_step_names_the_cluster(self):
+        # The task manager's delete_instance ends the notification of the
+        # context it is given, which requires the cluster's id of a
+        # shrink's; the API puts it in at the start it notifies, which no
+        # step here does (production, 2026-10-22: every removal of a
+        # member ended in "required keys not defined for notification
+        # DBaaSClusterShrink: ['cluster_id']").
+        cluster, _ = self._lost_cluster()
+        for action in (replace.DBaaSClusterShrink, replace.DBaaSClusterGrow):
+            notification = replace.tenant_context(
+                cluster, action, 'u').notification
+            notification.validate(notification.required_base_traits() +
+                                  notification.required_end_traits())
+            self.assertEqual(cluster.id, notification.payload['cluster_id'])
+
         cluster, _members = self._lost_cluster()
         self.nova.servers.get.side_effect = (
             lambda server_id: servers.Server(mock.Mock(), {

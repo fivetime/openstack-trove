@@ -1,0 +1,9 @@
+---
+fixes:
+  - |
+    The notification the cluster repair gives a step's context carries
+    the cluster's id, as the API's start of a shrink or grow does. The
+    task manager's delete_instance ended the shrink's notification and
+    logged an error ("required keys not defined for notification
+    DBaaSClusterShrink: ['cluster_id']") after each removal of a lost
+    member; the removal itself was done.

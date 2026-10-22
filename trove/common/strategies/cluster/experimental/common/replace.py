@@ -257,10 +257,16 @@ def tenant_context(db_cluster, action=None, user_id=None):
     context = trove_context.TroveContext(project_id=db_cluster.tenant_id,
                                          user_id=user_id, is_admin=True)
     if action is not None:
+        # With the cluster's id, which the API's start of the action puts
+        # in and the end of every step requires (production, 2026-10-22:
+        # each removal of a member ended in "required keys not defined
+        # for notification DBaaSClusterShrink: ['cluster_id']", logged
+        # by the task manager's delete_instance after its work).
         context.notification = action(
             context, request_id=context.request_id,
             server_type='taskmanager', tenant_id=db_cluster.tenant_id,
-            client_ip=CONF.host, server_ip=CONF.host)
+            client_ip=CONF.host, server_ip=CONF.host,
+            cluster_id=db_cluster.id)
     return context
 
 
