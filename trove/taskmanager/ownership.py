@@ -24,8 +24,11 @@ So each task that a task manager carries out is recorded on its instance
 or cluster (``task_owner``: this process, by a name no other process ever
 has), and cleared when the handler returns. Every task manager holds a
 lock named after its process on the ``[coordination]`` backend, kept by
-the backend's lease; a task manager that can take the lock of an owner
-knows that owner is gone. It then takes the task over, in one statement
+the backend's lease (refreshed by Trove's own heart, which holds it again
+when the lease lapsed anyway); a task manager that can take the lock of
+an owner at two looks more than a grace period apart (a live owner holds
+a lapsed lock again within it) knows that owner is gone. It then takes
+the task over, in one statement
 against the others, and gives it up: a build ends in error, any other
 task is cleared, a delete is left to be asked again, and a fault on the
 instance says so. Nothing is resumed: what the task was given (passwords,
@@ -40,6 +43,7 @@ import contextlib
 import functools
 import os
 import socket
+import time
 import uuid
 
 from oslo_log import log as logging
@@ -48,6 +52,7 @@ from oslo_utils import timeutils
 from trove.cluster import models as cluster_models
 from trove.cluster.tasks import ClusterTasks
 from trove.common import cfg
+from trove.common import coordination
 from trove.instance import models as inst_models
 from trove.instance.tasks import InstanceTasks
 
@@ -70,10 +75,24 @@ class Liveness(object):
     and the means to tell whether the process of another task is gone.
     """
 
+    # A lock found free is its owner's again within this many beats of
+    # the owner's heart, when the owner lives.
+    GRACE_BEATS = 2
+
     def __init__(self):
         self._url = CONF.coordination.backend_url
         self._coordinator = None
+        self._heart = None
         self._lock = None
+        # The owners whose lock was found free, and when first.
+        self._free = {}
+
+    @property
+    def grace(self):
+        """How long a lock must stay free before its owner is gone."""
+        period = self._heart.period if self._heart else (
+            float(coordination.LEASE) / coordination.BEATS_PER_LEASE)
+        return self.GRACE_BEATS * period
 
     def start(self):
         if not self._url:
@@ -84,16 +103,15 @@ class Liveness(object):
         self._hold()
 
     def _hold(self):
-        from tooz import coordination as tooz_coordination
+        name = (LOCK % PROCESS).encode()
         try:
             if self._coordinator is None:
-                coordinator = tooz_coordination.get_coordinator(
-                    self._url, PROCESS.encode())
-                coordinator.start(start_heart=True)
-                self._coordinator = coordinator
-            lock = self._coordinator.get_lock((LOCK % PROCESS).encode())
+                self._coordinator, self._heart = \
+                    coordination.start_coordinator(self._url, PROCESS)
+            lock = self._coordinator.get_lock(name)
             if lock.acquire(blocking=False):
                 self._lock = lock
+                self._heart.hold(name, lock, self._lapsed)
                 LOG.info("Holding the lock of task manager %s.", PROCESS)
             else:
                 LOG.error("Cannot hold the lock of task manager %s.",
@@ -103,31 +121,40 @@ class Liveness(object):
                       "Its tasks would be taken for abandoned only after it "
                       "is: trying again.", {'p': PROCESS, 'ex': ex})
 
+    def _lapsed(self, lock):
+        """The heart's word: the lock that holds the process's name again
+        after the lease lapsed, or None when another holder has it (it
+        is held again at the next look).
+        """
+        self._lock = lock
+
     def _held(self):
-        """Whether this process still holds its lock, held again when it
-        was lost (a long stall lets the lease lapse).
+        """Whether this process holds its lock, by one look of the heart;
+        held again when it was lost.
         """
         if not self._url:
             return True
-        if self._lock is not None:
-            try:
-                if self._lock.heartbeat():
-                    return True
-            except Exception as ex:
-                LOG.warning("Cannot refresh the lock of task manager %(p)s: "
-                            "%(ex)s", {'p': PROCESS, 'ex': ex})
-            self._lock = None
+        if self._lock is None:
+            self._hold()
+            return self._lock is not None
+        if self._heart.check((LOCK % PROCESS).encode()):
+            return True
         self._hold()
         return self._lock is not None
 
     def stop(self):
         if self._lock is not None:
+            name = (LOCK % PROCESS).encode()
+            lock = self._heart.release(name) or self._lock
             try:
-                self._lock.release()
+                lock.release()
             except Exception as ex:
                 LOG.warning("Failed to release the lock of task manager "
                             "%(p)s: %(ex)s", {'p': PROCESS, 'ex': ex})
             self._lock = None
+        if self._heart is not None:
+            self._heart.stop()
+            self._heart = None
         if self._coordinator is not None:
             try:
                 self._coordinator.stop()
@@ -136,8 +163,10 @@ class Liveness(object):
             self._coordinator = None
 
     def gone(self, owner):
-        """Whether the process ``owner`` is known to be gone; anything
-        that cannot be told counts as alive.
+        """Whether the process ``owner`` is known to be gone: its lock was
+        free at two looks more than the grace period apart (a lease that
+        lapsed is held again by a live owner within it); anything that
+        cannot be told counts as alive.
         """
         if owner == PROCESS:
             return False
@@ -149,13 +178,25 @@ class Liveness(object):
         try:
             lock = self._coordinator.get_lock((LOCK % owner).encode())
             if not lock.acquire(blocking=False):
+                self._free.pop(owner, None)
                 return False
             lock.release()
-            return True
         except Exception as ex:
             LOG.warning("Cannot tell whether task manager %(o)s lives: "
                         "%(ex)s", {'o': owner, 'ex': ex})
             return False
+        now = time.monotonic()
+        since = self._free.get(owner)
+        if since is None:
+            self._free[owner] = now
+            LOG.info("The lock of task manager %(o)s is free: gone unless "
+                     "it holds it again within %(g).0f s.",
+                     {'o': owner, 'g': self.grace})
+            return False
+        if now - since <= self.grace:
+            return False
+        del self._free[owner]
+        return True
 
 
 _liveness = None

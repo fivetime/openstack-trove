@@ -14,6 +14,7 @@
 membership.
 """
 
+import functools
 import time
 from unittest import mock
 
@@ -76,6 +77,8 @@ class CoordinatorTest(trove_testtools.TestCase):
         self.patch_conf_property('cluster_recovery_coverage', 2)
         self.backend = mock.patch('tooz.coordination.get_coordinator').start()
         self.tooz = self.backend.return_value
+        self.tooz.heartbeat.return_value = 30
+        mock.patch.object(coordination.Heart, '_spawn').start()
         self.members = {b'tm-a', b'tm-b', b'tm-c'}
         self.tooz.get_members.return_value.get.side_effect = (
             lambda: set(self.members))
@@ -98,7 +101,9 @@ class CoordinatorTest(trove_testtools.TestCase):
     def test_joins_and_covers_its_share(self):
         coordinator = self._coordinator('etcd3+http://e:2379')
         self.backend.assert_called_once_with('etcd3+http://e:2379', b'tm-a')
-        self.tooz.start.assert_called_once_with(start_heart=True)
+        # Trove's own heart beats, three times per lease.
+        self.tooz.start.assert_called_once_with(start_heart=False)
+        self.assertEqual(10, coordinator._heart.period)
         self.tooz.join_group_create.assert_called_once_with(b'g')
         self.assertEqual([b'tm-a', b'tm-b', b'tm-c'], coordinator.members())
         keys = ['cluster-%d' % n for n in range(300)]
@@ -193,13 +198,26 @@ class SlotTest(trove_testtools.TestCase):
         self.members = {b'recovery-0', b'recovery-1', b'recovery-2'}
         self.tooz.get_members.return_value.get.side_effect = (
             lambda: set(self.members))
+        mock.patch.object(coordination.Heart, '_spawn').start()
         self.locks = {}
         self.free = {0: False, 1: True, 2: True}
+
+        def take(index, blocking):
+            # The lock as the backend has it: taken when free.
+            if not self.free[index]:
+                return False
+            self.free[index] = False
+            return True
+
+        def give(index):
+            self.free[index] = True
+            return True
 
         def get_lock(name):
             index = int(name.rsplit(b'-', 1)[1])
             lock = self.locks.setdefault(index, mock.Mock())
-            lock.acquire.side_effect = lambda blocking: self.free[index]
+            lock.acquire.side_effect = functools.partial(take, index)
+            lock.release.side_effect = functools.partial(give, index)
             lock.heartbeat.return_value = True
             return lock
         self.tooz.get_lock.side_effect = get_lock
@@ -255,9 +273,25 @@ class SlotTest(trove_testtools.TestCase):
         coordinator.slot_served()
         self.tooz.join_group_create.assert_called_once_with(b'g')
 
+    def test_a_slot_whose_lease_lapsed_is_held_again(self):
+        coordinator = self._coordinator()
+        coordinator.slot_served()
+        # Held, and probed once (whether its holder can acquire it again).
+        tried = self.locks[1].acquire.call_count
+        # The lease lapsed: the lock is free on the backend, and the
+        # driver's heartbeat tells nothing of it.
+        self.free[1] = True
+        coordinator._fetched_at = None
+        self.assertEqual(sorted(self.members), coordinator.members())
+        self.assertEqual('recovery-1', coordinator.slot)
+        self.assertFalse(self.free[1])
+        self.assertEqual(tried + 1, self.locks[1].acquire.call_count)
+        coordinator.on_slot_lost.assert_not_called()
+
     def test_a_lapsed_slot_is_given_up_and_taken_again(self):
         coordinator = self._coordinator()
         coordinator.slot_served()
+        # The lease lapsed and another replica holds the slot.
         self.locks[1].heartbeat.return_value = False
         self.free[1] = False
         coordinator._fetched_at = None
@@ -312,6 +346,156 @@ class SlotTest(trove_testtools.TestCase):
         self.assertFalse(coordination.is_slot(b'tm-a:12'))
         self.assertFalse(coordination.is_slot('recovery-'))
         self.assertFalse(coordination.is_slot('recovery-x'))
+
+
+class HeartTest(trove_testtools.TestCase):
+    """Trove's own heart: the leases refreshed three times per lease,
+    the locks held for long looked after.
+    """
+
+    def setUp(self):
+        super(HeartTest, self).setUp()
+        self.backend = FakeBackend()
+        mock.patch.object(coordination.Heart, '_spawn').start()
+        self.addCleanup(mock.patch.stopall)
+        self.heart = coordination.Heart(self.backend)
+        self.heart.start()
+        self.lapsed = mock.Mock()
+
+    def _hold(self, name=b'lock'):
+        lock = self.backend.get_lock(name)
+        self.assertTrue(lock.acquire(blocking=False))
+        self.heart.hold(name, lock, self.lapsed)
+        return lock
+
+    def test_beats_three_times_per_lease(self):
+        self.assertEqual(30, self.heart.lease)
+        self.assertEqual(10, self.heart.period)
+        self.backend.interval = None
+        heart = coordination.Heart(self.backend)
+        heart.start()
+        self.assertEqual(coordination.LEASE, heart.lease)
+        self.assertEqual(10, heart.period)
+
+    def test_a_beat_refreshes_and_tells_alive(self):
+        self.assertTrue(self.heart.alive)
+        self.backend.down = True
+        self.heart.beat()
+        with mock.patch.object(coordination.time, 'monotonic',
+                               return_value=time.monotonic() + 31):
+            self.assertFalse(self.heart.alive)
+        self.backend.down = False
+        self.heart.beat()
+        self.assertTrue(self.heart.alive)
+
+    def test_a_held_lock_is_refreshed_and_kept(self):
+        lock = self._hold()
+        self.heart.beat()
+        self.assertTrue(self.heart.check(b'lock'))
+        self.assertIs(lock, self.backend.keys[b'lock'])
+        self.lapsed.assert_not_called()
+        self.assertIs(lock, self.heart.release(b'lock'))
+        self.assertFalse(self.heart.check(b'lock'))
+
+    def test_a_lapsed_lock_is_held_again(self):
+        lock = self._hold()
+        self.backend.lapse(b'lock')
+        self.heart.beat()
+        fresh = self.backend.keys[b'lock']
+        self.assertIsNot(lock, fresh)
+        self.lapsed.assert_called_once_with(fresh)
+        self.assertIs(fresh, self.heart.release(b'lock'))
+
+    def test_a_lock_another_took_cannot_be_told_from_one_held(self):
+        lock = self._hold()
+        self.backend.lapse(b'lock')
+        self.backend.take(b'lock')
+        self.assertTrue(self.heart.check(b'lock'))
+        self.lapsed.assert_not_called()
+        self.assertIs(lock, self.heart.release(b'lock'))
+
+    def test_a_lock_the_driver_reports_held_no_more_is_lost(self):
+        lock = self._hold()
+        self.backend.lapse(b'lock')
+        self.backend.take(b'lock')
+        lock.acquired = False
+        self.assertFalse(self.heart.check(b'lock'))
+        self.lapsed.assert_called_once_with(None)
+        self.assertFalse(self.heart.holds(b'lock'))
+
+    def test_a_lock_its_holder_can_acquire_again_is_not_probed(self):
+        self.backend.reentrant = True
+        self._hold()
+        self.heart.beat()
+        self.assertTrue(self.heart.check(b'lock'))
+        self.lapsed.assert_not_called()
+
+    def test_a_backend_that_does_not_answer(self):
+        lock = self._hold()
+        self.backend.down = True
+        # The lock is held while the leases were refreshed within a lease.
+        self.assertTrue(self.heart.check(b'lock'))
+        self.lapsed.assert_not_called()
+        self.assertIs(lock, self.backend.keys[b'lock'])
+
+
+class FakeLock(object):
+    """A lock as the etcd driver has it: a key with a lease on the
+    backend, and a flag in the process that a lapsed lease does not
+    clear.
+    """
+
+    def __init__(self, backend, name):
+        self.backend = backend
+        self.name = name
+        self.acquired = False
+
+    def acquire(self, blocking=False):
+        if self.backend.down:
+            raise RuntimeError('down')
+        holder = self.backend.keys.get(self.name)
+        if holder is not None and not (
+                self.backend.reentrant and holder != 'another'):
+            return False
+        self.backend.keys[self.name] = self
+        self.acquired = True
+        return True
+
+    def release(self):
+        self.acquired = False
+        if self.backend.keys.get(self.name) is self:
+            del self.backend.keys[self.name]
+            return True
+        return False
+
+    def heartbeat(self):
+        if self.backend.down:
+            raise RuntimeError('down')
+        return self.acquired
+
+
+class FakeBackend(object):
+
+    def __init__(self):
+        self.keys = {}
+        self.interval = 30
+        self.down = False
+        # A driver whose lock the holder can acquire again (a file lock).
+        self.reentrant = False
+
+    def heartbeat(self):
+        if self.down:
+            raise RuntimeError('down')
+        return self.interval
+
+    def get_lock(self, name):
+        return FakeLock(self, name)
+
+    def lapse(self, name):
+        del self.keys[name]
+
+    def take(self, name):
+        self.keys[name] = 'another'
 
 
 class ObserverTest(trove_testtools.TestCase):

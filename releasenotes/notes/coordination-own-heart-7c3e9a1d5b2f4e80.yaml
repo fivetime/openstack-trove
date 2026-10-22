@@ -1,0 +1,18 @@
+---
+fixes:
+  - |
+    The task manager's leases on the ``[coordination]`` backend (the lock
+    that tells the other task managers it lives, its cluster recovery
+    slot, its group membership) are now refreshed by Trove's own heart,
+    three times per lease. tooz's heart refreshes once per lease
+    lifetime, which with the etcd driver lets a refresh that is late at
+    all find the lease lapsed, and the driver reports nothing of it: the
+    lock was gone from the backend while its holder went on believing it
+    held it. The other task manager then took every task of a live task
+    manager for abandoned (a build marked in error and given a fault
+    while it went on and finished; a cluster member's replacement ended
+    as failed), and two task managers could hold the same recovery slot.
+    The heart now also looks after the locks held for long: a lock whose
+    lease lapsed anyway is held again at once, and an owner is taken for
+    gone only when its lock is free at two looks more than a grace
+    period apart.

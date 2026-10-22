@@ -10,12 +10,14 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+import time
 from unittest import mock
 
 from oslo_utils import timeutils
 
 from trove.cluster.models import DBCluster
 from trove.cluster.tasks import ClusterTasks
+from trove.common import coordination
 from trove.common import exception
 from trove.common import utils
 from trove.instance.models import DBInstance
@@ -232,61 +234,172 @@ class OwnershipTest(trove_testtools.TestCase):
                          DBInstance.find_by(id=instance_id).task_status)
 
 
+class FakeLock(object):
+    """A lock as the etcd driver has it: a key with a lease on the
+    backend, and a flag in the process that a lapsed lease does not
+    clear (the refresh of a lapsed lease raises nothing).
+    """
+
+    def __init__(self, backend, name):
+        self.backend = backend
+        self.name = name
+        self.acquired = False
+
+    def acquire(self, blocking=False):
+        self.backend.tried.append(self.name)
+        if self.name in self.backend.keys:
+            return False
+        self.backend.keys[self.name] = self
+        self.acquired = True
+        return True
+
+    def release(self):
+        self.acquired = False
+        if self.backend.keys.get(self.name) is self:
+            del self.backend.keys[self.name]
+            return True
+        return False
+
+    def heartbeat(self):
+        return self.acquired
+
+
+class FakeBackend(object):
+
+    def __init__(self):
+        self.keys = {}
+        self.tried = []
+        self.started = None
+        self.stopped = False
+
+    def start(self, start_heart=False):
+        self.started = start_heart
+
+    def stop(self):
+        self.stopped = True
+
+    def heartbeat(self):
+        return 30
+
+    def get_lock(self, name):
+        return FakeLock(self, name)
+
+    def lapse(self, name):
+        """The lease of the lock lapsed: the key is gone, the holder's
+        flag is not.
+        """
+        del self.keys[name]
+
+    def take(self, name):
+        """Another process holds the lock."""
+        self.keys[name] = 'another'
+
+
 class LivenessTest(trove_testtools.TestCase):
 
     def setUp(self):
         super(LivenessTest, self).setUp()
         self.patch_conf_property('backend_url', 'etcd3+http://etcd:2379',
                                  section='coordination')
-        self.coordinator = mock.Mock()
-        self.locks = {}
-
-        def get_lock(name):
-            return self.locks.setdefault(name, mock.Mock())
-
-        self.coordinator.get_lock.side_effect = get_lock
+        self.backend = FakeBackend()
         patcher = mock.patch('tooz.coordination.get_coordinator',
-                             return_value=self.coordinator)
+                             return_value=self.backend)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # No beating thread: the looks are the test's.
+        mock.patch.object(coordination.Heart, '_spawn').start()
+        self.addCleanup(mock.patch.stopall)
         self.liveness = ownership.Liveness()
+        self.own = (ownership.LOCK % ownership.PROCESS).encode()
+        self.other = (ownership.LOCK % ELSEWHERE).encode()
 
-    def _lock(self, owner):
-        return self.coordinator.get_lock(
-            (ownership.LOCK % owner).encode())
+    def _later(self, seconds):
+        later = time.monotonic() + seconds
+        return mock.patch.object(ownership.time, 'monotonic',
+                                 return_value=later)
 
     def test_a_task_manager_holds_its_lock(self):
         self.liveness.start()
-        self._lock(ownership.PROCESS).acquire.assert_called_once_with(
-            blocking=False)
-        self.coordinator.start.assert_called_once_with(start_heart=True)
+        self.assertIn(self.own, self.backend.keys)
+        # tooz's heart beats once per lease: Trove's beats three times.
+        self.assertFalse(self.backend.started)
+        self.assertEqual(10, self.liveness._heart.period)
+        self.assertEqual(20, self.liveness.grace)
         self.liveness.stop()
-        self._lock(ownership.PROCESS).release.assert_called_once_with()
+        self.assertNotIn(self.own, self.backend.keys)
+        self.assertTrue(self.backend.stopped)
 
-    def test_an_owner_whose_lock_is_free_is_gone(self):
+    def test_an_owner_whose_lock_stays_free_is_gone(self):
         self.liveness.start()
-        self._lock(ELSEWHERE).acquire.return_value = True
-        self.assertTrue(self.liveness.gone(ELSEWHERE))
-        self._lock(ELSEWHERE).release.assert_called_once_with()
+        # The first look: free, but a lease that lapsed is held again by
+        # a live owner within the grace period.
+        self.assertFalse(self.liveness.gone(ELSEWHERE))
+        self.assertNotIn(self.other, self.backend.keys)
+        with self._later(self.liveness.grace - 1):
+            self.assertFalse(self.liveness.gone(ELSEWHERE))
+        with self._later(self.liveness.grace + 1):
+            self.assertTrue(self.liveness.gone(ELSEWHERE))
+
+    def test_an_owner_that_holds_its_lock_again_lives(self):
+        self.liveness.start()
+        self.assertFalse(self.liveness.gone(ELSEWHERE))
+        self.backend.take(self.other)
+        with self._later(self.liveness.grace + 1):
+            self.assertFalse(self.liveness.gone(ELSEWHERE))
+        # Free again: the looks start over.
+        self.backend.lapse(self.other)
+        with self._later(self.liveness.grace + 2):
+            self.assertFalse(self.liveness.gone(ELSEWHERE))
 
     def test_an_owner_holding_its_lock_lives(self):
         self.liveness.start()
-        self._lock(ELSEWHERE).acquire.return_value = False
+        self.backend.take(self.other)
         self.assertFalse(self.liveness.gone(ELSEWHERE))
+
+    def test_a_lapsed_lock_is_held_again(self):
+        self.liveness.start()
+        lock = self.liveness._lock
+        self.backend.lapse(self.own)
+        self.assertTrue(lock.heartbeat())  # the driver tells nothing
+        self.liveness._heart.beat()
+        self.assertIn(self.own, self.backend.keys)
+        self.assertIsNot(lock, self.liveness._lock)
+        self.assertIs(self.liveness._lock, self.backend.keys[self.own])
+        # Stopping releases the lock that holds it now.
+        self.liveness.stop()
+        self.assertNotIn(self.own, self.backend.keys)
+
+    def test_a_lock_another_holds_is_held_again_when_it_is_free(self):
+        self.liveness.start()
+        lock = self.liveness._lock
+        self.backend.lapse(self.own)
+        self.backend.take(self.own)
+        # Lost, as the driver tells it.
+        lock.acquired = False
+        self.liveness._heart.beat()
+        self.assertIsNone(self.liveness._lock)
+        # Without its own lock it tells nothing of the others.
+        self.assertFalse(self.liveness.gone(ELSEWHERE))
+        self.assertNotIn(self.other, self.backend.tried)
+        self.backend.lapse(self.own)
+        self.assertFalse(self.liveness.gone(ELSEWHERE))
+        self.assertIs(self.liveness._lock, self.backend.keys[self.own])
+        self.assertIn(self.other, self.backend.tried)
 
     def test_what_cannot_be_told_lives(self):
         self.liveness.start()
-        self._lock(ELSEWHERE).acquire.side_effect = RuntimeError('down')
-        self.assertFalse(self.liveness.gone(ELSEWHERE))
+        with mock.patch.object(self.backend, 'get_lock',
+                               side_effect=RuntimeError('down')):
+            self.assertFalse(self.liveness.gone(ELSEWHERE))
         self.assertFalse(self.liveness.gone(ownership.PROCESS))
 
     def test_without_its_own_lock_it_tells_nothing(self):
         # A task manager that lost its own lock may be the one cut off.
-        self._lock(ownership.PROCESS).acquire.return_value = False
+        self.backend.take(self.own)
         self.liveness.start()
-        self._lock(ELSEWHERE).acquire.return_value = True
+        self.assertIsNone(self.liveness._lock)
         self.assertFalse(self.liveness.gone(ELSEWHERE))
-        self._lock(ELSEWHERE).acquire.assert_not_called()
+        self.assertNotIn(self.other, self.backend.tried)
 
     def test_the_process_before_on_this_host_is_gone(self):
         self.assertTrue(self.liveness.gone(BEFORE))

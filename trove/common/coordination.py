@@ -30,6 +30,7 @@ backend URL, or until the backend first answers, a replica covers every
 key; when the backend stops answering, it keeps the last membership.
 """
 
+import functools
 import hashlib
 import os
 import socket
@@ -71,8 +72,203 @@ SLOT_RETRY = 60
 SLOT_QUARANTINE = 3600
 
 
+# The lease the tooz drivers give a lock and a membership by default
+# (their lock_timeout and membership_timeout), when the driver does not
+# say how often to beat.
+LEASE = 30
+# How many times a lease is refreshed in its lifetime. tooz's own heart
+# refreshes once per lifetime: the etcd driver's beats are the lease
+# apart, and the refresh resets the lease, so a refresh that is late at
+# all (by the wait of the beating thread, by the round trip) finds it
+# lapsed; the lock is then gone from the backend while its holder, whose
+# refresh of a lapsed lease raises nothing, believes it holds it.
+BEATS_PER_LEASE = 3
+
+
 def slot_name(index):
     return '%s%d' % (SLOT_PREFIX, index)
+
+
+def start_coordinator(url, member_id):
+    """A tooz coordinator on the backend, started with Trove's own heart
+    (the coordinator and the heart, which stops before it).
+    """
+    from tooz import coordination as tooz_coordination
+    coordinator = tooz_coordination.get_coordinator(url, _bytes(member_id))
+    coordinator.start(start_heart=False)
+    heart = Heart(coordinator)
+    heart.start()
+    return coordinator, heart
+
+
+class _Held(object):
+
+    def __init__(self, lock, on_lapse, probe):
+        self.lock = lock
+        self.on_lapse = on_lapse
+        # Whether a lock of the same name acquired again tells that the
+        # lease lapsed (not with a driver whose lock the process that
+        # holds it can acquire again).
+        self.probe = probe
+
+
+class Heart(object):
+    """The pump that keeps the leases of a coordinator alive: it beats
+    BEATS_PER_LEASE times per lease, and at each beat looks after the
+    locks the process holds for long (its liveness lock, its slot): a
+    lock whose lease lapsed anyway is held again at once, and a lock
+    the driver reports as held no more is given up for lost; the holder
+    is told either way. A lock another holder took while the lease had
+    lapsed cannot be told from one held (the driver reports it acquired
+    either way): a slot is then held by two replicas, which the coverage
+    allows (two replicas acting is harmless), until one of them stops.
+
+    :param coordinator: a started tooz coordinator, its own heart off.
+    """
+
+    def __init__(self, coordinator, beats=BEATS_PER_LEASE):
+        self._coordinator = coordinator
+        self._beats = beats
+        self._held = {}
+        self._guard = threading.RLock()
+        self._dead = threading.Event()
+        self._thread = None
+        # The lease the coordinator asks to be refreshed within, and when
+        # it was last refreshed (None: never, or not since it failed).
+        self.lease = LEASE
+        self.period = float(LEASE) / beats
+        self._beat_at = None
+
+    def start(self):
+        interval = self._beat()
+        if interval is not None:
+            self._beat_at = time.monotonic()
+        self.lease = interval or LEASE
+        self.period = max(1.0, float(self.lease) / self._beats)
+        self._spawn()
+
+    def _spawn(self):
+        self._thread = threading.Thread(target=self._run, name='trove-heart')
+        self._thread.daemon = True
+        self._thread.start()
+
+    def _run(self):
+        while not self._dead.wait(self.period):
+            try:
+                self.beat()
+            except Exception:
+                LOG.exception("The heart skipped a beat.")
+
+    def stop(self):
+        self._dead.set()
+
+    def _beat(self):
+        """One refresh of the leases; the interval the driver asks for,
+        None when the backend did not answer.
+        """
+        try:
+            interval = self._coordinator.heartbeat()
+        except Exception as ex:
+            LOG.warning("Cannot refresh the leases on the coordination "
+                        "backend: %s", _reason(ex))
+            return None
+        if isinstance(interval, (int, float)) and interval > 0:
+            return interval
+        return LEASE
+
+    def beat(self):
+        """A beat: the leases refreshed, the locks held looked after."""
+        now = time.monotonic()
+        if self._beat_at is not None and now - self._beat_at > self.lease:
+            LOG.warning("The heart did not beat for %.0f s (a lease is "
+                        "%d s): the leases may have lapsed.",
+                        now - self._beat_at, self.lease)
+        if self._beat() is not None:
+            self._beat_at = now
+        with self._guard:
+            for name in list(self._held):
+                self.check(name)
+
+    @property
+    def alive(self):
+        """Whether the leases are known to be alive: refreshed within a
+        lease.
+        """
+        return (self._beat_at is not None and
+                time.monotonic() - self._beat_at <= self.lease)
+
+    def hold(self, name, lock, on_lapse=None):
+        """A lock the process holds for long, looked after from now on.
+        ``on_lapse`` is called with the lock that holds it again when its
+        lease lapsed, and with None when it is lost to another holder.
+        """
+        with self._guard:
+            self._held[name] = _Held(lock, on_lapse,
+                                     probe=not self._reentrant(name))
+
+    def _reentrant(self, name):
+        """Whether the process that holds a lock can acquire it again (a
+        file lock, say): then a lock of the same name acquired tells
+        nothing of the lease.
+        """
+        try:
+            fresh = self._coordinator.get_lock(name)
+            if fresh.acquire(blocking=False):
+                fresh.release()
+                LOG.debug("Lock %s can be acquired again by its holder: "
+                          "its lease is not probed.", name)
+                return True
+        except Exception as ex:
+            LOG.debug("Cannot probe lock %s: %s", name, _reason(ex))
+        return False
+
+    def release(self, name):
+        """The lock of that name, looked after no more; None when it is
+        not held. The holder releases it.
+        """
+        with self._guard:
+            held = self._held.pop(name, None)
+        return held.lock if held else None
+
+    def holds(self, name):
+        return name in self._held
+
+    def check(self, name):
+        """Whether the lock of that name is held, by one look: refreshed;
+        held again when its lease had lapsed; given up when another
+        holder has it.
+        """
+        with self._guard:
+            held = self._held.get(name)
+            if held is None:
+                return False
+            try:
+                refreshed = bool(held.lock.heartbeat())
+            except Exception as ex:
+                LOG.warning("Cannot refresh lock %s: %s", name, _reason(ex))
+                return self.alive
+            if refreshed and not held.probe:
+                return True
+            try:
+                fresh = self._coordinator.get_lock(name)
+                got = fresh.acquire(blocking=False)
+            except Exception as ex:
+                LOG.warning("Cannot probe lock %s: %s", name, _reason(ex))
+                return refreshed
+            if got:
+                LOG.warning("The lease of lock %s had lapsed: held again.",
+                            name)
+                held.lock = fresh
+                if held.on_lapse is not None:
+                    held.on_lapse(fresh)
+                return True
+            if refreshed:
+                return True
+            LOG.error("Lock %s is lost: another holder has it.", name)
+            del self._held[name]
+            if held.on_lapse is not None:
+                held.on_lapse(None)
+            return False
 
 
 def slot_topic():
@@ -168,7 +364,9 @@ class Coordinator(object):
         # when).
         self._parked = {}
         self._holder = None
+        self._holder_heart = None
         self._slot_lock = None
+        self._slot_index = None
         self._tried_slot_at = None
         # Called with the slot's name when one is held, and with no
         # argument when it is lost (the lock lapsed).
@@ -176,6 +374,7 @@ class Coordinator(object):
         self.on_slot_lost = None
         self._url = None
         self._coordinator = None
+        self._heart = None
         # The last membership the backend gave, and when; None until it
         # gave one.
         self._members = None
@@ -228,14 +427,11 @@ class Coordinator(object):
         member id; without one, this replica watches no cluster and tries
         again every SLOT_RETRY seconds.
         """
-        from tooz import coordination as tooz_coordination
         self._tried_slot_at = time.monotonic()
         try:
             if self._holder is None:
-                holder = tooz_coordination.get_coordinator(
+                self._holder, self._holder_heart = start_coordinator(
                     self._url, self.member_id)
-                holder.start(start_heart=True)
-                self._holder = holder
             now = time.monotonic()
             self._unpark(now)
             for index in range(self.slots):
@@ -246,6 +442,9 @@ class Coordinator(object):
                     self._slot_lock = lock
                     self.slot = slot_name(index)
                     self._slot_index = index
+                    self._holder_heart.hold(
+                        SLOT_LOCK % index, lock,
+                        functools.partial(self._slot_lapsed, index))
                     self.slot_ready = self.on_slot_held is None
                     LOG.info("Holding slot %(s)s of %(n)d as %(m)s.",
                              {'s': self.slot, 'n': self.slots,
@@ -267,21 +466,32 @@ class Coordinator(object):
                 del self._parked[index]
                 LOG.info("Releasing parked slot %s.", slot_name(index))
                 try:
+                    self._holder_heart.release(SLOT_LOCK % index)
                     lock.release()
                 except Exception as ex:
                     LOG.warning("Failed to release slot %s: %s",
                                 slot_name(index), _reason(ex))
 
     def _slot_held(self):
-        """Whether the slot's lock still holds (its lease is refreshed by
-        the holder's heartbeat; a long stall can let it lapse).
+        """Whether the slot's lock still holds, by one look of the heart
+        (a lapsed lease is held again there and then; a slot another
+        replica took meanwhile is lost).
         """
-        try:
-            return bool(self._slot_lock.heartbeat())
-        except Exception as ex:
-            LOG.warning("Cannot refresh the lock of slot %s: %s",
-                        self.slot, _reason(ex))
-            return False
+        return (self._slot_lock is not None and
+                self._holder_heart.check(SLOT_LOCK % self._slot_index))
+
+    def _slot_lapsed(self, index, lock):
+        """The heart's word on a slot's lock: the lock that holds it again
+        after its lease lapsed, or None when another holder took it (the
+        slot is lost at the next look at the membership).
+        """
+        if index in self._parked:
+            if lock is None:
+                del self._parked[index]
+            else:
+                self._parked[index] = (lock, self._parked[index][1])
+        elif self.slot == slot_name(index):
+            self._slot_lock = lock
 
     def _lose_slot(self):
         LOG.error("Lost slot %s: leaving group %s and watching no cluster "
@@ -299,18 +509,16 @@ class Coordinator(object):
                 LOG.exception("Failed to stop serving the slot.")
 
     def _connect(self):
-        from tooz import coordination as tooz_coordination
         member_id = _bytes(self.slot) if self.slot else self.member_id
         if self.observer:
             member_id = _bytes('observer:%s' % self.member_id.decode())
-        coordinator = tooz_coordination.get_coordinator(
-            self._url, member_id)
         try:
-            coordinator.start(start_heart=True)
+            coordinator, heart = start_coordinator(self._url, member_id)
             if not self.observer:
                 try:
                     self._join(coordinator)
                 except Exception:
+                    heart.stop()
                     coordinator.stop()
                     raise
         except Exception as ex:
@@ -322,6 +530,7 @@ class Coordinator(object):
             return
         self._failing = False
         self._coordinator = coordinator
+        self._heart = heart
         if self.observer:
             LOG.info("Watching the members of group %s.", self.group.decode())
         else:
@@ -343,6 +552,7 @@ class Coordinator(object):
             self._leave()
             if self._slot_lock is not None:
                 try:
+                    self._holder_heart.release(SLOT_LOCK % self._slot_index)
                     self._slot_lock.release()
                 except Exception as ex:
                     LOG.warning("Failed to release slot %s: %s", self.slot,
@@ -351,6 +561,7 @@ class Coordinator(object):
                 self.slot = None
             self._unpark(float('inf'))
             if self._holder is not None:
+                self._holder_heart.stop()
                 try:
                     self._holder.stop()
                 except Exception as ex:
@@ -362,6 +573,9 @@ class Coordinator(object):
         self._coordinator = None
         if coordinator is None:
             return
+        if self._heart is not None:
+            self._heart.stop()
+            self._heart = None
         if not self.observer:
             try:
                 coordinator.leave_group(self.group).get()
