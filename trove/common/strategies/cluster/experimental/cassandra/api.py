@@ -178,10 +178,14 @@ class CassandraCluster(models.Cluster):
     def _build_instance_name(cls, cluster_name, dc, rack, instance_idx):
         return "%s-member-%s-%s-%d" % (cluster_name, dc, rack, instance_idx)
 
-    def grow(self, instances, image_id=None):
+    def grow(self, instances, image_id=None, held=False):
+        """Adds members. ``held``: the caller holds the cluster's grow task
+        already (the repair, which takes it to be the one that adds).
+        """
         LOG.debug("Processing a request for growing cluster: %s", self.id)
 
-        self.validate_cluster_available()
+        self.validate_cluster_available(
+            [ClusterTasks.GROWING_CLUSTER] if held else [ClusterTasks.NONE])
 
         context = self.context
         db_info = self.db_info
@@ -189,16 +193,20 @@ class CassandraCluster(models.Cluster):
         datastore_version = self.ds_version
 
         db_info.update(task_status=ClusterTasks.GROWING_CLUSTER)
+        try:
+            locality = srv_grp.ServerGroup.convert_to_hint(self.server_group)
+            configuration_id = self.db_info.configuration_id
 
-        locality = srv_grp.ServerGroup.convert_to_hint(self.server_group)
-        configuration_id = self.db_info.configuration_id
+            new_instances = self._create_cluster_instances(
+                context, db_info.id, db_info.name, datastore,
+                datastore_version, instances, None, locality,
+                configuration_id, image_id=image_id)
 
-        new_instances = self._create_cluster_instances(
-            context, db_info.id, db_info.name, datastore, datastore_version,
-            instances, None, locality, configuration_id, image_id=image_id)
-
-        task_api.load(context, datastore_version.manager).grow_cluster(
-            db_info.id, [instance.id for instance in new_instances])
+            task_api.load(context, datastore_version.manager).grow_cluster(
+                db_info.id, [instance.id for instance in new_instances])
+        except Exception:
+            db_info.update(task_status=ClusterTasks.NONE)
+            raise
 
         return CassandraCluster(context, db_info, datastore, datastore_version)
 

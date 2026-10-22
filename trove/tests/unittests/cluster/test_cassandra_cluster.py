@@ -19,6 +19,7 @@ from unittest.mock import Mock
 from unittest.mock import patch
 
 from trove.cluster import models
+from trove.cluster.tasks import ClusterTasks
 from trove.common.strategies.cluster.experimental.cassandra.api \
     import CassandraCluster
 from trove.common.strategies.cluster.experimental.cassandra.taskmanager \
@@ -109,6 +110,37 @@ class ClusterTest(trove_testtools.TestCase):
                              return_value=None):
             cluster.grow([MagicMock()], 'image-from-tags')
         self.assertEqual('image-from-tags', create.call_args[1]['image_id'])
+
+    def test_grow_held_by_the_repair(self):
+        # The repair holds the cluster's grow task already: a grow it asks
+        # for finds it held, and a grow that fails lets it go.
+        cluster = CassandraCluster.__new__(CassandraCluster)
+        cluster.context = self.context
+        cluster.db_info = Mock()
+        cluster.ds = Mock()
+        cluster.ds_version = Mock(manager='cassandra')
+        with patch.object(CassandraCluster,
+                          'validate_cluster_available') as available, \
+                patch.object(CassandraCluster, 'server_group', None,
+                             create=True), \
+                patch('trove.common.server_group.ServerGroup.'
+                      'convert_to_hint'), \
+                patch.object(CassandraCluster, '_create_cluster_instances',
+                             return_value=[]) as create, \
+                patch('trove.taskmanager.api.load'), \
+                patch.object(CassandraCluster, '__init__',
+                             return_value=None):
+            cluster.grow([MagicMock()], 'image', held=True)
+            available.assert_called_once_with(
+                [ClusterTasks.GROWING_CLUSTER])
+            available.reset_mock()
+            cluster.grow([MagicMock()], 'image')
+            available.assert_called_once_with([ClusterTasks.NONE])
+            create.side_effect = ValueError('boom')
+            self.assertRaises(ValueError, cluster.grow, [MagicMock()],
+                              'image', held=True)
+        cluster.db_info.update.assert_called_with(
+            task_status=ClusterTasks.NONE)
 
     def test_choose_seed_nodes(self):
         nodes = self._build_mock_nodes(3)

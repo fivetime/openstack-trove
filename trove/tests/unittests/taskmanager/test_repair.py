@@ -27,6 +27,8 @@ from trove.common import context as trove_context
 from trove.common import exception
 from trove.common.notification import EndNotification
 from trove.common.strategies.cluster.experimental.cassandra import (
+    api as cassandra_api)
+from trove.common.strategies.cluster.experimental.cassandra import (
     repair as cassandra_repair)
 from trove.common.strategies.cluster.experimental.common import (
     api as common_api)
@@ -966,6 +968,34 @@ class TestCassandraReplace(_PeerViews):
                               'not up and normal: 172.31.250.67 DN',
                               '172.31.250.68'))
         self.assertFalse(self._ask()[0])
+
+    def test_the_member_in_its_place_is_added_through_the_grow(self):
+        # The real cluster, as the API loads it, with the grow task the
+        # repair holds: its grow takes the member like the lost one.
+        plugin = replace.plugin_for(self.manager)
+        api = mock.patch.object(task_api, 'load').start().return_value
+        datastore_version = mock.Mock(manager='cassandra', image_id='img-1')
+        self.cluster.task_status = ClusterTasks.GROWING_CLUSTER
+        cluster = cassandra_api.CassandraCluster(
+            mock.Mock(), self.cluster, mock.Mock(), datastore_version)
+        cluster._server_group_loaded = True
+        cluster._server_group = None
+        mock.patch.object(cluster_models.Cluster, 'load',
+                          return_value=cluster).start()
+        create = mock.patch.object(
+            cassandra_api.CassandraCluster, '_create_cluster_instances',
+            return_value=[mock.Mock(id='new')]).start()
+        state = {'lost': self.members[0].id,
+                 'spec': {'flavor_id': 'f1', 'volume_size': 10}}
+        # The grow's notification ends on the task manager's own.
+        context = mock.Mock()
+        context.notification.server_type = 'taskmanager'
+        plugin.add(context, self.cluster, state)
+        context.notification.notify_end.assert_called_once_with()
+        self.assertEqual([{'flavor_id': 'f1', 'volume_size': 10}],
+                         create.call_args.args[5])
+        self.assertEqual('img-1', create.call_args.kwargs['image_id'])
+        api.grow_cluster.assert_called_once_with(self.cluster.id, ['new'])
 
 
 class TestPostgresqlReplace(_PeerViews):
