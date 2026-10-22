@@ -104,6 +104,22 @@ class CassandraGuestAgentAPI(guest_api.API):
 
         return self._cast("node_decommission", version=version)
 
+    def get_ring(self):
+        """The ring as the node sees it: [{'state', 'address',
+        'host_id'}].
+        """
+        LOG.debug("Retrieving the ring from node: %s", self.id)
+        version = guest_api.API.API_BASE_VERSION
+        return self._call("get_ring", self.agent_low_timeout,
+                          version=version)
+
+    def remove_node(self, host_id):
+        """Take a node that is gone out of the ring, from this node."""
+        LOG.debug("Removing node %s from the ring via node: %s", host_id,
+                  self.id)
+        version = guest_api.API.API_BASE_VERSION
+        return self._cast("remove_node", version=version, host_id=host_id)
+
     def cluster_secure(self, password):
         LOG.debug("Securing the cluster via node: %s", self.id)
         version = guest_api.API.API_BASE_VERSION

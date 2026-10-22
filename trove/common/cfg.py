@@ -1510,6 +1510,10 @@ cassandra_opts = [
     cfg.IntOpt('node_sync_time', default=60,
                help='Time (in seconds) given to a node after a state change '
                'to finish rejoining the cluster.'),
+    cfg.IntOpt('node_remove_timeout', default=1800, min=60,
+               help='Seconds the task manager waits for the ring to forget '
+                    'a member that is gone for good (nodetool removenode: '
+                    'the nodes that stay stream its replicas among them).'),
     cfg.BoolOpt('auto_repair', default=True,
                 help='Whether the members of a cluster repair it '
                      'themselves, with the repair scheduler of Cassandra '

@@ -637,6 +637,19 @@ class TestCassandraAppLifecycle(CassandraGuestTestCase):
         mock_stop.assert_not_called()
         app.status.set_status.assert_called_once()
 
+    def test_remove_node_takes_a_node_out_by_its_host_id(self):
+        app = self._app()
+        with mock.patch.object(cassandra_service.CassandraApp,
+                               'nodetool') as nodetool:
+            app.remove_node('7bc91976-1b2a-4679-99e3-3a39c4ab0252')
+            nodetool.assert_called_once_with(
+                'removenode', '7bc91976-1b2a-4679-99e3-3a39c4ab0252')
+        # A failure is told (the task manager watches the ring), not
+        # raised at the cast.
+        with mock.patch.object(cassandra_service.CassandraApp, 'nodetool',
+                               side_effect=exception.TroveError('boom')):
+            app.remove_node('7bc91976-1b2a-4679-99e3-3a39c4ab0252')
+
     def test_cleanup_reports_the_state_it_ends_in(self):
         app = self._app()
         app.node_cleanup_begin()
@@ -779,6 +792,18 @@ class TestCassandraClusterHealth(CassandraGuestTestCase):
         self.assertEqual('DEGRADED', health['status'])
         self.assertEqual('not up and normal: 172.31.250.67 DN',
                          health['reason'])
+
+    def test_the_ring_with_host_ids(self):
+        app = self._app_seeing('down')
+        self.assertEqual(
+            [{'state': 'DN', 'address': '172.31.250.67',
+              'host_id': '7bc91976-1b2a-4679-99e3-3a39c4ab0252'},
+             {'state': 'UN', 'address': '172.31.250.66',
+              'host_id': '60494c01-5ce4-493e-b2ab-708f65c728fe'}],
+            app.get_ring())
+        # One listing serves it and the health.
+        app.cluster_health()
+        app.nodetool.assert_called_once_with('status')
 
     def test_the_node_itself_down(self):
         view = self._app_seeing('down', address='172.31.250.67').member_view()

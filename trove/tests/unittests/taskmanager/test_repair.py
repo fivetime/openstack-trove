@@ -26,6 +26,8 @@ from trove.common import cluster_health as ch
 from trove.common import context as trove_context
 from trove.common import exception
 from trove.common.notification import EndNotification
+from trove.common.strategies.cluster.experimental.cassandra import (
+    repair as cassandra_repair)
 from trove.common.strategies.cluster.experimental.common import (
     api as common_api)
 from trove.common.strategies.cluster.experimental.common import (
@@ -918,10 +920,52 @@ class TestGroupReplicationReplace(_PeerViews):
                 ('pxc', galera_repair.GaleraReplace),
                 ('mysql', gr_repair.GroupReplicationReplace),
                 ('percona', gr_repair.GroupReplicationReplace),
-                ('postgresql', pg_repair.PostgresqlReplace)):
+                ('postgresql', pg_repair.PostgresqlReplace),
+                ('cassandra', cassandra_repair.CassandraReplace)):
             plugin = replace.plugin_for(manager)
             self.assertIsInstance(plugin, cls)
             self.assertEqual(manager, plugin.manager)
+
+
+class TestCassandraReplace(_PeerViews):
+    """Cassandra's word on a lost member: what each node sees of the ring
+    (nodetool status of Cassandra 5.0, as the guest's own tests pin it):
+    the lost one down, the others up and normal.
+    """
+
+    manager = 'cassandra'
+    ips = ('172.31.250.67', '172.31.250.66', '172.31.250.68')
+
+    def test_down_in_the_ring_of_every_other_node(self):
+        self._tell(1, ch.view(ch.DEGRADED, ['172.31.250.67'],
+                              'not up and normal: 172.31.250.67 DN',
+                              '172.31.250.66'))
+        self._tell(2, ch.view(ch.DEGRADED, ['172.31.250.67'],
+                              'not up and normal: 172.31.250.67 DN',
+                              '172.31.250.68'))
+        self.assertEqual(
+            (True, 'every other member holds 172.31.250.67 out'),
+            self._ask())
+
+    def test_not_while_another_node_is_not_up_and_normal(self):
+        self._tell(1, ch.view(ch.DEGRADED, ['172.31.250.67'],
+                              'not up and normal: 172.31.250.67 DN',
+                              '172.31.250.66'))
+        # A node joining is out of the ring too, until it is normal.
+        self._tell(2, ch.view(ch.DEGRADED,
+                              ['172.31.250.67', '172.31.250.69'],
+                              'not up and normal: 172.31.250.67 DN, '
+                              '172.31.250.69 UJ', '172.31.250.68'))
+        self.assertFalse(self._ask()[0])
+
+    def test_not_while_most_of_the_ring_is_down(self):
+        self._tell(1, ch.view(ch.DOWN, ['172.31.250.67', '172.31.250.68'],
+                              '2 of 3 nodes down: 172.31.250.67, '
+                              '172.31.250.68', '172.31.250.66'))
+        self._tell(2, ch.view(ch.DEGRADED, ['172.31.250.67'],
+                              'not up and normal: 172.31.250.67 DN',
+                              '172.31.250.68'))
+        self.assertFalse(self._ask()[0])
 
 
 class TestPostgresqlReplace(_PeerViews):
@@ -1164,7 +1208,8 @@ class TestSentinelReplace(test_health.HealthTestBase):
             plugin = replace.plugin_for(manager)
             self.assertIsInstance(plugin, redis_repair.RedisReplace)
             self.assertEqual(manager, plugin.manager)
-        self.assertIsNone(replace.plugin_for('cassandra'))
+        # A datastore without one: its lost members are only told.
+        self.assertIsNone(replace.plugin_for('vertica'))
 
 
 class TestRedisClusterReplace(_PeerViews):

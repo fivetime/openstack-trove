@@ -43,6 +43,7 @@ LOG = logging.getLogger(__name__)
 NODE_STATES = ('UN', 'UL', 'UJ', 'UM', 'DN', 'DL', 'DJ', 'DM')
 # Seconds a listing of the ring serves again.
 RING_CACHE = 5
+HOST_ID = re.compile(r'^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$')
 CONF = cfg.CONF
 
 # The directory of the guest with the files Trove writes. It is not mounted
@@ -552,26 +553,51 @@ class CassandraApp(service.BaseDbApp):
         """
         return len(self.ring())
 
+    def _status_listing(self):
+        """nodetool status, as of the last few seconds: nodetool starts a
+        JVM, and one listing serves a look of the cluster watch (its
+        member view, then its health).
+        """
+        cached = getattr(self, '_ring_cache', None)
+        if cached and time.monotonic() - cached[0] < RING_CACHE:
+            return cached[1]
+        listing = self.nodetool('status')
+        self._ring_cache = (time.monotonic(), listing)
+        return listing
+
+    @staticmethod
+    def _node_lines(status):
+        """The fields of the lines of the status listing that start with
+        the state of a node: UN, DN...
+        """
+        for line in status.splitlines():
+            if line[:2] in NODE_STATES:
+                fields = line.split()
+                if len(fields) > 1:
+                    yield fields
+
     def ring(self, status=None):
         """The nodes of the ring as this one sees them: [(state, address)],
         the state as nodetool status gives it (UN: up and normal, DN:
         down, UJ: joining...), from the lines that start with one.
         """
         if status is None:
-            # nodetool starts a JVM: one listing serves a look of the
-            # cluster watch (its member view, then its health).
-            cached = getattr(self, '_ring_cache', None)
-            if cached and time.monotonic() - cached[0] < RING_CACHE:
-                return cached[1]
-            nodes = self.ring(self.nodetool('status'))
-            self._ring_cache = (time.monotonic(), nodes)
-            return nodes
+            status = self._status_listing()
+        return [(fields[0], fields[1]) for fields in self._node_lines(status)]
+
+    def get_ring(self, status=None):
+        """The nodes of the ring with their host ids, for the task
+        manager: [{'state', 'address', 'host_id'}]. The host id is the
+        field that is one (the load of a node that is down may be a
+        question mark, which moves the columns).
+        """
+        if status is None:
+            status = self._status_listing()
         nodes = []
-        for line in status.splitlines():
-            if line[:2] in NODE_STATES:
-                fields = line.split()
-                if len(fields) > 1:
-                    nodes.append((line[:2], fields[1]))
+        for fields in self._node_lines(status):
+            host_id = next((f for f in fields[2:] if HOST_ID.match(f)), None)
+            nodes.append({'state': fields[0], 'address': fields[1],
+                          'host_id': host_id})
         return nodes
 
     # The cluster watch (trove.guestagent.common.cluster_probe)
@@ -651,6 +677,18 @@ class CassandraApp(service.BaseDbApp):
             return
 
         self.stop_db(update_db=True)
+
+    def remove_node(self, host_id):
+        """Take a node that is gone for good out of the ring, by its host
+        id: the nodes that stay stream its replicas among them to make
+        up for it. Run on a node that stays, for the task manager, which
+        watches the ring forget the node.
+        """
+        LOG.info("Removing node %s from the ring.", host_id)
+        try:
+            self.nodetool('removenode', host_id)
+        except Exception:
+            LOG.exception("Node %s was not removed from the ring.", host_id)
 
     ##########
     # Backup

@@ -182,6 +182,12 @@ class Manager(cluster_member.ClusterWatchMixin, manager.Manager):
     def node_decommission(self, context):
         self.app.node_decommission()
 
+    def get_ring(self, context):
+        return self.app.get_ring()
+
+    def remove_node(self, context, host_id):
+        self.app.remove_node(host_id)
+
     def cluster_secure(self, context, password):
         try:
             return self.app.cluster_secure(password)

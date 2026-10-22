@@ -1,0 +1,16 @@
+---
+features:
+  - |
+    The cluster repair replaces a lost member of a Cassandra cluster
+    (``cluster_repair_replace``): when Nova says its server is gone and
+    every other member holds it out of the ring, the cluster's shrink
+    removes it (a node that stays takes it out of the ring by its host
+    id, ``nodetool removenode``, and waits for the ring to forget it,
+    ``[cassandra] node_remove_timeout``) and the cluster's grow adds a
+    member like it, which bootstraps its share of the data.
+fixes:
+  - |
+    The shrink of a Cassandra cluster can remove a member whose server
+    is gone: it is asked nothing (it is taken out of the ring by a node
+    that stays) and is deleted once the ring has forgotten it. Before,
+    the shrink asked the member for its data center and failed.

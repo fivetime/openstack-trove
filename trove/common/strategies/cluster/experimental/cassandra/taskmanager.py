@@ -17,10 +17,15 @@ from eventlet.timeout import Timeout
 from oslo_log import log as logging
 
 from trove.common import cfg
+from trove.common.exception import PollTimeOut
+from trove.common.exception import TroveError
+from trove.common.i18n import _
 from trove.common.strategies.cluster import base
+from trove.common.strategies.cluster.experimental.common import health
 from trove.common import utils
 from trove.instance.models import DBInstance
 from trove.instance.models import Instance
+from trove.instance.models import load_any_instance
 from trove.instance import tasks as inst_tasks
 from trove.taskmanager import api as task_api
 import trove.taskmanager.models as task_models
@@ -263,29 +268,101 @@ class CassandraClusterTasks(task_models.ClusterTasks):
 
         LOG.debug("End grow_cluster for id: %s.", cluster_id)
 
+    def _addresses_of_gone(self, cluster_id, gone):
+        """The addresses of the members whose servers are gone, as the
+        cluster's health learnt them (such a member is asked nothing).
+        """
+        at = {name: address for address, name in
+              health.known_members(cluster_id).items()}
+        addresses = {}
+        for instance in gone:
+            address = at.get(instance.name)
+            if not address:
+                raise TroveError(_("Member %s has no server, and the "
+                                   "cluster knows no address of it.") %
+                                 instance.name)
+            addresses[instance.id] = address
+        return addresses
+
+    def _remove_from_ring(self, guest, address):
+        """A node that stays takes the node at the address, gone for
+        good, out of the ring by its host id (nodetool removenode), and
+        the ring is watched until it has forgotten it: the nodes that
+        stay stream its replicas among them first. A node the ring does
+        not list is forgotten already; one the ring holds up is not
+        removed.
+        """
+        node = next((n for n in guest.get_ring()
+                     if n['address'] == address), None)
+        if node is None:
+            LOG.info("The ring does not list %s: nothing to remove.",
+                     address)
+            return
+        if node['state'][:1] == 'U' or not node['host_id']:
+            raise TroveError(_("The node at %(address)s is %(state)s in the "
+                               "ring: not removed.") %
+                             {'address': address, 'state': node['state']})
+        LOG.info("Removing node %s (%s) from the ring.", address,
+                 node['host_id'])
+        guest.remove_node(node['host_id'])
+
+        def forgotten():
+            return all(n['address'] != address for n in guest.get_ring())
+        try:
+            utils.poll_until(forgotten, sleep_time=10,
+                             time_out=CONF.cassandra.node_remove_timeout)
+        except PollTimeOut:
+            raise TroveError(_("The ring did not forget %(address)s within "
+                               "%(seconds)d s.") %
+                             {'address': address,
+                              'seconds': CONF.cassandra.node_remove_timeout})
+
     def shrink_cluster(self, context, cluster_id, removal_ids):
         LOG.debug("Begin shrink_cluster for id: %s.", cluster_id)
 
         def _shrink_cluster():
-            cluster_node_ids = self.find_cluster_node_ids(cluster_id)
-            cluster_nodes = self.load_cluster_nodes(context, cluster_node_ids)
+            # A member whose server is gone (one the repair replaces)
+            # goes too: loaded without its server, and asked nothing.
+            removed = [load_any_instance(context, instance_id)
+                       for instance_id in removal_ids]
+            gone = [inst for inst in removed if inst.server is None]
+            live_ids = [inst.id for inst in removed if inst.server is not None]
+            remaining_ids = [node_id for node_id
+                             in self.find_cluster_node_ids(cluster_id)
+                             if node_id not in removal_ids]
 
-            removed_nodes = CassandraClusterTasks.load_cluster_nodes(
-                context, removal_ids)
-
-            LOG.debug("All nodes ready, proceeding with cluster setup.")
-
-            # Update the list of seeds on remaining nodes if necessary.
-            # Once all nodes are configured, decommission the removed nodes.
-            # Cassandra will stream data from decommissioned nodes to the
-            # remaining ones.
             try:
+                gone_at = self._addresses_of_gone(cluster_id, gone)
+                remaining_nodes = self.load_cluster_nodes(context,
+                                                          remaining_ids)
+                removed_nodes = self.load_cluster_nodes(context, live_ids)
+                LOG.debug("All nodes ready, proceeding with cluster setup.")
 
-                current_seeds = self._get_current_seeds(context, cluster_id)
-                # The seeds will have to be updated on all remaining instances
-                # if any of the seed nodes is going to be removed.
-                update_seeds = any(node['ip'] in current_seeds
-                                   for node in removed_nodes)
+                # Update the list of seeds on remaining nodes if necessary.
+                # Once all nodes are configured, decommission the removed
+                # nodes. Cassandra will stream data from decommissioned
+                # nodes to the remaining ones.
+                # All nodes should have the same seeds: the first node that
+                # stays tells them.
+                current_seeds = remaining_nodes[0]['guest'].get_seeds()
+                # The seeds will have to be updated on all remaining
+                # instances if any of the seed nodes is going to be removed.
+                update_seeds = any(
+                    address in current_seeds for address in
+                    [node['ip'] for node in removed_nodes] +
+                    list(gone_at.values()))
+
+                # A member that is gone is taken out of the ring by a node
+                # that stays, and deleted once the ring has forgotten it:
+                # not before, so that a ring that keeps it (the removal
+                # failed) keeps the member too, for the operator. Its
+                # server, where Nova still has one, is in ERROR or off: it
+                # does not come back to the ring in between.
+                for inst in gone:
+                    self._remove_from_ring(remaining_nodes[0]['guest'],
+                                           gone_at[inst.id])
+                    inst.update_db(cluster_id=None)
+                    Instance.delete(inst)
 
                 LOG.debug("Decommissioning removed nodes.")
                 for node in removed_nodes:
@@ -296,11 +373,6 @@ class CassandraClusterTasks(task_models.ClusterTasks):
                 # geometry if any of the existing seed nodes was removed.
                 if update_seeds:
                     LOG.debug("Updating seeds on the remaining nodes.")
-                    cluster_nodes = self.load_cluster_nodes(
-                        context, cluster_node_ids)
-
-                    remaining_nodes = [node for node in cluster_nodes
-                                       if node['id'] not in removal_ids]
                     seeds = self.choose_seed_nodes(remaining_nodes)
                     LOG.debug("Selected seed nodes: %s", seeds)
                     for node in remaining_nodes:
@@ -308,14 +380,17 @@ class CassandraClusterTasks(task_models.ClusterTasks):
                         node['guest'].set_seeds(seeds)
 
                 # Wait for the removed nodes to go SHUTDOWN.
-                LOG.debug("Waiting for all decommissioned nodes to shutdown.")
-                if not self._all_instances_shutdown(removal_ids, cluster_id):
-                    # Now detached, failed nodes will stay available
-                    # in the list of standalone instances.
-                    return
+                if live_ids:
+                    LOG.debug("Waiting for all decommissioned nodes to "
+                              "shutdown.")
+                    if not self._all_instances_shutdown(live_ids,
+                                                        cluster_id):
+                        # Now detached, failed nodes will stay available
+                        # in the list of standalone instances.
+                        return
 
-                # Delete decommissioned instances only when the cluster is in a
-                # consistent state.
+                # Delete decommissioned instances only when the cluster is
+                # in a consistent state.
                 LOG.debug("Deleting decommissioned instances.")
                 for node in removed_nodes:
                     Instance.delete(node['instance'])
