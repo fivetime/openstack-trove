@@ -13,6 +13,8 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import re
+
 from oslo_log import log as logging
 
 from trove.cluster import models
@@ -21,7 +23,6 @@ from trove.cluster.views import ClusterView
 from trove.common import cfg
 from trove.common import server_group as srv_grp
 from trove.common.strategies.cluster import base
-from trove.common.strategies.cluster.experimental.cassandra import taskmanager
 from trove.common import utils
 from trove.extensions.mgmt.clusters.views import MgmtClusterView
 from trove.instance import models as inst_models
@@ -136,11 +137,9 @@ class CassandraCluster(models.Cluster):
         models.validate_instance_nics(context, instances)
 
         # Creating member instances.
-        num_instances = len(
-            taskmanager.CassandraClusterTasks.find_cluster_node_ids(cluster_id)
-        )
         new_instances = []
-        for instance_idx, instance in enumerate(instances, num_instances + 1):
+        for instance_idx, instance in enumerate(
+                instances, cls._first_index(cluster_id)):
             instance_az = instance.get('availability_zone', None)
 
             member_config = {"id": cluster_id,
@@ -173,6 +172,22 @@ class CassandraCluster(models.Cluster):
             new_instances.append(new_instance)
 
         return new_instances
+
+    @classmethod
+    def _first_index(cls, cluster_id):
+        """The index the next member's name takes: past the members
+        there are, and past the highest index a member's name carries
+        (after a shrink there are fewer members than names given: the
+        count alone names a new member as one that stays).
+        """
+        members = inst_models.DBInstance.find_all(
+            cluster_id=cluster_id, deleted=False).all()
+        highest = len(members)
+        for member in members:
+            found = re.search(r'-(\d+)$', member.name or '')
+            if found:
+                highest = max(highest, int(found.group(1)))
+        return highest + 1
 
     @classmethod
     def _build_instance_name(cls, cluster_name, dc, rack, instance_idx):

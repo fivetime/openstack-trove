@@ -41,6 +41,18 @@ class CassandraGuestAgentAPI(guest_api.API):
     appropriate in this file
     """
 
+    def restart(self, timeout=None):
+        """Restart the node, or start a member that never ran: one that
+        joins the ring bootstraps its share of the data first, which
+        takes as long as there is data (``timeout``, seconds; the usual
+        time of a restart without).
+        """
+        LOG.debug("Sending the call to restart the database process on "
+                  "the Guest.")
+        version = guest_api.API.API_BASE_VERSION
+        self._call("restart", timeout or self.agent_high_timeout,
+                   version=version)
+
     def get_data_center(self):
         LOG.debug("Retrieving the data center for node: %s", self.id)
         version = guest_api.API.API_BASE_VERSION

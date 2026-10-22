@@ -215,12 +215,17 @@ class CassandraClusterTasks(task_models.ClusterTasks):
                 # Since we are adding to an existing cluster, ensure that the
                 # new nodes have auto-bootstrapping enabled.
                 # Start the added nodes.
+                # A node that joins bootstraps its share of the data
+                # first, which takes as long as there is data: the call
+                # waits as the datastore's option says, not the usual
+                # time of a restart.
                 LOG.debug("Starting new nodes.")
                 for node in added_nodes:
                     node['guest'].set_auto_bootstrap(True)
                     node['guest'].set_seeds(current_seeds)
                     node['guest'].store_admin_credentials(admin_creds)
-                    node['guest'].restart()
+                    node['guest'].restart(
+                        timeout=CONF.cassandra.node_join_timeout)
                     node['guest'].cluster_complete()
 
                 # Recompute the seed nodes based on the updated cluster

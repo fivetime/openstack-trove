@@ -141,6 +141,18 @@ class TestCassandraDatastoreWiring(trove_testtools.TestCase):
                 callable(getattr(cassandra_manager.Manager, name, None)),
                 'the Cassandra manager does not implement %s' % name)
 
+    def test_restart_waits_as_long_as_it_is_told(self):
+        api = cassandra_guest_api.CassandraGuestAgentAPI.__new__(
+            cassandra_guest_api.CassandraGuestAgentAPI)
+        api.id = 'i'
+        api.agent_high_timeout = 180
+        with mock.patch.object(api, '_call') as call:
+            api.restart(timeout=3600)
+            call.assert_called_once_with('restart', 3600, version='1.0')
+            call.reset_mock()
+            api.restart()
+            call.assert_called_once_with('restart', 180, version='1.0')
+
     def test_options(self):
         self.assertEqual('cassandra', CONF.cassandra.docker_image)
         self.assertEqual('nodetoolsnapshot', CONF.cassandra.backup_strategy)
@@ -804,6 +816,25 @@ class TestCassandraClusterHealth(CassandraGuestTestCase):
         # One listing serves it and the health.
         app.cluster_health()
         app.nodetool.assert_called_once_with('status')
+
+    def test_the_ring_of_a_member_that_stays_with_one_lost(self):
+        # Production (cs1, 2026-10-22, three nodes): the listing of a
+        # member that stays 79 s after the server of 192.168.1.193 was
+        # deleted, from which the task manager takes the host id it
+        # removes.
+        app = self._app_seeing('lost', address='192.168.1.225')
+        ring = app.get_ring()
+        self.assertEqual(
+            {'state': 'DN', 'address': '192.168.1.193',
+             'host_id': 'cda19d25-7361-49ac-a204-a5faf6e91b5e'},
+            next(n for n in ring if n['address'] == '192.168.1.193'))
+        self.assertEqual(['UN', 'UN', 'DN'], [n['state'] for n in ring])
+        health = app.cluster_health()
+        self.assertEqual(
+            ('DEGRADED', ['192.168.1.193'],
+             'not up and normal: 192.168.1.193 DN', '192.168.1.225'),
+            (health['status'], health['out'], health['reason'],
+             health['me']))
 
     def test_the_node_itself_down(self):
         view = self._app_seeing('down', address='172.31.250.67').member_view()

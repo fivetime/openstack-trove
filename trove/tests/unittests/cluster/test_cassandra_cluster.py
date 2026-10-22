@@ -54,8 +54,8 @@ class ClusterTest(trove_testtools.TestCase):
         datastore = Mock(manager='cassandra')
         datastore_version = Mock(manager='cassandra')
 
-        with patch.object(CassandraClusterTasks, 'find_cluster_node_ids',
-                          return_value=[inst.id for inst in test_instances]):
+        with patch.object(CassandraCluster, '_first_index',
+                          return_value=len(test_instances) + 1):
             CassandraCluster._create_cluster_instances(
                 self.context, 'test_cluster_id', 'test_cluster',
                 datastore, datastore_version,
@@ -80,8 +80,8 @@ class ClusterTest(trove_testtools.TestCase):
         datastore = Mock(manager='cassandra')
         datastore_version = Mock(manager='cassandra', image_id=None)
 
-        with patch.object(CassandraClusterTasks, 'find_cluster_node_ids',
-                          return_value=[]):
+        with patch.object(CassandraCluster, '_first_index',
+                          return_value=1):
             CassandraCluster._create_cluster_instances(
                 self.context, 'test_cluster_id', 'test_cluster',
                 datastore, datastore_version,
@@ -90,6 +90,25 @@ class ClusterTest(trove_testtools.TestCase):
 
         self.assertEqual(['image-from-tags'] * 2,
                          [call[0][3] for call in inst_create.call_args_list])
+
+    def test_a_new_member_is_named_past_the_names_given(self):
+        # Production (cs1, 2026-10-22): after the shrink of member 1 the
+        # members were 2 and 3, and the grow named the new one 3 again.
+        def members(*names):
+            rows = [Mock() for _ in names]
+            for row, name in zip(rows, names):
+                row.name = name
+            return rows
+        with patch.object(inst_models.DBInstance, 'find_all') as find_all:
+            find_all.return_value.all.return_value = members(
+                'cs1-member-dc1-rack1-2', 'cs1-member-dc1-rack1-3')
+            self.assertEqual(4, CassandraCluster._first_index('c'))
+            find_all.assert_called_with(cluster_id='c', deleted=False)
+            # Names of the user's own: past the count.
+            find_all.return_value.all.return_value = members('db-a', 'db-b')
+            self.assertEqual(3, CassandraCluster._first_index('c'))
+            find_all.return_value.all.return_value = []
+            self.assertEqual(1, CassandraCluster._first_index('c'))
 
     def test_grow_takes_the_image_the_controller_passes(self):
         # Cluster.action calls grow(instances, image_id).

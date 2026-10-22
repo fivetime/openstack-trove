@@ -162,3 +162,50 @@ class CassandraShrinkTest(trove_testtools.TestCase):
             self.guests[i].set_seeds.assert_called_once_with({'ip-a'})
         self.tasks.update_statuses_on_failure.assert_not_called()
         self.tasks.reset_task.assert_called_once_with()
+
+
+class CassandraGrowTest(trove_testtools.TestCase):
+    """The grow of a cluster of a and b by c."""
+
+    def setUp(self):
+        super(CassandraGrowTest, self).setUp()
+        self.tasks = Tasks.__new__(Tasks)
+        self.guests = {}
+        for name, mock in (
+                ('get_guest', MagicMock(side_effect=self._guest)),
+                ('get_ip', MagicMock(side_effect=lambda i: 'ip-' + i.id)),
+                ('find_cluster_node_ids',
+                 MagicMock(return_value=['a', 'b', 'c'])),
+                ('_all_instances_ready', MagicMock(return_value=True)),
+                ('_all_instances_healthy', MagicMock(return_value=True)),
+                ('reset_task', MagicMock()),
+                ('update_statuses_on_failure', MagicMock())):
+            patcher = patch.object(Tasks, name, mock)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = patch.object(taskmanager.Instance, 'load',
+                               side_effect=lambda ctx, i: MagicMock(id=i))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for i in ('a', 'b', 'c'):
+            guest = self._guest(MagicMock(id=i))
+            guest.get_seeds.return_value = ['ip-a']
+            guest.get_data_center.return_value = 'dc1'
+            guest.get_rack.return_value = 'rack1'
+
+    def _guest(self, instance):
+        return self.guests.setdefault(instance.id, MagicMock(name=instance.id))
+
+    def test_the_new_node_is_waited_for_as_long_as_it_bootstraps(self):
+        # Production (cs1, 2026-10-22): the node joining took 3 min to
+        # start and bootstrap, the usual time of a restart call.
+        self.patch_conf_property('node_join_timeout', 3600,
+                                 section='cassandra')
+        self.tasks.grow_cluster(None, 'cluster', ['c'])
+        self.guests['c'].restart.assert_called_once_with(timeout=3600)
+        self.guests['c'].cluster_complete.assert_called_once_with()
+        for i in ('a', 'b'):
+            self.guests[i].restart.assert_not_called()
+            self.guests[i].node_cleanup.assert_called_once_with()
+        self.tasks.update_statuses_on_failure.assert_not_called()
+        self.tasks.reset_task.assert_called_once_with()

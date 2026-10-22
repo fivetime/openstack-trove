@@ -1510,6 +1510,10 @@ cassandra_opts = [
     cfg.IntOpt('node_sync_time', default=60,
                help='Time (in seconds) given to a node after a state change '
                'to finish rejoining the cluster.'),
+    cfg.IntOpt('node_join_timeout', default=3600, min=180,
+               help='Seconds the task manager waits for a node that joins '
+                    'the ring to start and bootstrap its share of the data '
+                    '(the restart of a member a grow adds).'),
     cfg.IntOpt('node_remove_timeout', default=1800, min=60,
                help='Seconds the task manager waits for the ring to forget '
                     'a member that is gone for good (nodetool removenode: '
