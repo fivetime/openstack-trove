@@ -150,9 +150,16 @@ class RedisApp(sentinel.SentinelAppMixin, service.BaseDbApp):
 
     # Append only file
 
-    def _aof_wanted(self):
-        value = self.get_configuration_property('appendonly', False)
+    @staticmethod
+    def _is_yes(value):
+        """A yes/no option as the configuration codec gives it: True
+        or False (the codec maps yes and no), a string from a stub.
+        """
         return value is True or str(value).lower() == 'yes'
+
+    def _aof_wanted(self):
+        return self._is_yes(self.get_configuration_property('appendonly',
+                                                            False))
 
     def _aof_on_disk(self):
         # Redis 7 and Valkey keep a directory of files, KeyDB (Redis 6) one
@@ -438,7 +445,10 @@ class RedisApp(sentinel.SentinelAppMixin, service.BaseDbApp):
     # Cluster
 
     def is_cluster_member(self):
-        return self.get_configuration_property('cluster-enabled') == 'yes'
+        # The codec gives True for "cluster-enabled yes"; compared to the
+        # string, a node of the cluster topology was no member, and told
+        # the task manager neither its health nor its role.
+        return self._is_yes(self.get_configuration_property('cluster-enabled'))
 
     def is_watched_member(self):
         """A member of a cluster of either topology."""

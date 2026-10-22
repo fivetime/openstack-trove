@@ -1,0 +1,10 @@
+---
+fixes:
+  - |
+    A Redis, Valkey or KeyDB node of the cluster topology told the task
+    manager neither its cluster health nor its role (both None): the guest
+    compared the ``cluster-enabled`` option to the string ``yes`` while its
+    configuration codec gives ``True``, so no node counted as a cluster
+    member. The automatic repair of such a cluster never replaced a lost
+    node, its peers "telling nothing". The member flag now reads the option
+    as the codec gives it.

@@ -28,6 +28,7 @@ from trove.common import exception
 from trove.common import loadbalancer
 from trove.common import template
 from trove.extensions.common import models as extension_models
+from trove.guestagent.common import cluster_member
 from trove.guestagent.datastore.redis_common import manager as common_manager
 from trove.guestagent.datastore.redis_common import sentinel
 from trove.guestagent.datastore.redis_common import service as common_service
@@ -377,19 +378,15 @@ class TestRedisClusterApp(trove_testtools.TestCase):
         self.assertEqual(3, self.app.adm.cluster_info.call_count)
 
 
-class TestRedisAppendOnlyFile(trove_testtools.TestCase):
-    """The data of an RDB-only data directory when the configuration turns
-    the append only file on: with appendonly yes Redis, Valkey and KeyDB
-    load that file and nothing else (seen on redis:7.2, valkey:9 and
-    keydb:6.3.3 with a directory holding only dump.rdb: 0 keys).
-
-    The configuration is the guest agent's own manager, codec and override
-    directory on real files (a rendered template), not a stub: a stub of
-    get_configuration_property hid that it lost its default.
+class _RealConfiguration(trove_testtools.TestCase):
+    """An app on the guest agent's own configuration manager, codec and
+    override directory on real files (a rendered template), not a stub:
+    a stub of get_configuration_property hid that it lost its default,
+    and that the codec gives booleans for yes and no.
     """
 
     def setUp(self):
-        super(TestRedisAppendOnlyFile, self).setUp()
+        super(_RealConfiguration, self).setUp()
         patcher = mock.patch.object(common_service.RedisApp, '__init__',
                                     return_value=None)
         patcher.start()
@@ -443,12 +440,66 @@ class TestRedisAppendOnlyFile(trove_testtools.TestCase):
 
     def _manager_init(self_, manager, base_config_path, owner, group, codec,
                       requires_root=False, override_strategy=None):
-        TestRedisAppendOnlyFile._real_init(
+        _RealConfiguration._real_init(
             manager, base_config_path, owner, group, codec,
             requires_root=False, override_strategy=override_strategy)
 
     def _touch(self, name):
         open(os.path.join(self.datadir, name), 'w').close()
+
+
+class TestRedisClusterMemberFlag(_RealConfiguration):
+    """A node of the cluster topology is a cluster member once the
+    cluster is enabled in its configuration. The codec maps yes to True;
+    compared to the string 'yes', no node was a member: the guest told the
+    task manager neither its health nor its role (None for both), and the
+    repair of a cluster that lost a replica waited for ever on its peers
+    "telling nothing" (valkey 9 on production, 2026-10-22).
+    """
+
+    def test_not_a_member_before_the_cluster_is_enabled(self):
+        self.assertFalse(self.app.is_cluster_member())
+        self.assertFalse(self.app.is_watched_member())
+        self.assertIsNone(cluster_member.health_of(self.app))
+
+    def test_a_member_once_the_cluster_is_enabled(self):
+        self.app.enable_cluster()
+
+        # What the codec really gives for "cluster-enabled yes".
+        self.assertIs(True,
+                      self.app.get_configuration_property('cluster-enabled'))
+        self.assertTrue(self.app.is_cluster_member())
+        self.assertTrue(self.app.is_watched_member())
+
+    def test_a_member_tells_its_health_and_role(self):
+        self.app.enable_cluster()
+        self.app.adm.cluster_info.return_value = {'cluster_state': 'ok'}
+        self.app.adm.cluster_nodes.return_value = [
+            {'id': 'a1', 'address': '10.0.0.5', 'role': 'replica',
+             'master_id': 'b2', 'has_slots': False,
+             'flags': ['myself', 'slave']},
+            {'id': 'b2', 'address': '10.0.0.6', 'role': 'master',
+             'master_id': '-', 'has_slots': True, 'flags': ['master']},
+            {'id': 'c3', 'address': '10.0.0.7', 'role': 'replica',
+             'master_id': 'b2', 'has_slots': False,
+             'flags': ['slave', 'fail']}]
+
+        health = cluster_member.health_of(self.app)
+        self.assertEqual(ch.DEGRADED, health['status'])
+        self.assertEqual(['10.0.0.7'], health['out'])
+        self.assertEqual('10.0.0.5', health['me'])
+        manager = mock.Mock(spec=['app'], app=self.app)
+        role = cluster_member.ClusterWatchMixin.get_member_role(
+            manager, mock.Mock())
+        self.assertEqual({'state': 'ok', 'role': 'replica'}, role)
+
+
+class TestRedisAppendOnlyFile(_RealConfiguration):
+    """The data of an RDB-only data directory when the configuration turns
+    the append only file on: with appendonly yes Redis, Valkey and KeyDB
+    load that file and nothing else (seen on redis:7.2, valkey:9 and
+    keydb:6.3.3 with a directory holding only dump.rdb: 0 keys).
+    """
 
     def _overridden(self):
         # The override is there and the server would start with the file off.
