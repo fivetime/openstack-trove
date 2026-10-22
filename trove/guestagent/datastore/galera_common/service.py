@@ -723,6 +723,7 @@ class GaleraAppMixin(object):
             self._kill_db()
             # The configuration sends the error log to a file: the run's
             # answer is wanted here instead.
+            docker_util.ensure_image(self.docker_client, self._image())
             output = encodeutils.safe_decode(
                 self.docker_client.containers.run(
                     self._image(), command + ['--wsrep-recover',

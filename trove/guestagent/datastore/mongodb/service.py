@@ -418,7 +418,7 @@ class MongoDBApp(service.BaseDbApp):
         """
         image = self.image(ds_version)
         LOG.info("Pulling the image %s.", image)
-        self.docker_client.images.pull(image)
+        docker_util.ensure_image(self.docker_client, image)
 
     def start_db(self, update_db=False, ds_version=None, command=None,
                  extra_volumes=None):

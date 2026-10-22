@@ -13,12 +13,14 @@
 #    limitations under the License.
 import json
 import re
+import time
 
 import docker
 from docker import errors as derros
 from docker import types
 from oslo_log import log as logging
 from oslo_utils import encodeutils
+import requests
 
 from trove.common import cfg
 from trove.common import constants
@@ -72,6 +74,67 @@ def create_network(client: docker.client.DockerClient,
     return net.id
 
 
+PULL_ATTEMPTS = 5
+PULL_WAIT = 5  # seconds before the second attempt, doubled after each
+
+
+def _pull_once(api, image):
+    """One pull through the low-level client, the daemon's stream read
+    to its end: a failure on the way (the registry, the network, the
+    unpacking of a layer) is an 'error' message in it, with HTTP 200,
+    which the SDK's images.pull does not raise; it fails afterwards on
+    the look-up of the image it did not get.
+    """
+    repository, tag = docker.utils.parse_repository_tag(image)
+    for message in api.pull(repository, tag=tag, stream=True, decode=True):
+        if isinstance(message, dict) and message.get('error'):
+            raise derros.DockerException(message['error'])
+
+
+def pull_image(client, image, attempts=PULL_ATTEMPTS, wait=PULL_WAIT):
+    """Pull the image, again after a failure, and return it (an Image of
+    a DockerClient, the inspection of an APIClient). Production,
+    2026-10-22: a query router's prepare failed at its only pull, the
+    unpacking of a layer having failed ("snapshot extract-... does not
+    exist"), and the member made in place of a lost one was in ERROR.
+    """
+    high_level = isinstance(client, docker.DockerClient)
+    api = client.api if high_level else client
+
+    def pulled():
+        if high_level:
+            return client.images.get(image)
+        return api.inspect_image(image)
+
+    for attempt in range(1, attempts + 1):
+        try:
+            _pull_once(api, image)
+            return pulled()
+        except (derros.DockerException,
+                requests.exceptions.RequestException) as err:
+            if attempt >= attempts:
+                LOG.error("The image %s was not pulled in %d attempts: %s",
+                          image, attempts, err)
+                raise
+            LOG.warning("The pull of the image %s failed (attempt %d of "
+                        "%d): %s; again in %d s.", image, attempt,
+                        attempts, err, wait)
+            time.sleep(wait)
+            wait *= 2
+
+
+def ensure_image(client, image):
+    """The image, pulled when it is not here: a container started from an
+    image that is here needs no registry.
+    """
+    try:
+        if isinstance(client, docker.DockerClient):
+            return client.images.get(image)
+        return client.inspect_image(image)
+    except derros.ImageNotFound:
+        return pull_image(client, image)
+
+
 def _create_container_with_low_level_api(image: str, param: dict) -> None:
     # create a low-level docker api object
     client = docker.APIClient(base_url='unix://var/run/docker.sock')
@@ -105,12 +168,7 @@ def _create_container_with_low_level_api(image: str, param: dict) -> None:
 
     # NOTE(wuchunyang): the low-level api doesn't support RUN interface,
     # so we need pull image first, then start the container
-    LOG.debug("Pulling docker images: %s", image)
-    try:
-        client.pull(image)
-    except derros.APIError as e:
-        LOG.error("failed to pull image: %s, due to the error: %s", image, e)
-        raise
+    ensure_image(client, image)
     LOG.debug("Creating container: %s", param.get("name"))
     container = client.create_container(image=image,
                                         name=param.get("name"),
@@ -195,6 +253,7 @@ def start_container(client, image, name="database",
         return _create_container_with_low_level_api(image, kwargs)
     else:
         kwargs["network_mode"] = network_mode
+        ensure_image(client, image)
         return client.containers.run(image, **kwargs)
 
 
@@ -223,6 +282,7 @@ def run_container(client, image, name, network_mode="host", volumes={},
             f'Running container {name}, image: {image}, '
             f'network_mode: {network_mode}, volumes: {volumes}, '
             f'command: {command}')
+        ensure_image(client, image)
         output = client.containers.run(
             image,
             name=name,

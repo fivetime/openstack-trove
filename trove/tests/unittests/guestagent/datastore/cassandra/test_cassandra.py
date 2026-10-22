@@ -436,7 +436,7 @@ class TestCassandraAppLifecycle(CassandraGuestTestCase):
         else:
             app.docker_client.images.get.side_effect = \
                 docker.errors.ImageNotFound('no')
-            app.docker_client.images.pull.return_value = image
+            cassandra_service.docker_util.pull_image.return_value = image
         return app
 
     @mock.patch.object(cassandra_service, 'docker_util')
@@ -496,7 +496,9 @@ class TestCassandraAppLifecycle(CassandraGuestTestCase):
 
         app.start_db(ds_version='5.0')
 
-        app.docker_client.images.pull.assert_called_once_with('cassandra:5.0')
+        # Through the utility that pulls again after a failure.
+        cassandra_service.docker_util.pull_image.assert_called_once_with(
+            app.docker_client, 'cassandra:5.0')
         self.assertIn('-Dcassandra.autorepair.enable=true',
                       mock_docker.start_container.call_args[1]['command'])
 

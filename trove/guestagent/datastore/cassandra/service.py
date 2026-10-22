@@ -360,7 +360,7 @@ class CassandraApp(service.BaseDbApp):
             img = self.docker_client.images.get(image)
         except docker.errors.ImageNotFound:
             LOG.info("Pulling the image %s.", image)
-            img = self.docker_client.images.pull(image)
+            img = docker_util.pull_image(self.docker_client, image)
         for variable in img.attrs.get('Config', {}).get('Env') or []:
             name, _, value = variable.partition('=')
             if name == 'CASSANDRA_VERSION':

@@ -1,0 +1,11 @@
+---
+fixes:
+  - |
+    The guest agent pulls a datastore image again after a failed pull,
+    up to five times with a growing wait, and looks the image up
+    afterwards. The Docker daemon reports a failure on the way (the
+    registry, the network, the unpacking of a layer) in its stream with
+    HTTP 200, which the SDK's pull does not raise; the only attempt
+    failed at the look-up and a query router made in place of a lost one
+    ended in ERROR. A container is started from an image that is here
+    without asking the registry.

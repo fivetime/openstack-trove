@@ -131,12 +131,17 @@ class TestDockerUtils(trove_testtools.TestCase):
                      user="test_user",
                      environment={},
                      command="sleep inf")
+        # Not here yet: pulled (again after a failure), then inspected.
+        mock_client().inspect_image.side_effect = [
+            docker.errors.ImageNotFound('no'), {'Id': 'sha256:1'}]
+        mock_client().pull.return_value = iter([{'status': 'ok'}])
         with mock.patch.object(docker_utils, 'open', mo):
             docker_utils._create_container_with_low_level_api(
                 "busybox", param)
         mock_client().create_host_config.assert_called_once()
         mock_client().create_networking_config.assert_called_once()
-        mock_client().pull.assert_called_once()
+        mock_client().pull.assert_called_once_with(
+            'busybox', tag=None, stream=True, decode=True)
         mock_client().create_container.assert_called_once()
         mock_client().start.assert_called_once()
 
@@ -231,6 +236,109 @@ class TestDockerUtils(trove_testtools.TestCase):
         self.assertEqual(
             ['IPC_OWNER', 'SYS_NICE'],
             mock_client().create_host_config.call_args[1]['cap_add'])
+
+    def _stream(self, *messages):
+        return iter(list(messages))
+
+    def _client(self):
+        # As docker.from_env() gives: the utility tells it from the
+        # low-level client by its class.
+        client = mock.MagicMock(spec=docker.DockerClient)
+        client.api = mock.MagicMock()  # an instance attribute, not spec'd
+        return client
+
+    @mock.patch.object(docker_utils.time, 'sleep')
+    def test_pull_image_again_after_an_error_in_the_stream(self, sleep):
+        # The daemon reports a failure on the way as an 'error' message
+        # of its stream, with HTTP 200.
+        client = self._client()
+        client.api.pull.side_effect = [
+            self._stream({'status': 'Pulling fs layer'},
+                         {'error': 'unexpected EOF'}),
+            self._stream({'status': 'Pull complete'})]
+
+        image = docker_utils.pull_image(client, 'mongo:8.2')
+
+        self.assertIs(client.images.get.return_value, image)
+        self.assertEqual(
+            [mock.call('mongo', tag='8.2', stream=True, decode=True)] * 2,
+            client.api.pull.call_args_list)
+        sleep.assert_called_once_with(5)
+
+    @mock.patch.object(docker_utils.time, 'sleep')
+    def test_pull_image_again_when_the_daemon_has_not_got_it(self, sleep):
+        # Production, 2026-10-22: the pull ended with nothing reported
+        # and no image (dockerd: "failed to cleanup extract-...: snapshot
+        # does not exist"); the SDK's images.pull raised ImageNotFound on
+        # its look-up and the query router's prepare failed at once.
+        client = self._client()
+        client.api.pull.side_effect = lambda *a, **kw: (
+            self._stream({'status': 'Pull complete'}))
+        good = mock.Mock()
+        client.images.get.side_effect = [
+            docker.errors.ImageNotFound('No such image: mongo:8.2'), good]
+
+        image = docker_utils.pull_image(client, 'mongo:8.2')
+
+        self.assertIs(good, image)
+        self.assertEqual(2, client.api.pull.call_count)
+        sleep.assert_called_once_with(5)
+
+    @mock.patch.object(docker_utils.time, 'sleep')
+    def test_pull_image_gives_up(self, sleep):
+        client = self._client()
+        client.api.pull.side_effect = docker.errors.APIError(
+            'registry down')
+
+        self.assertRaises(docker.errors.APIError, docker_utils.pull_image,
+                          client, 'mongo:8.2')
+
+        self.assertEqual(5, client.api.pull.call_count)
+        self.assertEqual([mock.call(5), mock.call(10), mock.call(20),
+                          mock.call(40)], sleep.call_args_list)
+        client.images.get.assert_not_called()
+
+    @mock.patch.object(docker_utils.time, 'sleep')
+    def test_pull_image_with_the_low_level_client(self, sleep):
+        api = mock.MagicMock(spec=docker.APIClient)
+        api.pull.side_effect = [
+            self._stream({'error': 'connection reset'}),
+            self._stream({'status': 'Pull complete'})]
+
+        image = docker_utils.pull_image(api, 'busybox')
+
+        self.assertIs(api.inspect_image.return_value, image)
+        api.inspect_image.assert_called_once_with('busybox')
+        self.assertEqual(2, api.pull.call_count)
+
+    def test_ensure_image_pulls_only_a_missing_image(self):
+        client = self._client()
+        here = docker_utils.ensure_image(client, 'mongo:8.2')
+
+        self.assertIs(client.images.get.return_value, here)
+        client.api.pull.assert_not_called()
+
+        good = mock.Mock()
+        client.images.get.side_effect = [
+            docker.errors.ImageNotFound('No such image: mongo:8.2'), good]
+        client.api.pull.return_value = self._stream(
+            {'status': 'Pull complete'})
+
+        self.assertIs(good, docker_utils.ensure_image(client,
+                                                      'mongo:8.2'))
+        client.api.pull.assert_called_once_with(
+            'mongo', tag='8.2', stream=True, decode=True)
+
+    @mock.patch.object(docker_utils, 'ensure_image')
+    def test_start_container_has_the_image_pulled_first(self, ensure):
+        client = self._client()
+        client.containers.get.side_effect = \
+            docker.errors.NotFound('no container')
+
+        docker_utils.start_container(client, 'mongo:8.2')
+
+        ensure.assert_called_once_with(client, 'mongo:8.2')
+        client.containers.run.assert_called_once()
 
     def test_get_image_registry_exists(self):
         image_name = "example.domain/repo/mariadb:tag"

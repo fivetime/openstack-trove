@@ -420,7 +420,9 @@ class TestMongoDBAppLifecycle(MongoDBGuestTestCase):
 
         app.pull_image(ds_version='8.2')
 
-        app.docker_client.images.pull.assert_called_once_with('mongo:8.2')
+        # Through the utility that pulls again after a failure.
+        mock_docker.ensure_image.assert_called_once_with(
+            app.docker_client, 'mongo:8.2')
         # The image the router later starts from.
         app.set_config_servers(['10.0.0.1'])
         app.status.wait_for_status.return_value = True
