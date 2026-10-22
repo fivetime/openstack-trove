@@ -1,0 +1,9 @@
+---
+features:
+  - |
+    The cluster repair replaces a lost config server and a lost query
+    router of a MongoDB cluster as well as a shard's member: a config
+    server within the config servers' replica set (the primary drops and
+    adds it, the query routers' configuration is updated for their next
+    start), a query router on Nova's word alone (it has no peers), set
+    up against the config servers.

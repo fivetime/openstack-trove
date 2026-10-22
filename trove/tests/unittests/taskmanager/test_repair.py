@@ -1097,11 +1097,128 @@ class TestMongoDbReplace(_PeerViews):
             (True, 'every other member holds 10.0.0.11:27017 out'),
             self._ask())
 
-    def test_not_a_config_server_or_a_query_router(self):
-        for lost in self.rest:
-            ok, why = self._ask(lost)
-            self.assertFalse(ok)
-            self.assertIn(lost.type, why)
+    def _config_servers(self, *hosts):
+        """Config servers, their set's health recorded (the setUp's one
+        among them), as the ones that stay vouch.
+        """
+        rows = [self.rest[0]]
+        for host in hosts[1:]:
+            db = DBInstance(InstanceTasks.NONE, id=utils.generate_uuid(),
+                            name='c-configsvr-%d' % (len(rows) + 1),
+                            tenant_id='t', cluster_id=self.cluster.id,
+                            datastore_version_id='v1', deleted=False,
+                            shard_id='cfg', type='config_server')
+            db.save()
+            self.made.append(db)
+            rows.append(db)
+        common_health.record(self.cluster.id, ch.combine(
+            [(m.name, ch.view(ch.HEALTHY, me=ip))
+             for m, ip in zip(self.members, self.ips)] +
+            [(m.name, ch.view(ch.HEALTHY, me=host))
+             for m, host in zip(rows, hosts)], []))
+        for row, host in zip(rows[1:], hosts[1:]):
+            self.guests[row.id] = mock.Mock()
+            self.guests[row.id].get_cluster_health.return_value = ch.view(
+                ch.DEGRADED, [hosts[0]],
+                'replica set configsvr: %s out' % hosts[0], host)
+        return rows
+
+    def test_a_config_server_is_vouched_for_by_the_others(self):
+        # The set's other config servers vouch; the shard's members and
+        # the query router are not asked (no guest of theirs here).
+        servers = self._config_servers('10.0.0.21:27019', '10.0.0.22:27019',
+                                       '10.0.0.23:27019')
+        self.rest = servers + self.rest[1:]
+        self.assertEqual(
+            (True, 'every other member holds 10.0.0.21:27019 out'),
+            self._ask(servers[0]))
+        # Not while their set has no primary (DEGRADED, not DOWN: the
+        # cluster goes on, but the set cannot drop or add a member).
+        self.guests[servers[1].id].get_cluster_health.return_value = \
+            ch.view(ch.DEGRADED, ['10.0.0.21:27019'],
+                    'replica set configsvr has no primary', '10.0.0.22:27019')
+        ok, why = self._ask(servers[0])
+        self.assertFalse(ok)
+        self.assertIn('has no primary', why)
+
+    def test_a_config_server_alone_is_not_replaced(self):
+        # One other config server: too few to vouch (and to go on).
+        ok, why = self._ask(self.rest[0])
+        self.assertFalse(ok)
+        self.assertIn('fewer than 2 members', why)
+
+    def test_a_query_router_on_novas_word(self):
+        ok, why = self._ask(self.rest[1])
+        self.assertTrue(ok)
+        self.assertIn("Nova's word", why)
+
+    def test_what_the_steps_need_of_a_config_server_and_a_router(self):
+        servers = self._config_servers('10.0.0.21:27019', '10.0.0.22:27019',
+                                       '10.0.0.23:27019')
+        plugin = replace.plugin_for(self.manager)
+        plugin.guest_factory = lambda c, i, m: self.guests[i]
+        self.guests[servers[1].id].get_replica_set_name.return_value = \
+            'configsvr'
+        self.assertEqual(
+            {'type': 'config_server', 'shard_id': 'cfg',
+             'host': '10.0.0.21:27019', 'replica_set_name': 'configsvr'},
+            plugin.remember(mock.Mock(), self.cluster, servers[0],
+                            servers[1:] + self.members))
+        self.assertEqual({'type': 'query_router'}, plugin.remember(
+            mock.Mock(), self.cluster, self.rest[1], self.members))
+
+    def test_the_steps_of_a_config_server_and_a_router(self):
+        plugin = replace.plugin_for(self.manager)
+        api = mock.patch.object(task_api, 'load').start().return_value
+        datastore_version = mock.Mock(manager='mongodb', image_id='img-1')
+        cluster = mongodb_api.MongoDbCluster(
+            mock.Mock(), self.cluster, mock.Mock(), datastore_version)
+        cluster._server_group_loaded = True
+        mock.patch.object(cluster_models.Cluster, 'load',
+                          return_value=cluster).start()
+        plugin.guest_factory = lambda c, i, m: self.guests[i]
+        # The key comes of any member that stays.
+        for db in cluster.db_instances:
+            self.guests.setdefault(db.id, mock.Mock()).get_key.\
+                return_value = 'the-key'
+        create = mock.patch.object(inst_models.Instance, 'create').start()
+        create.return_value.id = 'new'
+        # A config server: dropped by its set's primary, made for the
+        # config servers' set, added by it.
+        state = {'lost': self.rest[0].id, 'type': 'config_server',
+                 'host': '10.0.0.21:27019', 'shard_id': 'cfg',
+                 'replica_set_name': 'configsvr',
+                 'spec': {'flavor_id': 'f1', 'volume_size': 2}}
+        plugin.remove('ctx', self.cluster, state)
+        api.mongodb_remove_member.assert_called_once_with(
+            self.cluster.id, self.rest[0].id, '10.0.0.21:27019')
+        with mock.patch.object(mongodb_repair.time, 'time',
+                               return_value=1792600000.0):
+            plugin.add('ctx', self.cluster, state)
+        self.assertEqual(self.cluster.name + '-configsvr-1792600000',
+                         create.call_args.args[1])
+        self.assertEqual({'instance_type': 'config_server',
+                          'id': self.cluster.id, 'key': 'the-key'},
+                         create.call_args.kwargs['cluster_config'])
+        api.mongodb_add_member.assert_called_once_with(self.cluster.id,
+                                                       'new')
+        # A query router: of no set, deleted alone, made as a router.
+        api.reset_mock()
+        state = {'lost': self.rest[1].id, 'type': 'query_router',
+                 'spec': {'flavor_id': 'f1', 'volume_size': 2}}
+        plugin.remove('ctx', self.cluster, state)
+        api.mongodb_remove_member.assert_called_once_with(
+            self.cluster.id, self.rest[1].id, None)
+        with mock.patch.object(mongodb_repair.time, 'time',
+                               return_value=1792600001.0):
+            plugin.add('ctx', self.cluster, state)
+        self.assertEqual(self.cluster.name + '-mongos-1792600001',
+                         create.call_args.args[1])
+        self.assertEqual({'instance_type': 'query_router',
+                          'id': self.cluster.id, 'key': 'the-key'},
+                         create.call_args.kwargs['cluster_config'])
+        api.mongodb_add_member.assert_called_once_with(self.cluster.id,
+                                                       'new')
 
     def test_not_while_the_set_has_no_primary(self):
         self._tell(1, ch.view(ch.DOWN, ['10.0.0.11:27017'],
@@ -1115,8 +1232,8 @@ class TestMongoDbReplace(_PeerViews):
         self.guests[self.members[1].id].get_replica_set_name.\
             return_value = 'rs1'
         self.assertEqual(
-            {'shard_id': 'shard-1', 'host': '10.0.0.11:27017',
-             'replica_set_name': 'rs1'},
+            {'type': 'member', 'shard_id': 'shard-1',
+             'host': '10.0.0.11:27017', 'replica_set_name': 'rs1'},
             plugin.remember(mock.Mock(), self.cluster, self.members[0],
                             self.members[1:] + self.rest))
         common_health.record(self.cluster.id, ch.combine(

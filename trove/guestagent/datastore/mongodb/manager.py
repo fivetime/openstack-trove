@@ -224,6 +224,12 @@ class Manager(cluster_member.ClusterWatchMixin, manager.Manager):
         self._cluster_action('add_config_servers',
                              self.app.add_config_servers, config_servers)
 
+    def update_config_servers(self, context, config_servers):
+        """The config servers as they are now, in the router's
+        configuration: for its next start.
+        """
+        self.app.set_config_servers(config_servers)
+
     def add_shard(self, context, replica_set_name, replica_set_member):
         self._cluster_action('add_shard', self.app.add_shard,
                              replica_set_name, replica_set_member)

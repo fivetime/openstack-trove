@@ -318,18 +318,21 @@ class MongoDbClusterTasks(task_models.ClusterTasks):
 
         LOG.debug("end shrink_cluster for MongoDB cluster %s", self.id)
 
-    # The repair's replacement of a member of a shard lost for good: the
-    # cluster's shrink and grow take whole shards, a replica set loses and
-    # gets one member here.
+    # The repair's replacement of a member lost for good: the cluster's
+    # shrink and grow take whole shards, a replica set (a shard's, or the
+    # config servers') loses and gets one member here; a query router is
+    # deleted and one made in its place.
 
-    def _shard_primary(self, context, cluster_id, shard_id, but=()):
-        """The primary of a shard's replica set among its members that
+    def _set_primary(self, context, cluster_id, like, but=()):
+        """The primary of the replica set the instance ``like`` belongs
+        to (its shard's, or the config servers') among its members that
         stay, as they tell (get_member_role).
         """
-        for db_instance in DBInstance.find_all(
-                cluster_id=cluster_id, shard_id=shard_id,
-                deleted=False).all():
-            if db_instance.id in but:
+        for db_instance in DBInstance.find_all(cluster_id=cluster_id,
+                                               deleted=False).all():
+            if db_instance.id in but or db_instance.type != like.type or (
+                    like.type == 'member' and
+                    db_instance.shard_id != like.shard_id):
                 continue
             instance = Instance.load(context, db_instance.id)
             try:
@@ -341,14 +344,22 @@ class MongoDbClusterTasks(task_models.ClusterTasks):
             if answer.get('role') == 'PRIMARY':
                 return instance
         raise exception.TroveError(
-            _("Shard %s has no primary among the members that stay.")
-            % shard_id)
+            _("The replica set of %s has no primary among the members "
+              "that stay.") % like.id)
+
+    def _config_server_ips(self, context, cluster_id, but=()):
+        return [self.get_ip(Instance.load(context, db_instance.id))
+                for db_instance in DBInstance.find_all(
+                    cluster_id=cluster_id, deleted=False).all()
+                if db_instance.type == 'config_server'
+                and db_instance.id not in but]
 
     def remove_member(self, context, cluster_id, instance_id, host):
-        """A member lost for good leaves its shard's replica set: the
-        primary drops it (``host:port``) from the set's configuration,
-        and it is deleted. The shard goes on with the members that stay
-        until one replaces it (``add_member``).
+        """A member lost for good leaves its replica set: the primary
+        drops it (``host:port``) from the set's configuration, and it is
+        deleted. The set goes on with the members that stay until one
+        replaces it (``add_member``). A query router (no ``host``: it is
+        of no set) is deleted alone.
         """
         LOG.debug("begin remove_member %(instance)s of MongoDB cluster "
                   "%(cluster)s", {'instance': instance_id,
@@ -356,9 +367,10 @@ class MongoDbClusterTasks(task_models.ClusterTasks):
 
         def _remove_member():
             lost = DBInstance.find_by(id=instance_id, deleted=False)
-            primary = self._shard_primary(context, cluster_id,
-                                          lost.shard_id, but=(instance_id,))
-            self.get_guest(primary).remove_members([host])
+            if host:
+                primary = self._set_primary(context, cluster_id, lost,
+                                            but=(instance_id,))
+                self.get_guest(primary).remove_members([host])
             Instance.delete(load_any_instance(context, instance_id))
 
             def marked_deleted():
@@ -389,10 +401,14 @@ class MongoDbClusterTasks(task_models.ClusterTasks):
         LOG.debug("end remove_member %s", instance_id)
 
     def add_member(self, context, cluster_id, instance_id):
-        """The member in place of a lost one joins its shard's replica
-        set: once it is ready the primary adds it, it gets the set's
-        admin password (the members take the users of the primary with
-        its data), and it is complete.
+        """The member in place of a lost one joins its replica set: once
+        it is ready the primary adds it, it gets the set's admin password
+        (the members take the users of the primary with its data), and
+        it is complete. A new config server is told to the query routers
+        as well (their configuration, for their next start: a running
+        router follows the set by itself). A query router in place of a
+        lost one is pointed at the config servers and started, with the
+        admin password of their primary.
         """
         LOG.debug("begin add_member %(instance)s to MongoDB cluster "
                   "%(cluster)s", {'instance': instance_id,
@@ -403,14 +419,36 @@ class MongoDbClusterTasks(task_models.ClusterTasks):
             if not self._all_instances_ready([instance_id], cluster_id,
                                              new.shard_id):
                 return
-            primary = self._shard_primary(context, cluster_id, new.shard_id,
-                                          but=(instance_id,))
             instance = Instance.load(context, instance_id)
+            if new.type == 'query_router':
+                config_servers = DBInstance.find_by(
+                    cluster_id=cluster_id, type='config_server',
+                    deleted=False)
+                primary = self._set_primary(context, cluster_id,
+                                            config_servers)
+                if not self._add_query_routers(
+                        [instance],
+                        self._config_server_ips(context, cluster_id),
+                        admin_password=self.get_guest(
+                            primary).get_admin_password()):
+                    raise exception.TroveError(
+                        _("Query router %s was not set up.") % instance_id)
+                self.get_guest(instance).cluster_complete()
+                return
+            primary = self._set_primary(context, cluster_id, new,
+                                        but=(instance_id,))
             primary_guest = self.get_guest(primary)
             primary_guest.add_members([self.get_ip(instance)])
             guest = self.get_guest(instance)
             guest.store_admin_password(primary_guest.get_admin_password())
             guest.cluster_complete()
+            if new.type == 'config_server':
+                ips = self._config_server_ips(context, cluster_id)
+                for db_instance in DBInstance.find_all(
+                        cluster_id=cluster_id, type='query_router',
+                        deleted=False).all():
+                    self.get_guest(Instance.load(
+                        context, db_instance.id)).update_config_servers(ips)
 
         timeout = Timeout(CONF.cluster_usage_timeout)
         try:
@@ -540,7 +578,9 @@ class MongoDbClusterTasks(task_models.ClusterTasks):
 class MongoDbTaskManagerAPI(task_api.API):
 
     def mongodb_remove_member(self, cluster_id, instance_id, host):
-        """The repair: a member lost for good leaves its shard."""
+        """The repair: a member lost for good leaves its replica set, a
+        query router (host None) is deleted.
+        """
         LOG.debug("Making async call to remove member %s of cluster %s",
                   instance_id, cluster_id)
         cctxt = self.client.prepare(version=task_api.API.API_BASE_VERSION)
@@ -549,7 +589,9 @@ class MongoDbTaskManagerAPI(task_api.API):
                    instance_id=instance_id, host=host)
 
     def mongodb_add_member(self, cluster_id, instance_id):
-        """The repair: a member in place of a lost one joins its shard."""
+        """The repair: a member in place of a lost one joins its replica
+        set, a query router is set up.
+        """
         LOG.debug("Making async call to add member %s to cluster %s",
                   instance_id, cluster_id)
         cctxt = self.client.prepare(version=task_api.API.API_BASE_VERSION)

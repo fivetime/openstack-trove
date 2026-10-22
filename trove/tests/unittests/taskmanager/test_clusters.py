@@ -490,6 +490,128 @@ class MongoDbClusterTasksTest(trove_testtools.TestCase):
         mock_reset_task.assert_called_with()
         mock_update.assert_not_called()
 
+    def _of_kind(self, instance_id, name, kind, shard_id=None):
+        db = self._member(instance_id, name)
+        db.type = kind
+        db.shard_id = shard_id
+        return db
+
+    @staticmethod
+    def _rows(mock_find_all, mock_find_by, rows):
+        """find_all and find_by as the code asks them: by cluster, by
+        type, by id.
+        """
+        def matching(**kwargs):
+            return [r for r in rows
+                    if all(getattr(r, k) == v for k, v in kwargs.items()
+                           if k not in ('cluster_id', 'deleted'))]
+        mock_find_all.side_effect = lambda **kw: Mock(
+            **{'all.return_value': matching(**kw)})
+        mock_find_by.side_effect = lambda **kw: matching(**kw)[0]
+
+    @patch('trove.common.strategies.cluster.experimental.mongodb.'
+           'taskmanager.utils.poll_until')
+    @patch('trove.common.strategies.cluster.experimental.mongodb.'
+           'taskmanager.load_any_instance')
+    @patch.object(ClusterTasks, 'update_statuses_on_failure')
+    @patch.object(ClusterTasks, 'reset_task')
+    @patch.object(ClusterTasks, 'get_guest')
+    @patch.object(Instance, 'delete')
+    @patch.object(Instance, 'load')
+    @patch.object(DBInstance, 'find_by')
+    @patch.object(DBInstance, 'find_all')
+    def test_remove_member_a_query_router(self, mock_find_all, mock_find_by,
+                                          mock_load, mock_delete, mock_guest,
+                                          mock_reset_task, mock_update,
+                                          mock_load_any, mock_poll):
+        # Of no set: nothing is dropped, it is deleted alone.
+        lost = self._of_kind("7", "mongos2", "query_router")
+        self._rows(mock_find_all, mock_find_by,
+                   [self.dbinst1, self.dbinst2, lost])
+        mock_load.side_effect = lambda ctx, i: Mock(id=i)
+        guests = self._guests(mock_guest, {})
+        self.clustertasks.remove_member(Mock(), self.cluster_id, "7", None)
+        self.assertEqual({}, guests)
+        mock_delete.assert_called_once_with(mock_load_any.return_value)
+        mock_reset_task.assert_called_with()
+        mock_update.assert_not_called()
+
+    @patch.object(ClusterTasks, 'update_statuses_on_failure')
+    @patch.object(ClusterTasks, 'reset_task')
+    @patch.object(ClusterTasks, 'get_guest')
+    @patch.object(ClusterTasks, 'get_ip')
+    @patch.object(ClusterTasks, '_all_instances_ready')
+    @patch.object(Instance, 'load')
+    @patch.object(DBInstance, 'find_by')
+    @patch.object(DBInstance, 'find_all')
+    def test_add_member_a_config_server_is_told_to_the_routers(
+            self, mock_find_all, mock_find_by, mock_load, mock_ready,
+            mock_get_ip, mock_guest, mock_reset_task, mock_update):
+        # Added by the config servers' primary (the shard's primary is
+        # not its); the routers get the config servers as they are now.
+        new = self._of_kind("c3", "configsvr-new", "config_server", "cfg")
+        rows = [self.dbinst1, self.dbinst2,
+                self._of_kind("c1", "configsvr1", "config_server", "cfg"),
+                self._of_kind("c2", "configsvr2", "config_server", "cfg"),
+                self._of_kind("q1", "mongos1", "query_router"), new]
+        self._rows(mock_find_all, mock_find_by, rows)
+        mock_load.side_effect = lambda ctx, i: Mock(id=i)
+        mock_ready.return_value = True
+        mock_get_ip.side_effect = lambda i: '10.0.0.%s' % i.id
+        guests = self._guests(mock_guest, {'1': {'role': 'SECONDARY'},
+                                           '2': {'role': 'PRIMARY'},
+                                           'c1': {'role': 'SECONDARY'},
+                                           'c2': {'role': 'PRIMARY'}})
+        guests.setdefault('c2', Mock()).get_admin_password.return_value = 'pw'
+        self.clustertasks.add_member(Mock(), self.cluster_id, "c3")
+        mock_ready.assert_called_once_with(["c3"], self.cluster_id, "cfg")
+        guests['c2'].add_members.assert_called_once_with(['10.0.0.c3'])
+        self.assertNotIn('2', guests)
+        guests['c3'].store_admin_password.assert_called_once_with('pw')
+        guests['c3'].cluster_complete.assert_called_once_with()
+        guests['q1'].update_config_servers.assert_called_once_with(
+            ['10.0.0.c1', '10.0.0.c2', '10.0.0.c3'])
+        for i in ('1', '2', 'c1', 'c2', 'c3'):
+            if i in guests:
+                guests[i].update_config_servers.assert_not_called()
+        mock_reset_task.assert_called_with()
+        mock_update.assert_not_called()
+
+    @patch.object(ClusterTasks, 'update_statuses_on_failure')
+    @patch.object(ClusterTasks, 'reset_task')
+    @patch.object(ClusterTasks, 'get_guest')
+    @patch.object(ClusterTasks, 'get_ip')
+    @patch.object(ClusterTasks, '_all_instances_ready')
+    @patch.object(Instance, 'load')
+    @patch.object(DBInstance, 'find_by')
+    @patch.object(DBInstance, 'find_all')
+    def test_add_member_a_query_router(
+            self, mock_find_all, mock_find_by, mock_load, mock_ready,
+            mock_get_ip, mock_guest, mock_reset_task, mock_update):
+        # Pointed at the config servers and started, with the admin
+        # password of their primary; no set adds it.
+        new = self._of_kind("q2", "mongos-new", "query_router")
+        rows = [self.dbinst1, self.dbinst2,
+                self._of_kind("c1", "configsvr1", "config_server", "cfg"),
+                self._of_kind("c2", "configsvr2", "config_server", "cfg"),
+                new]
+        self._rows(mock_find_all, mock_find_by, rows)
+        mock_load.side_effect = lambda ctx, i: Mock(id=i)
+        mock_ready.return_value = True
+        mock_get_ip.side_effect = lambda i: '10.0.0.%s' % i.id
+        guests = self._guests(mock_guest, {'c1': {'role': 'PRIMARY'},
+                                           'c2': {'role': 'SECONDARY'}})
+        guests.setdefault('c1', Mock()).get_admin_password.return_value = 'pw'
+        self.clustertasks.add_member(Mock(), self.cluster_id, "q2")
+        guests['q2'].add_config_servers.assert_called_once_with(
+            ['10.0.0.c1', '10.0.0.c2'])
+        guests['q2'].store_admin_password.assert_called_once_with('pw')
+        guests['q2'].cluster_complete.assert_called_once_with()
+        guests['c1'].add_members.assert_not_called()
+        self.assertNotIn('c2', guests)
+        mock_reset_task.assert_called_with()
+        mock_update.assert_not_called()
+
     @patch.object(ClusterTasks, 'update_statuses_on_failure')
     @patch.object(ClusterTasks, 'reset_task')
     @patch.object(ClusterTasks, 'get_guest')

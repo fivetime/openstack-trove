@@ -85,6 +85,17 @@ class MongoDbGuestAgentAPI(guest_api.API):
                           version=version,
                           config_servers=config_servers)
 
+    def update_config_servers(self, config_servers):
+        """Point a running query router's configuration at the config
+        servers as they are now (for its next start; the running router
+        follows their set by itself).
+        """
+        LOG.debug("Updating the config servers of query router %s: %s",
+                  self.id, config_servers)
+        version = guest_api.API.API_BASE_VERSION
+        return self._call("update_config_servers", self.agent_low_timeout,
+                          version=version, config_servers=config_servers)
+
     def cluster_complete(self):
         LOG.debug("Notify regarding cluster install completion")
         version = guest_api.API.API_BASE_VERSION
