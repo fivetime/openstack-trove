@@ -472,6 +472,35 @@ class TestReplacement(ReplaceTestBase):
             c.args[2] for c in self.notifier.info.call_args_list
             if c.args[1] == repair.EVENT_START][0]['action'])
 
+    def test_the_volume_type_of_a_peer_when_the_lost_ones_volume_is_gone(self):
+        # Trove has Nova delete a member's volume with its server: the
+        # lost one's cannot be looked up (production, 2026-10-22: the
+        # config server made in place of one got a volume of the default
+        # type, nvme-ec42, its set's being nvme-rep3). A peer of the lost
+        # one's kind tells the type; a zone is the lost one's own only.
+        cluster, members = self._lost_cluster()
+        for member, kind in zip(members, ['config_server', 'member',
+                                          'config_server']):
+            member.type = kind
+            member.save()
+        volumes = {members[1].volume_id: mock.Mock(volume_type='nvme-ec42',
+                                                   availability_zone='nova'),
+                   members[2].volume_id: mock.Mock(volume_type='nvme-rep3',
+                                                   availability_zone='nova')}
+
+        def get(volume_id):
+            if volume_id not in volumes:
+                raise Exception('Volume %s could not be found.' % volume_id)
+            return volumes[volume_id]
+        self.cinder.volumes.get.side_effect = get
+        self.repair.check_now(mock.Mock(), cluster, manager='valkey')
+        spec = self._state(cluster)['spec']
+        self.assertEqual('nvme-rep3', spec['volume_type'])
+        self.assertNotIn('availability_zone', spec)
+        self.assertEqual([mock.call(members[0].volume_id),
+                          mock.call(members[2].volume_id)],
+                         self.cinder.volumes.get.call_args_list)
+
     def test_nothing_when_no_member_tells_its_user(self):
         cluster, _members = self._lost_cluster()
         self.nova.servers.get.side_effect = (

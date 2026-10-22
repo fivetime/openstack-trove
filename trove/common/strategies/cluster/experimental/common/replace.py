@@ -476,20 +476,33 @@ class MemberReplacement(object):
         spec = {'flavor_id': lost.flavor_id}
         if lost.volume_size:
             spec['volume_size'] = lost.volume_size
-        volume_of = lost if lost.volume_id else (
-            next((m for m in others if m.volume_id), None))
-        if volume_of is not None:
+        # The lost member's volume mostly went with its server (Trove has
+        # Nova delete a member's volume on termination): then a peer's
+        # volume tells the type, a peer of the lost one's kind first
+        # (production, 2026-10-22: a config server replaced with a volume
+        # of the default type, its set's of another). The zone is the lost
+        # one's own or not given.
+        kind = getattr(lost, 'type', None)
+        alike = [m for m in others if getattr(m, 'type', None) == kind]
+        unlike = [m for m in others if m not in alike]
+        cinder = None
+        for volume_of in [lost] + alike + unlike:
+            if not volume_of.volume_id:
+                continue
             try:
-                volume = clients.create_cinder_client(context).volumes.get(
-                    volume_of.volume_id)
-                if getattr(volume, 'volume_type', None):
-                    spec['volume_type'] = volume.volume_type
-                if lost.volume_id and getattr(volume, 'availability_zone',
-                                              None):
-                    spec['availability_zone'] = volume.availability_zone
+                if cinder is None:
+                    cinder = clients.create_cinder_client(context)
+                volume = cinder.volumes.get(volume_of.volume_id)
             except Exception as err:
                 LOG.debug("The volume of %s not looked up: %s",
                           volume_of.id, err)
+                continue
+            if getattr(volume, 'volume_type', None):
+                spec['volume_type'] = volume.volume_type
+            if volume_of is lost and getattr(volume, 'availability_zone',
+                                             None):
+                spec['availability_zone'] = volume.availability_zone
+            break
         for peer in others:
             try:
                 ports = clients.create_neutron_client(context).list_ports(

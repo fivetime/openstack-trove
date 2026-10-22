@@ -1,0 +1,10 @@
+---
+fixes:
+  - |
+    The member a cluster's repair makes in place of a lost one takes the
+    volume type of the lost one's volume. Trove has Nova delete a member's
+    volume with its server, so the lost one's volume mostly cannot be
+    looked up any more, and the new member got a volume of the default
+    type, its set's being of another. A peer's volume now tells the type
+    when the lost one's is gone, a peer of the lost one's kind first (a
+    MongoDB config server's set may use another type than the shards).
