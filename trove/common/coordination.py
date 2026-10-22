@@ -216,10 +216,10 @@ class Heart(object):
             if fresh.acquire(blocking=False):
                 fresh.release()
                 LOG.debug("Lock %s can be acquired again by its holder: "
-                          "its lease is not probed.", name)
+                          "its lease is not probed.", _text(name))
                 return True
         except Exception as ex:
-            LOG.debug("Cannot probe lock %s: %s", name, _reason(ex))
+            LOG.debug("Cannot probe lock %s: %s", _text(name), _reason(ex))
         return False
 
     def release(self, name):
@@ -245,7 +245,8 @@ class Heart(object):
             try:
                 refreshed = bool(held.lock.heartbeat())
             except Exception as ex:
-                LOG.warning("Cannot refresh lock %s: %s", name, _reason(ex))
+                LOG.warning("Cannot refresh lock %s: %s", _text(name),
+                            _reason(ex))
                 return self.alive
             if refreshed and not held.probe:
                 return True
@@ -253,18 +254,19 @@ class Heart(object):
                 fresh = self._coordinator.get_lock(name)
                 got = fresh.acquire(blocking=False)
             except Exception as ex:
-                LOG.warning("Cannot probe lock %s: %s", name, _reason(ex))
+                LOG.warning("Cannot probe lock %s: %s", _text(name),
+                            _reason(ex))
                 return refreshed
             if got:
                 LOG.warning("The lease of lock %s had lapsed: held again.",
-                            name)
+                            _text(name))
                 held.lock = fresh
                 if held.on_lapse is not None:
                     held.on_lapse(fresh)
                 return True
             if refreshed:
                 return True
-            LOG.error("Lock %s is lost: another holder has it.", name)
+            LOG.error("Lock %s is lost: another holder has it.", _text(name))
             del self._held[name]
             if held.on_lapse is not None:
                 held.on_lapse(None)
@@ -287,6 +289,11 @@ def is_slot(member):
 
 def _bytes(value):
     return value if isinstance(value, bytes) else value.encode('utf-8')
+
+
+def _text(value):
+    return value.decode('utf-8', 'replace') if isinstance(value, bytes) \
+        else str(value)
 
 
 def _reason(ex):
