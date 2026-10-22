@@ -111,6 +111,12 @@ class RedisGuestAgentAPI(guest_api.API):
                           version=guest_api.API.API_BASE_VERSION,
                           node_id=node_id)
 
+    def cluster_forget(self, node_id):
+        LOG.debug("Forgetting node %s.", node_id)
+        return self._call("cluster_forget", self.agent_high_timeout,
+                          version=guest_api.API.API_BASE_VERSION,
+                          node_id=node_id)
+
     def cluster_complete(self):
         LOG.debug("Notifying cluster install completion.")
         return self._call("cluster_complete", self.agent_high_timeout,

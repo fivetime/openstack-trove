@@ -23,6 +23,8 @@ from trove.common import exception
 from trove.common.rpc.version import RPC_API_VERSION
 from trove.common.strategies.cluster.experimental.mongodb.taskmanager import (
     MongoDbTaskManagerAPI)
+from trove.common.strategies.cluster.experimental.redis.taskmanager import (
+    RedisTaskManagerAPI)
 from trove.guestagent import models as agent_models
 from trove.taskmanager import api as task_api
 from trove.taskmanager.manager import Manager
@@ -189,6 +191,27 @@ class MongoDbApiTest(ApiTest):
         self._verify_cast('mongodb_add_shard_cluster', cluster_id='c1',
                           shard_id='s1', replica_set_name='rs2')
         self._verify_the_manager_answers()
+
+
+class RedisApiTest(ApiTest):
+    """The Redis strategy serves three datastores: its cast names the
+    manager, and each manager's task manager answers it.
+    """
+
+    @patch.object(task_api.API, 'get_client')
+    def setUp(self, *args):
+        super(RedisApiTest, self).setUp()
+        self.api = RedisTaskManagerAPI(self.context)
+        self._mock_rpc_client()
+
+    def test_add_node(self):
+        for manager in ('redis', 'valkey', 'keydb'):
+            self.call_context.cast.reset_mock()
+            self.api.add_node(manager, 'c1', 'i2')
+            self._verify_cast('%s_add_node' % manager, cluster_id='c1',
+                              instance_id='i2')
+            method = self.call_context.cast.call_args[0][1]
+            self.assertTrue(callable(getattr(Manager(), method)), method)
 
 
 class TestAPI(trove_testtools.TestCase):

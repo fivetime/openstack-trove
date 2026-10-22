@@ -251,6 +251,13 @@ class TestRedisCluster(trove_testtools.TestCase):
         self.manager.app.run_cluster_cli.assert_called_once_with(
             'del-node', 'n1')
 
+    def test_forget(self):
+        # A node that is gone: told to this node, not through the CLI
+        # (del-node loads the cluster from the nodes that answer).
+        self.manager.cluster_forget(None, 'n1')
+        self.manager.adm.cluster_forget.assert_called_once_with('n1')
+        self.manager.app.run_cluster_cli.assert_not_called()
+
 
 class TestRedisClusterApp(trove_testtools.TestCase):
 
@@ -291,6 +298,12 @@ class TestRedisClusterApp(trove_testtools.TestCase):
              {'id': 'r1', 'address': '172.31.79.12', 'role': 'replica',
               'master_id': 'm1', 'has_slots': False, 'flags': ['slave']}],
             nodes)
+
+    def test_cluster_forget(self):
+        admin = common_service.RedisAdmin()
+        admin._connection = mock.Mock()
+        admin.cluster_forget('m1')
+        admin._connection.cluster.assert_called_once_with('FORGET', 'm1')
 
     def _seen(self, state):
         # CLUSTER INFO and CLUSTER NODES of a Valkey 9 cluster of three

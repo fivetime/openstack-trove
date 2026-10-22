@@ -61,6 +61,10 @@ class RedisClusterTasksTest(trove_testtools.TestCase):
                                 side_effect=lambda ctx, i: MagicMock(id=i))
         self.delete = self._patch(taskmanager.Instance, 'delete')
         self.find_all = self._patch(taskmanager.DBInstance, 'find_all')
+        self.load_any = self._patch(taskmanager, 'load_any_instance')
+        self.known = self._patch(taskmanager.health, 'known_members',
+                                 return_value={})
+        self._gone()
 
     def _patch(self, target, name, **kwargs):
         patcher = patch.object(target, name, **kwargs)
@@ -79,17 +83,29 @@ class RedisClusterTasksTest(trove_testtools.TestCase):
                  for r, m in replicas]
         self.find_all.return_value.all.return_value = rows
 
+    def _gone(self, *ids):
+        """The members whose servers are gone: loaded without one, their
+        addresses as the cluster's health learnt them.
+        """
+        def load(ctx, i):
+            inst = MagicMock(id=i, server=None if i in ids else object())
+            inst.name = i
+            return inst
+        self.load_any.side_effect = load
+        self.known.return_value = {'ip-' + i: i for i in ids}
+
     def _nodes(self, *nodes):
         """CLUSTER NODES, as any node tells it: (id, role, master id, has
-        slots).
+        slots[, flags]).
         """
         listed = [
-            {'id': 'node-' + i, 'address': 'ip-' + i, 'role': role,
-             'master_id': master and 'node-' + master, 'has_slots': slots}
-            for i, role, master, slots in nodes]
-        for i, _role, _master, _slots in nodes:
-            guest = self._guest(MagicMock(id=i))
-            guest.get_node_id.return_value = 'node-' + i
+            {'id': 'node-' + n[0], 'address': 'ip-' + n[0], 'role': n[1],
+             'master_id': n[2] and 'node-' + n[2], 'has_slots': n[3],
+             'flags': list(n[4]) if len(n) > 4 else [n[1]]}
+            for n in nodes]
+        for n in nodes:
+            guest = self._guest(MagicMock(id=n[0]))
+            guest.get_node_id.return_value = 'node-' + n[0]
             guest.get_cluster_nodes.return_value = listed
 
     def test_create(self):
@@ -233,6 +249,112 @@ class RedisClusterTasksTest(trove_testtools.TestCase):
         head.cluster_rebalance.assert_called_once_with(weights={'node-e': 0})
         self.assertEqual([call('node-b'), call('node-e')],
                          head.cluster_del_node.call_args_list)
+
+    def test_shrink_a_member_whose_server_is_gone(self):
+        # b's server is gone (the repair replaces it); its replica e took
+        # its slots over. Its node is the one at the address the health
+        # learnt of it, and every node that stays forgets it: del-node
+        # would ask it to reset itself.
+        self._members('a', 'b', 'c', replicas=(('d', 'a'), ('e', 'b')))
+        self._nodes(('a', 'master', None, True),
+                    ('b', 'master', None, False, ('master', 'fail')),
+                    ('c', 'master', None, True), ('d', 'replica', 'a', False),
+                    ('e', 'master', None, True))
+        self._gone('b')
+        self.tasks.shrink_cluster(None, 'cluster', ['b'])
+        head = self.guests['a']
+        head.cluster_rebalance.assert_not_called()
+        head.cluster_del_node.assert_not_called()
+        for i in ('a', 'c', 'd', 'e'):
+            self.guests[i].cluster_forget.assert_called_once_with('node-b')
+        self.guests['b'].get_node_id.assert_not_called()
+        self.assertEqual(['b'],
+                         [c[0][0].id for c in self.delete.call_args_list])
+        self.tasks.update_statuses_on_failure.assert_not_called()
+        self.tasks.reset_task.assert_called_once_with()
+
+    def test_shrink_a_gone_member_that_still_holds_slots_is_refused(self):
+        # No failover took b's slots: nothing serves them, and no
+        # rebalance moves them off a node that is gone.
+        self._members('a', 'b', 'c')
+        self._nodes(('a', 'master', None, True),
+                    ('b', 'master', None, True, ('master', 'fail')),
+                    ('c', 'master', None, True))
+        self._gone('b')
+        self.tasks.shrink_cluster(None, 'cluster', ['b'])
+        self.delete.assert_not_called()
+        self.guests['a'].cluster_forget.assert_not_called()
+        self.tasks.update_statuses_on_failure.assert_called_once_with(
+            'cluster', status=inst_tasks.InstanceTasks.SHRINKING_ERROR)
+
+    def test_shrink_a_gone_member_the_health_never_learnt(self):
+        self._members('a', 'b', 'c')
+        self._nodes(('a', 'master', None, True),
+                    ('b', 'master', None, False, ('master', 'fail')),
+                    ('c', 'master', None, True))
+        self._gone('b')
+        self.known.return_value = {}
+        self.tasks.shrink_cluster(None, 'cluster', ['b'])
+        self.delete.assert_not_called()
+        self.tasks.update_statuses_on_failure.assert_called_once_with(
+            'cluster', status=inst_tasks.InstanceTasks.SHRINKING_ERROR)
+
+    def test_add_node(self):
+        # In place of a lost replica: n joins at the head and follows the
+        # master with the fewest replicas, c, with no rebalance.
+        self._members('a', 'b', 'c',
+                      replicas=(('d', 'a'), ('e', 'b'), ('n', 'c')))
+        self._nodes(('a', 'master', None, True), ('b', 'master', None, True),
+                    ('c', 'master', None, True), ('d', 'replica', 'a', False),
+                    ('e', 'replica', 'b', False))
+        head = self.guests['a']
+        head.get_node_ip.return_value = ('ip-a', 6379)
+        head.get_cluster_password.return_value = 'pw'
+        head.get_root_password.return_value = 'rootpw'
+        self.tasks.add_node(None, 'cluster', 'n')
+        self.tasks._all_instances_ready.assert_called_once_with(['n'],
+                                                                'cluster')
+        self.assertEqual(
+            [call.cluster_init('pw'),
+             call.enable_root_with_password('rootpw'),
+             call.cluster_meet('ip-a', 6379), call.cluster_wait(6),
+             call.cluster_replicate('node-c'), call.cluster_complete()],
+            self.guests['n'].mock_calls)
+        head.cluster_rebalance.assert_not_called()
+        self.tasks.update_statuses_on_failure.assert_not_called()
+        self.tasks.reset_task.assert_called_once_with()
+
+    def test_add_node_follows_no_failing_master(self):
+        # b is failing (its replica is taking over): not followed.
+        self._members('a', 'b', 'c', replicas=(('n', 'b'),))
+        self._nodes(('a', 'master', None, True),
+                    ('b', 'master', None, True, ('master', 'fail?')),
+                    ('c', 'master', None, True), ('d', 'replica', 'a', False))
+        self.guests['a'].get_node_ip.return_value = ('ip-a', 6379)
+        self.tasks.add_node(None, 'cluster', 'n')
+        self.guests['n'].cluster_replicate.assert_called_once_with('node-c')
+
+    def test_add_node_not_ready_leaves_the_cluster_alone(self):
+        self._members('a', 'b', 'c', replicas=(('n', 'c'),))
+        self._nodes(('a', 'master', None, True), ('b', 'master', None, True),
+                    ('c', 'master', None, True))
+        self.tasks._all_instances_ready.return_value = False
+        self.tasks.add_node(None, 'cluster', 'n')
+        self.assertNotIn('n', self.guests)
+        self.tasks.reset_task.assert_called_once_with()
+
+    def test_add_node_failure_marks_the_new_node_alone(self):
+        self._members('a', 'b', 'c', replicas=(('n', 'c'),))
+        self._nodes(('a', 'master', None, True), ('b', 'master', None, True),
+                    ('c', 'master', None, True))
+        self.guests['a'].get_node_ip.return_value = ('ip-a', 6379)
+        self._guest(MagicMock(id='n')).cluster_meet.side_effect = Exception(
+            'no route')
+        self.tasks.add_node(None, 'cluster', 'n')
+        self.tasks.update_statuses_on_failure.assert_called_once_with(
+            'cluster', status=inst_tasks.InstanceTasks.GROWING_ERROR,
+            instance_ids=['n'])
+        self.tasks.reset_task.assert_called_once_with()
 
     def test_shrink_must_keep_a_master(self):
         # The replica d would be all that is left.

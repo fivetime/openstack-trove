@@ -872,6 +872,15 @@ class RedisAdmin(object):
     def cluster_replicate(self, master_id):
         self.connection.cluster('REPLICATE', master_id)
 
+    def cluster_forget(self, node_id):
+        """Drop a node from this node's view of the cluster: for a node
+        that is gone (``del-node`` loads the cluster from every node that
+        answers, which leaves out one failing, and asks the node to reset
+        itself). Every node that stays must be told within a minute, or
+        the gossip brings the node back.
+        """
+        self.connection.cluster('FORGET', node_id)
+
     def cluster_nodes(self):
         """The nodes this one knows: [{'id', 'address', 'role',
         'master_id', 'has_slots', 'flags'}], 'role' being master or

@@ -1,0 +1,17 @@
+---
+features:
+  - |
+    The cluster repair replaces a lost node of a Redis, Valkey or KeyDB
+    cluster of the cluster topology (the sentinel topology's was replaced
+    already). The other nodes vouch: each answers, the cluster's state is
+    ok (every slot served: the lost node's slots went to its replica with
+    the failover) and each holds the lost node failing and no other. The
+    shrink removes a member whose server is gone: its node is the one at
+    the address the cluster's health learnt of it, it must hold no slots,
+    and every node that stays forgets it (``CLUSTER FORGET``; ``del-node``
+    loads the cluster from the nodes that answer and asks the node to
+    reset itself). The grow takes whole groups of a master and its
+    replicas, so the node in the lost one's place is made alone, of the
+    lost one's kind and group in the books, and joins as a replica of the
+    master with the fewest (the task manager's ``add_node``, cast under
+    the manager's name as the strategy serves three datastores).

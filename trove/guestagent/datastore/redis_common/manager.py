@@ -225,6 +225,10 @@ class RedisManager(cluster_member.ClusterWatchMixin, manager.Manager):
         LOG.info("Removing node %s from the cluster.", node_id)
         self.app.run_cluster_cli('del-node', node_id)
 
+    def cluster_forget(self, context, node_id):
+        LOG.info("Forgetting node %s, which is gone.", node_id)
+        self.adm.cluster_forget(node_id)
+
     def enable_root(self, context):
         root_password = self.app.set_password()
         root = self.adm.enable_root(root_password)

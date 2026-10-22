@@ -43,6 +43,8 @@ from trove.common.strategies.cluster.experimental.mongodb import (
 from trove.common.strategies.cluster.experimental.postgresql import (
     repair as pg_repair)
 from trove.common.strategies.cluster.experimental.redis import (
+    api as redis_api)
+from trove.common.strategies.cluster.experimental.redis import (
     repair as redis_repair)
 from trove.common import utils
 from trove.instance import models as inst_models
@@ -1109,7 +1111,7 @@ class TestSentinelReplace(test_health.HealthTestBase):
     def setUp(self):
         super(TestSentinelReplace, self).setUp()
         self.guests = {}
-        self.plugin = redis_repair.SentinelReplace(
+        self.plugin = redis_repair.RedisReplace(
             'valkey', guest_factory=lambda c, i, m: self.guests[i])
         self.cluster, self.members = self._cluster(3, stale=(0,))
         self.cluster.save_properties({'topology': 'sentinel'})
@@ -1149,14 +1151,93 @@ class TestSentinelReplace(test_health.HealthTestBase):
             ch.HEALTHY, me='192.168.1.13')
         self.assertFalse(self._ask()[0])
 
-    def test_only_the_sentinel_topology(self):
-        self.cluster.save_properties({'topology': 'cluster'})
-        self.assertFalse(self._ask()[0])
+    def test_the_steps_are_the_clusters_own(self):
+        self.assertEqual({}, self.plugin.remember(
+            mock.Mock(), self.cluster, self.members[0], self.members[1:]))
+        with mock.patch.object(replace.ReplacePlugin, 'add') as add:
+            self.plugin.add('ctx', self.cluster, {'spec': {}})
+        add.assert_called_once_with('ctx', self.cluster, {'spec': {}})
 
     def test_the_plugin_is_found_by_its_entry_point(self):
         replace._plugins.clear()
         for manager in ('redis', 'valkey', 'keydb'):
             plugin = replace.plugin_for(manager)
-            self.assertIsInstance(plugin, redis_repair.SentinelReplace)
+            self.assertIsInstance(plugin, redis_repair.RedisReplace)
             self.assertEqual(manager, plugin.manager)
         self.assertIsNone(replace.plugin_for('cassandra'))
+
+
+class TestRedisClusterReplace(_PeerViews):
+    """The Redis family's word on a lost node of a cluster of the cluster
+    topology (what CLUSTER INFO and CLUSTER NODES tell the other nodes),
+    and the node in its place, made alone.
+    """
+
+    manager = 'valkey'
+    ips = ('192.168.1.21', '192.168.1.22', '192.168.1.23')
+
+    def test_held_failing_by_every_other_node(self):
+        self._tell(1, ch.view(ch.DEGRADED, ['192.168.1.21'],
+                              'failing: 192.168.1.21', '192.168.1.22'))
+        self._tell(2, ch.view(ch.DEGRADED, ['192.168.1.21'],
+                              'failing: 192.168.1.21', '192.168.1.23'))
+        self.assertEqual(
+            (True, 'every other member holds 192.168.1.21 out'),
+            self._ask())
+
+    def test_not_while_a_slot_has_no_master(self):
+        # Its slots had no replica to take them over.
+        self._tell(1, ch.view(ch.DOWN, ['192.168.1.21'],
+                              'cluster_state fail, 10923 of 16384 slots '
+                              'served', '192.168.1.22'))
+        self._tell(2, ch.view(ch.DEGRADED, ['192.168.1.21'],
+                              'failing: 192.168.1.21', '192.168.1.23'))
+        self.assertFalse(self._ask()[0])
+
+    def test_what_the_steps_need(self):
+        plugin = replace.plugin_for(self.manager)
+        self.members[0].type = 'replica'
+        self.members[0].shard_id = 'g-1'
+        self.assertEqual(
+            {'type': 'replica', 'shard_id': 'g-1'},
+            plugin.remember(mock.Mock(), self.cluster, self.members[0],
+                            self.members[1:]))
+        self.members[0].type = None
+        self.assertEqual('member', plugin.remember(
+            mock.Mock(), self.cluster, self.members[0],
+            self.members[1:])['type'])
+
+    def test_the_node_in_its_place_is_made_alone(self):
+        # Not through the grow, which takes whole groups of a master and
+        # its replicas: one instance of the lost one's kind and group,
+        # and the task manager's add_node, cast under the manager's name.
+        plugin = replace.plugin_for(self.manager)
+        api = mock.patch.object(task_api, 'load').start().return_value
+        datastore_version = mock.Mock(manager='valkey', image_id='img-1')
+        cluster = redis_api.RedisCluster(
+            mock.Mock(), self.cluster, mock.Mock(), datastore_version)
+        cluster._server_group_loaded = True
+        mock.patch.object(cluster_models.Cluster, 'load',
+                          return_value=cluster).start()
+        create = mock.patch.object(inst_models.Instance, 'create').start()
+        create.return_value.id = 'new'
+        check = mock.patch.object(redis_repair, 'check_quotas').start()
+        state = {'lost': self.members[0].id, 'type': 'replica',
+                 'shard_id': 'g-1',
+                 'spec': {'flavor_id': 'f1', 'volume_size': 10,
+                          'nics': [{'network_id': 'net-1'}]}}
+        context = mock.Mock(project_id='t')
+        with mock.patch.object(redis_repair.time, 'time',
+                               return_value=1792600000.0):
+            plugin.add(context, self.cluster, state)
+        check.assert_called_once_with('t', {'instances': 1, 'volumes': 10})
+        create.assert_called_once()
+        name, flavor, image = create.call_args.args[1:4]
+        self.assertEqual((self.cluster.name + '-node-1792600000', 'f1',
+                          'img-1'), (name, flavor, image))
+        self.assertEqual(10, create.call_args.args[8])
+        self.assertEqual([{'network_id': 'net-1'}], create.call_args.args[11])
+        self.assertEqual({'id': self.cluster.id, 'instance_type': 'replica',
+                          'shard_id': 'g-1'},
+                         create.call_args.kwargs['cluster_config'])
+        api.add_node.assert_called_once_with('valkey', self.cluster.id, 'new')
