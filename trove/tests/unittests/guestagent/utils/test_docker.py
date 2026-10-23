@@ -15,6 +15,7 @@ from unittest import mock
 
 import docker
 
+from trove.common import exception
 from trove.guestagent.utils import docker as docker_utils
 from trove.tests.unittests import trove_testtools
 
@@ -369,3 +370,57 @@ class TestDockerUtils(trove_testtools.TestCase):
                                                           "test_container")
         self.assertEqual(health_status, "not running")
         mock_client.containers.get.assert_called_once_with("test_container")
+
+    def _eth1(self):
+        return json.dumps({"mac_address": "fa:16:3e:7c:9c:57",
+                           "ipv4_address": "10.111.0.8",
+                           "ipv4_cidr": "10.111.0.0/26",
+                           "ipv4_gateway": "10.111.0.1",
+                           "ipv6_address": "2001:db8::8",
+                           "ipv6_cidr": "2001:db8::/64",
+                           "ipv6_gateway": "2001:db8::1"})
+
+    def test_create_network_ipvlan(self):
+        # user_port_driver=ipvlan: the port's interface stays in the guest
+        # and the network is an ipvlan L2 one on it, with the port's
+        # subnets and gateways as before.
+        self.patch_conf_property('user_port_driver', 'ipvlan')
+        net = mock.MagicMock(return_value=mock.MagicMock(id=111))
+        self.docker_client.networks.create = net
+        mo = mock.mock_open(read_data=self._eth1())
+        with mock.patch.object(docker_utils, 'open', mo), \
+                mock.patch.object(docker_utils.guestagent_utils,
+                                  'user_port_ifname',
+                                  return_value='nic0123456789ab') as ifname:
+            id = docker_utils.create_network(self.docker_client, "n")
+        self.assertEqual(id, 111)
+        ifname.assert_called_once_with(json.loads(self._eth1()))
+        kwargs = net.call_args.kwargs
+        self.assertEqual(kwargs["driver"], "ipvlan")
+        self.assertEqual(kwargs["options"],
+                         {"parent": "nic0123456789ab", "ipvlan_mode": "l2"})
+        self.assertEqual(kwargs["enable_ipv6"], True)
+        self.assertEqual([c["Gateway"] for c in kwargs["ipam"]["Config"]],
+                         ["10.111.0.1", "2001:db8::1"])
+
+    def test_create_network_ipvlan_without_the_interface(self):
+        self.patch_conf_property('user_port_driver', 'ipvlan')
+        mo = mock.mock_open(read_data=self._eth1())
+        with mock.patch.object(docker_utils, 'open', mo), \
+                mock.patch.object(docker_utils.guestagent_utils,
+                                  'user_port_ifname', return_value=None):
+            self.assertRaises(exception.GuestError,
+                              docker_utils.create_network,
+                              self.docker_client, "n")
+        self.docker_client.networks.create.assert_not_called()
+
+    def test_create_network_hostnic_is_the_default(self):
+        net = mock.MagicMock(return_value=mock.MagicMock(id=111))
+        self.docker_client.networks.create = net
+        mo = mock.mock_open(read_data=self._eth1())
+        with mock.patch.object(docker_utils, 'open', mo):
+            docker_utils.create_network(self.docker_client, "n")
+        kwargs = net.call_args.kwargs
+        self.assertEqual(kwargs["driver"], "docker-hostnic")
+        self.assertEqual(kwargs["options"],
+                         {"hostnic_mac": "fa:16:3e:7c:9c:57"})

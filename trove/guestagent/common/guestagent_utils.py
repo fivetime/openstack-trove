@@ -188,17 +188,82 @@ def get_conf_dir():
     return conf_dir
 
 
-def disable_user_defined_port():
+NETWORKD_USER_PORT_FILE = '/run/systemd/network/05-trove-user-port.network'
+
+
+def user_port_config():
+    """The user-facing port's configuration the task manager injected
+    (its MAC and addresses), or None without it.
+    """
+    if not os.path.exists(constants.ETH1_CONFIG_PATH):
+        return None
     with open(constants.ETH1_CONFIG_PATH) as fd:
-        eth1_config = json.load(fd)
+        return json.load(fd)
+
+
+def user_port_ifname(eth1_config=None):
+    """The name of the interface of the user-facing port, found by its
+    MAC, or None when the guest has no such interface.
+    """
+    if eth1_config is None:
+        eth1_config = user_port_config()
+    if not eth1_config:
+        return None
     ipr = IPRoute()
     ifaces = ipr.get_links(address=eth1_config.get("mac_address"))
     if not ifaces:
+        return None
+    return ifaces[0].get_attr('IFLA_IFNAME')
+
+
+def disable_user_defined_port():
+    """Take the user-facing port's interface down: the docker-hostnic
+    plugin moves it into the database container later, and until then
+    its default route must not compete with the management port's.
+    """
+    ifname = user_port_ifname()
+    if not ifname:
         return
-    ifname = ifaces[0].get_attr('IFLA_IFNAME')
     operating_system.execute_shell_cmd(f"ip link set {ifname} down", [],
                                        shell=True,
                                        as_root=True)
+
+
+def reserve_user_defined_port():
+    """Keep the user-facing port's interface in the guest for the
+    database container's ipvlan sub-interface: up, with no addresses or
+    routes of its own (the container has them), and left alone by
+    systemd-networkd so that it gets none again (the guest's network
+    configuration had it on DHCP or with static addresses).
+    """
+    eth1_config = user_port_config()
+    ifname = user_port_ifname(eth1_config)
+    if not ifname:
+        return
+    if os.path.isdir(os.path.dirname(NETWORKD_USER_PORT_FILE)):
+        operating_system.write_file(
+            NETWORKD_USER_PORT_FILE,
+            "[Match]\nMACAddress=%s\n\n[Link]\nUnmanaged=yes\n"
+            % eth1_config.get("mac_address"), as_root=True)
+        operating_system.execute_shell_cmd("networkctl reload", [],
+                                           shell=True, as_root=True)
+    for cmd in (f"sysctl -w net.ipv6.conf.{ifname}.accept_ra=0",
+                f"ip -4 addr flush dev {ifname}",
+                f"ip -6 addr flush dev {ifname} scope global",
+                f"ip -4 route flush dev {ifname}",
+                f"ip -6 route flush dev {ifname}",
+                f"ip link set {ifname} up"):
+        operating_system.execute_shell_cmd(cmd, [], shell=True, as_root=True)
+
+
+def prepare_user_defined_port():
+    """Make the user-facing port's interface ready for the way the
+    database container gets it (CONF.user_port_driver).
+    """
+    if CONF.user_port_driver == 'ipvlan':
+        reserve_user_defined_port()
+    else:
+        disable_user_defined_port()
 
 
 # This helper method allows upgrade only between minor versions e.g. from 16.10

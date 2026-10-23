@@ -261,6 +261,16 @@ common_opts = [
                help='Maximum time (in seconds) to wait for a volume format.'),
     cfg.StrOpt('mount_options', default='defaults,noatime',
                help='Options to use when mounting a volume.'),
+    cfg.StrOpt('user_port_driver', default='hostnic',
+               choices=['hostnic', 'ipvlan'],
+               help='How the database container gets the user-facing port '
+                    'under network_isolation. hostnic: the port\'s interface '
+                    'is moved into the container by the docker-hostnic '
+                    'plugin. ipvlan: the interface stays in the guest, up '
+                    'and without addresses of its own, and the container '
+                    'gets an ipvlan sub-interface of it (L2 mode) with the '
+                    'port\'s addresses: for guests whose platform owns '
+                    'their interfaces, such as system containers.'),
     cfg.IntOpt('max_instances_per_tenant',
                default=10,
                help='Default maximum number of instances per tenant.',
