@@ -24,8 +24,6 @@ import requests
 
 from trove.common import cfg
 from trove.common import constants
-from trove.common import exception
-from trove.guestagent.common import guestagent_utils
 
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
@@ -67,26 +65,11 @@ def create_network(client: docker.client.DockerClient,
 
     ipam_config = docker.types.IPAMConfig(pool_configs=ipam_pool)
     mac_address = eth1_config.get("mac_address")
-    if CONF.user_port_driver == 'ipvlan':
-        # The port's interface stays in the guest; the container gets a
-        # sub-interface of it with the same MAC and the port's addresses
-        # (a Neutron port passes only its own MAC and fixed IPs).
-        ifname = guestagent_utils.user_port_ifname(eth1_config)
-        if not ifname:
-            raise exception.GuestError(
-                original_message="The interface of the user port (MAC %s) "
-                "is not in the guest; the ipvlan network needs it."
-                % mac_address)
-        driver = 'ipvlan'
-        options = dict(parent=ifname, ipvlan_mode='l2')
-    else:
-        driver = constants.DOCKER_HOST_NIC_MODE
-        options = dict(hostnic_mac=mac_address)
     net = client.networks.create(name=name,
-                                 driver=driver,
+                                 driver=constants.DOCKER_HOST_NIC_MODE,
                                  ipam=ipam_config,
                                  enable_ipv6=enable_ipv6,
-                                 options=options)
+                                 options=dict(hostnic_mac=mac_address))
     LOG.debug("docker network: %s created successfully", net.id)
     return net.id
 

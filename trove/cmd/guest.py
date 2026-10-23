@@ -73,16 +73,14 @@ def main():
                  "was not injected into the guest or not read by guestagent"))
         raise RuntimeError(msg)
     if CONF.network_isolation:
-        # The user-defined port's interface is taken down (hostnic: the
-        # database container gets it later) or stripped of its addresses
-        # (ipvlan): its default route must not compete with the management
-        # port's.
+        # disable user-defined port to avoid potential default gateway
+        # conflict
         try:
-            guestagent_utils.prepare_user_defined_port()
+            guestagent_utils.disable_user_defined_port()
         except Exception as e:
-            LOG.warning("failed to prepare the user defined port (%s) when "
+            LOG.warning("failed to down the user defined port when "
                         "network_isolation is set to true due to: %s."
-                        "pass...", CONF.user_port_driver, str(e))
+                        "pass...", str(e))
             pass
 
     # Create user and group for running docker container.
