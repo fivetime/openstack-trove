@@ -1,0 +1,13 @@
+---
+features:
+  - |
+    The task manager starts the server of a standalone instance that Nova
+    shut off by itself (its domain went away: powered off, killed), as it
+    does for a cluster member: only one whose heartbeat is stale, whose
+    latest stop in Nova has no user (one stopped through the API stays
+    stopped), on a host whose compute service is up, at most
+    ``cluster_repair_start_attempts`` times, ``cluster_repair_start_interval``
+    apart. The scan runs every ``instance_repair_scan_interval`` seconds
+    (120; 0 turns it off) and ``instance_repair_start`` (on) is the switch.
+    The repair is told as ``trove.instance.repair.start``, ``.end`` and
+    ``.error`` notifications.

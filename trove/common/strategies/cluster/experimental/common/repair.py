@@ -216,73 +216,28 @@ class ClusterRepair(object):
 
     def start_decision(self, nova, member, computes=None):
         """Whether to start the server of a member that is quiet."""
-        computes = {} if computes is None else computes
-        server = nova.servers.get(member.compute_instance_id)
-        if server.status != 'SHUTOFF':
-            return StartDecision(False, 'the server is %s' % server.status)
-        host = getattr(server, 'OS-EXT-SRV-ATTR:host', None)
-        if host not in computes:
-            computes[host] = self._compute_up(nova, host)
-        if not computes[host]:
-            return StartDecision(False, 'the compute service of host %s is '
-                                        'not up' % host)
-        actions = sorted(
-            nova.instance_action.list(server.id),
-            key=lambda a: _when(getattr(a, 'start_time', None)) or
-            datetime.datetime.min,
-            reverse=True)
-        stops = [a for a in actions if a.action == 'stop']
-        if not stops:
-            return StartDecision(False, 'off without a stop')
-        stop = stops[0]
-        if getattr(stop, 'user_id', None):
-            return StartDecision(False, 'stopped by user %s' % stop.user_id)
-        stopped_at = _when(stop.start_time)
-        starts = [a for a in actions if a.action == 'start' and
-                  stopped_at is not None and
-                  (_when(a.start_time) or stopped_at) > stopped_at]
-        if len(starts) >= CONF.cluster_repair_start_attempts:
-            return StartDecision(False, 'started %d times since Nova shut '
-                                        'it off; given up' % len(starts))
-        if starts:
-            last = _when(starts[0].start_time)
-            waited = (self._now() - last).total_seconds() if last else 0
-            wait = CONF.cluster_repair_start_interval - waited
-            if wait > 0:
-                return StartDecision(False, 'started %d s ago' % waited,
-                                     again_in=int(wait) + 1)
-        return StartDecision(True, 'Nova shut it off by itself at %s%s' % (
-            stop.start_time,
-            ', start %d' % (len(starts) + 1) if starts else ''))
+        return decide_start(nova, member, computes, now=self._now)
 
     @staticmethod
     def _compute_up(nova, host):
-        if not host:
-            return False
-        try:
-            services = nova.services.list(host=host, binary='nova-compute')
-        except Exception as err:
-            LOG.warning("The compute service of host %s could not be "
-                        "looked up: %s", host, err)
-            return False
-        return any(getattr(s, 'state', None) == 'up' for s in services)
+        return compute_up(nova, host)
 
     def _start(self, nova, db_cluster, member, reason):
         LOG.info("Cluster %s: starting member %s (%s): %s.",
                  db_cluster.id, member.name, member.id, reason)
         try:
-            nova.servers.start(member.compute_instance_id)
-        except nova_exceptions.Conflict as err:
-            # The other task manager that watches the cluster started it
-            # a moment before (both look on the same report): no error.
-            LOG.info("Cluster %s: member %s is being started already: %s",
-                     db_cluster.id, member.id, err)
-            return
+            started = start_server(nova, member.compute_instance_id)
         except Exception as err:
             LOG.warning("Cluster %s: member %s was not started: %s",
                         db_cluster.id, member.id, err)
             notify(EVENT_ERROR, db_cluster, member, 'start',
                    '%s; the start failed: %s' % (reason, err))
+            return
+        if not started:
+            # The other task manager that watches the cluster started it
+            # a moment before (both look on the same report): no error.
+            LOG.info("Cluster %s: member %s is being started already.",
+                     db_cluster.id, member.id)
             return
         self.started[member.id] = time.monotonic()
         notify(EVENT_START, db_cluster, member, 'start', reason)
@@ -297,3 +252,75 @@ class ClusterRepair(object):
             notify(EVENT_END, db_cluster, member, 'start',
                    'heard from again %d s after its start' %
                    (time.monotonic() - since))
+
+
+def decide_start(nova, member, computes=None, now=None):
+    """Whether to start the server of an instance that is quiet to the
+    control plane (a cluster member or a standalone instance alike):
+    only one Nova shut off by itself, on a host whose compute service is
+    up, not yet started ``cluster_repair_start_attempts`` times since,
+    and not within ``cluster_repair_start_interval`` of the last start.
+    """
+    computes = {} if computes is None else computes
+    now = now or timeutils.utcnow
+    server = nova.servers.get(member.compute_instance_id)
+    if server.status != 'SHUTOFF':
+        return StartDecision(False, 'the server is %s' % server.status)
+    host = getattr(server, 'OS-EXT-SRV-ATTR:host', None)
+    if host not in computes:
+        computes[host] = compute_up(nova, host)
+    if not computes[host]:
+        return StartDecision(False, 'the compute service of host %s is '
+                                    'not up' % host)
+    actions = sorted(
+        nova.instance_action.list(server.id),
+        key=lambda a: _when(getattr(a, 'start_time', None)) or
+        datetime.datetime.min,
+        reverse=True)
+    stops = [a for a in actions if a.action == 'stop']
+    if not stops:
+        return StartDecision(False, 'off without a stop')
+    stop = stops[0]
+    if getattr(stop, 'user_id', None):
+        return StartDecision(False, 'stopped by user %s' % stop.user_id)
+    stopped_at = _when(stop.start_time)
+    starts = [a for a in actions if a.action == 'start' and
+              stopped_at is not None and
+              (_when(a.start_time) or stopped_at) > stopped_at]
+    if len(starts) >= CONF.cluster_repair_start_attempts:
+        return StartDecision(False, 'started %d times since Nova shut '
+                                    'it off; given up' % len(starts))
+    if starts:
+        last = _when(starts[0].start_time)
+        waited = (now() - last).total_seconds() if last else 0
+        wait = CONF.cluster_repair_start_interval - waited
+        if wait > 0:
+            return StartDecision(False, 'started %d s ago' % waited,
+                                 again_in=int(wait) + 1)
+    return StartDecision(True, 'Nova shut it off by itself at %s%s' % (
+        stop.start_time,
+        ', start %d' % (len(starts) + 1) if starts else ''))
+
+
+def compute_up(nova, host):
+    """Whether the compute service of the host is up, by Nova."""
+    if not host:
+        return False
+    try:
+        services = nova.services.list(host=host, binary='nova-compute')
+    except Exception as err:
+        LOG.warning("The compute service of host %s could not be "
+                    "looked up: %s", host, err)
+        return False
+    return any(getattr(s, 'state', None) == 'up' for s in services)
+
+
+def start_server(nova, server_id):
+    """Start a server. False when it is being started already (another
+    task manager asked a moment before: Nova answers 409).
+    """
+    try:
+        nova.servers.start(server_id)
+    except nova_exceptions.Conflict:
+        return False
+    return True

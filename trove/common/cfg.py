@@ -367,6 +367,19 @@ common_opts = [
                      'Only for a datastore with a plugin in the namespace '
                      'trove.cluster.repair. A cluster keeps it off with the '
                      'extended property auto_repair=off or start.'),
+    cfg.BoolOpt('instance_repair_start', default=True,
+                help='Start the server of a standalone instance that Nova '
+                     'shut off by itself (its domain went away: powered '
+                     'off, killed), on a host whose compute service is up, '
+                     'as cluster_repair_start does for a cluster member; '
+                     'the starts are tried cluster_repair_start_attempts '
+                     'times, cluster_repair_start_interval apart. A server '
+                     'stopped through the API stays stopped.'),
+    cfg.IntOpt('instance_repair_scan_interval', default=120, min=0,
+               help='Seconds between two scans of the database for the '
+                    'standalone instances whose heartbeat is older than '
+                    'agent_heartbeat_expiry, whose servers are looked at '
+                    'for a start (instance_repair_start). 0 turns it off.'),
     cfg.IntOpt('cluster_repair_replace_timeout', default=3600, min=60,
                help='Seconds a replacement has to remove the lost member '
                     'and add the new one before it is given up and told '

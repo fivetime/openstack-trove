@@ -32,6 +32,7 @@ from trove.datastore.models import DatastoreVersion
 import trove.extensions.mgmt.instances.models as mgmtmodels
 from trove.instance.tasks import InstanceTasks
 from trove.quota.quota import QUOTAS
+from trove.taskmanager import instance_repair
 from trove.taskmanager import models
 from trove.taskmanager import ownership
 from trove.taskmanager.models import FreshInstanceTasks, BuiltInstanceTasks
@@ -596,6 +597,15 @@ class Manager(periodic_task.PeriodicTasks):
             under way.
             """
             recovery.hub(self.admin_context).scan()
+
+    if CONF.instance_repair_scan_interval:
+        @periodic_task.periodic_task(
+            spacing=CONF.instance_repair_scan_interval)
+        def repair_instances(self, context):
+            """The standalone instances whose heartbeat is stale: their
+            servers started when Nova shut them off by itself.
+            """
+            instance_repair.scan(self.admin_context)
 
     if CONF.cluster_recovery_check_interval:
         @periodic_task.periodic_task(
