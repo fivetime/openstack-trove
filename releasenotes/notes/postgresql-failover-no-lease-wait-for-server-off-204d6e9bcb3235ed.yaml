@@ -1,0 +1,8 @@
+---
+fixes:
+  - |
+    A PostgreSQL cluster whose primary is gone and whose server Nova has
+    off (``SHUTOFF``) now fails over after ``cluster_recovery_grace``,
+    without waiting for the old primary's write lease and fence grace to
+    run out: a server that is off takes no writes. A primary that runs but
+    is cut off from the others is still waited for as before.

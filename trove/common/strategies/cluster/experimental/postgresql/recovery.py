@@ -40,8 +40,9 @@ never with two members, and never while the promotion could lose an
 acknowledged commit (the quorum rule) or, in async mode, more than
 ``cluster_failover_max_lag_bytes``. The old primary is fenced if it
 answers, the standby that holds the most on the majority's side is
-promoted once the old primary's lease has run out, the other standbys
-follow it, and the old primary rejoins it as a standby.
+promoted once the old primary's lease has run out (at once when Nova has
+the old primary's server off), the other standbys follow it, and the old
+primary rejoins it as a standby.
 """
 
 import threading
@@ -51,6 +52,7 @@ from oslo_log import log as logging
 
 from trove.cluster.tasks import ClusterTasks
 from trove.common import cfg
+from trove.common import clients
 from trove.common.strategies.cluster.experimental.common import (
     recovery as common_recovery)
 from trove.common.strategies.cluster.experimental.postgresql import (
@@ -81,9 +83,11 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
         return any(a.get('state') == topology.PRIMARY and a.get('writable')
                    for a in answers)
 
-    def __init__(self, manager, guest_factory=None):
+    def __init__(self, manager, guest_factory=None, nova_factory=None):
         super(PostgresqlClusterRecovery, self).__init__(manager,
                                                         guest_factory)
+        # Whether a primary that is gone has its server off.
+        self.nova_factory = nova_factory or clients.create_nova_client
         # What the task manager remembers of each cluster's primary: its
         # id and address, where it was, which standbys last streamed
         # from it (the synchronous set) and whether it has gone on
@@ -138,6 +142,21 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
             if member.id == member_id:
                 return member
         raise LookupError(member_id)
+
+    def _server_off(self, context, member_id):
+        """Whether Nova has the member's server off (SHUTOFF); not when
+        Nova cannot tell.
+        """
+        try:
+            server_id = self._member(member_id).compute_instance_id
+            if not server_id:
+                return False
+            server = self.nova_factory(context).servers.get(server_id)
+            return getattr(server, 'status', None) == 'SHUTOFF'
+        except Exception as err:
+            LOG.warning("Member %s: its server could not be looked up: %s",
+                        member_id, err)
+            return False
 
     def _renew_lease(self, context, cluster_id, primary_id):
         if self._tell(context, primary_id, 'renew_lease',
@@ -523,6 +542,14 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
                       self.conf.cluster_fence_grace - now)
         old_answer = top.answer(primary_id)
         if old_answer and not old_answer.get('writable', True):
+            lease_left = 0
+        # Nor for a primary whose server is off: it takes no writes,
+        # whatever lease it holds. Only a primary cut off from the others
+        # while it runs needs the wait.
+        if lease_left > 0 and self._server_off(context, primary_id):
+            LOG.info("Cluster %s: the primary %s is gone (%s) and its "
+                     "server is off; not waiting for its lease.",
+                     cluster_id, primary_id, why)
             lease_left = 0
         if lease_left > 0:
             LOG.info("Cluster %s: the primary %s is gone (%s); its lease "

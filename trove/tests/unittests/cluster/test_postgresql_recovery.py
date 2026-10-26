@@ -17,6 +17,8 @@ members' answers, and the reconciler that applies them.
 import time
 from unittest import mock
 
+from novaclient.v2 import servers
+
 from trove.cluster.tasks import ClusterTasks
 from trove.common.strategies.cluster.experimental.common import (
     recovery as common_recovery)
@@ -77,6 +79,17 @@ def stopped(ip, primary_id='i1', fenced=False):
 def _top(answers):
     members = [mock.Mock(id=i) for i in answers]
     return topology.Topology(members, [(m, answers[m.id]) for m in members])
+
+
+def _server(server_id, status):
+    # A member's server as GET /servers/{id} gives it: running, or off
+    # (Nova's stop after the server died: SHUTOFF, power state 4).
+    return servers.Server(mock.Mock(), {
+        'id': server_id, 'status': status,
+        'OS-EXT-STS:power_state': 4 if status == 'SHUTOFF' else 1,
+        'OS-EXT-STS:vm_state': 'stopped' if status == 'SHUTOFF' else 'active',
+        'OS-EXT-STS:task_state': None,
+        'OS-EXT-SRV-ATTR:host': 'kata-worker2.cloud.local'})
 
 
 class TopologyTest(trove_testtools.TestCase):
@@ -370,6 +383,11 @@ class RecoveryTestBase(trove_testtools.TestCase):
         self.recovery = pg_recovery.PostgresqlClusterRecovery('postgresql',
                                                               guest)
         self.recovery._members = mock.Mock(return_value=self.members)
+        # Nova has every member's server running, unless a test says.
+        self.nova = mock.Mock()
+        self.nova.servers.get.side_effect = lambda server_id: _server(
+            server_id, 'ACTIVE')
+        self.recovery.nova_factory = lambda context: self.nova
         self.recovery.conf = mock.Mock(
             cluster_peer_timeout=3, cluster_recovery_grace=30,
             cluster_recovery_interval=30, cluster_recovery_timeout=3600,
@@ -1053,6 +1071,35 @@ class FailoverTest(RecoveryTestBase):
         self._check_at(175)
         self.assertEqual(['i2'], self._promotions())
         self.assertEqual(30, self.recovery.look_again_in('c1'))
+
+    def test_a_primary_whose_server_is_off_is_not_waited_for(self):
+        # kc8-pg17 (production, 2026-10-26): the primary's server killed,
+        # Nova's stop 1 s later; the new primary took writes 101 s after
+        # the kill, the lease and its fence grace having had to run out.
+        # A server that is off takes no writes: the grace period only.
+        self._healthy()
+        self._check_at(0)
+        self._primary_gone()
+        self.nova.servers.get.side_effect = lambda server_id: _server(
+            server_id, 'SHUTOFF')
+        self.calls = []
+        self._check_at(10)
+        self.assertEqual([], self._promotions())
+        self._check_at(45)
+        self.assertEqual(['i2'], self._promotions())
+        self.nova.servers.get.assert_called_with(
+            self.members[0].compute_instance_id)
+
+    def test_the_lease_still_counts_when_nova_cannot_tell(self):
+        self._healthy()
+        self._check_at(0)
+        self._primary_gone()
+        self.nova.servers.get.side_effect = RuntimeError('nova')
+        self._check_at(10)
+        self._check_at(45)
+        self.assertEqual([], self._promotions())
+        self._check_at(90)
+        self.assertEqual(['i2'], self._promotions())
 
     def test_a_lease_granted_before_a_restart(self):
         # The task manager first looks at 100: the primary may hold a
