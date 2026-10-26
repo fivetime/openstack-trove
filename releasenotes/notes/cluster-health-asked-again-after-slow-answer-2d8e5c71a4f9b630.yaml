@@ -1,0 +1,9 @@
+---
+fixes:
+  - |
+    A look at the health of a cluster now also asks again the members
+    whose answers are more than 5 seconds old by the end of the look when
+    another member was slow to answer but did answer (a primary that was
+    just hard rebooted), not only when a member did not answer at all.
+    Before, such a look could record a Redis sentinel cluster ``DOWN``
+    from answers given before the promoted replica took the writes.

@@ -12,6 +12,7 @@
 
 import datetime
 import json
+import time
 from unittest import mock
 
 from oslo_utils import timeutils
@@ -190,40 +191,62 @@ class TestHealthWatch(HealthTestBase):
         status, detail, _since = self._recorded(cluster.id)
         self.assertEqual(['c-member-3'], detail['out'])
 
-    def test_asked_again_when_a_member_kept_the_look_waiting(self):
-        # A Redis sentinel primary just powered off, its heartbeat not
-        # stale yet (production, 2026-10-26): the look waits the whole
-        # timeout for it, while the replica the sentinels promote takes
-        # the writes. What the others said when the look began is not
-        # recorded; what they say then is.
+    def _slow_look(self, slow):
+        """A look at a cluster whose primary c-member-3 is gone: the others
+        first answer DOWN, then (asked again) c-member-1 takes the writes;
+        c-member-3 keeps the look waiting, then answers or fails as
+        ``slow`` gives. Returns the record and who was asked.
+        """
         cluster, members = self._cluster()
         down = ch.view(ch.DOWN, ['10.0.0.3'],
                        'the sentinels hold the primary down')
         told = {'c-member-1': [dict(down, me='10.0.0.1'),
                                dict(down, me='10.0.0.1', writable=True)],
                 'c-member-2': [dict(down, me='10.0.0.2'),
-                               dict(down, me='10.0.0.2')]}
+                               dict(down, me='10.0.0.2')],
+                'c-member-3': [slow]}
         asked = []
+
+        def answer(name):
+            asked.append(name)
+            given = told[name].pop(0)
+            if name == 'c-member-3':
+                time.sleep(0.3)
+            if isinstance(given, Exception):
+                raise given
+            return given
 
         def guest(context, member):
             client = mock.Mock()
-            if member.name == 'c-member-3':
-                client.get_cluster_health.side_effect = (
-                    exception.GuestTimeout())
-            else:
-                asked.append(member.name)
-                client.get_cluster_health.return_value = told[
-                    member.name].pop(0)
+            client.get_cluster_health.side_effect = (
+                lambda timeout: answer(member.name))
             return client
 
-        health.HealthWatch('redis', guest_factory=guest).check_now(
-            None, cluster, 'test')
+        with mock.patch.object(health, 'ANSWER_MAX_AGE', 0.1, create=True):
+            health.HealthWatch('redis', guest_factory=guest).check_now(
+                None, cluster, 'test')
+        return self._recorded(cluster.id), sorted(asked)
 
-        status, detail, _since = self._recorded(cluster.id)
+    def test_asked_again_when_a_member_kept_the_look_waiting(self):
+        # A Redis sentinel primary just powered off, its heartbeat not
+        # stale yet (production, 2026-10-26): the look waits the whole
+        # timeout for it, while the replica the sentinels promote takes
+        # the writes. What the others said when the look began is not
+        # recorded; what they say then is.
+        (status, detail, _since), asked = self._slow_look(
+            exception.GuestTimeout())
         self.assertEqual(ch.DEGRADED, status)
         self.assertEqual(['10.0.0.3', 'c-member-3'], detail['out'])
         self.assertEqual(['c-member-1', 'c-member-1', 'c-member-2',
-                          'c-member-2'], sorted(asked))
+                          'c-member-2', 'c-member-3'], asked)
+
+    def test_asked_again_when_a_member_was_slow_to_answer(self):
+        # A primary hard rebooted (production, 2026-10-26): it answers,
+        # late; the others are asked again, not it.
+        (status, detail, _since), asked = self._slow_look(None)
+        self.assertEqual(ch.DEGRADED, status)
+        self.assertEqual(['c-member-1', 'c-member-1', 'c-member-2',
+                          'c-member-2', 'c-member-3'], asked)
 
     def test_asked_once_when_every_member_answers(self):
         cluster, members = self._cluster()

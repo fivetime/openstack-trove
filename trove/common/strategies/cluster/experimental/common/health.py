@@ -33,6 +33,7 @@ through Ceilometer) and the operator's.
 from concurrent import futures
 import datetime
 import json
+import time
 
 from oslo_log import log as logging
 from oslo_utils import timeutils
@@ -54,6 +55,10 @@ LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
 
 EVENT_TYPE = 'trove.cluster.health'
+
+# Seconds an answer may wait for the rest of a look before the member is
+# asked again.
+ANSWER_MAX_AGE = 5
 
 
 # The tasks of a member that is up as it should be: none, or a
@@ -218,16 +223,19 @@ class HealthWatch(object):
         asked = [m for m in members if m.id not in stale]
         silent = [m.name for m in members if m.id in stale]
         told = self._ask(context, asked)
-        if any(failed for _m, _a, failed in told):
-            # The look waited the whole timeout for a member that did not
-            # answer (one just powered off, its heartbeat not stale yet):
-            # what the others said is that old, a Redis replica the
-            # sentinels promoted meanwhile taking the writes already.
-            # Asked again, they tell how the cluster is now.
-            again = [m for m, _a, failed in told if not failed]
-            told = [t for t in told if t[2]] + self._ask(context, again)
+        # The look waited for a member slow to answer or that did not (one
+        # just restarted, or powered off, its heartbeat not stale yet):
+        # what the others said is that old, a Redis replica the sentinels
+        # promoted meanwhile taking the writes already. Asked again, they
+        # tell how the cluster is now.
+        done = time.monotonic()
+        again = {m.id for m, _a, failed, at in told
+                 if not failed and done - at > ANSWER_MAX_AGE}
+        if again:
+            told = [t for t in told if t[0].id not in again] + self._ask(
+                context, [m for m in asked if m.id in again])
         answers = []
-        for member, answer, failed in told:
+        for member, answer, failed, _at in told:
             if failed or (answer and answer.get('down')):
                 silent.append(member.name)
             elif answer:
@@ -249,17 +257,18 @@ class HealthWatch(object):
     def _ask(self, context, members):
         def ask(member):
             try:
-                return member, self.guest_factory(
+                answer = self.guest_factory(
                     context, member).get_cluster_health(
-                        timeout=self.conf.cluster_health_timeout), False
+                        timeout=self.conf.cluster_health_timeout)
+                return member, answer, False, time.monotonic()
             except exception.GuestError as err:
                 # It answered with an error: a guest agent without the
                 # call.
                 LOG.debug("Member %s cannot tell: %s", member.id, err)
-                return member, None, False
+                return member, None, False, time.monotonic()
             except Exception as err:
                 LOG.debug("Member %s did not answer: %s", member.id, err)
-                return member, None, True
+                return member, None, True, time.monotonic()
         if len(members) < 2:
             return [ask(member) for member in members]
         with futures.ThreadPoolExecutor(max_workers=len(members)) as pool:
