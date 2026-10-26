@@ -1099,6 +1099,27 @@ class TestRedisSentinelMember(trove_testtools.TestCase):
             del self.app.ready_port
             self.assertNotIn('writable', self.app.sentinel_health(), name)
 
+    def test_a_replica_whose_link_just_dropped_serves_reads(self):
+        # INFO replication of the replica .12 in the lab above, 4 s after
+        # the primary was killed and before the sentinels pointed it at
+        # the new one (valkey-py parses the numbers).
+        replica = {'role': 'slave', 'master_host': '172.31.251.11',
+                   'master_link_status': 'down',
+                   'master_last_io_seconds_ago': -1,
+                   'master_sync_in_progress': 0,
+                   'master_link_down_since_seconds': 4}
+        self.assertTrue(self._view(replica).readable)
+        self.assertFalse(self._view(dict(
+            replica, master_link_down_since_seconds=11)).readable)
+        # Not while it takes a full copy, nor never linked yet.
+        self.assertFalse(self._view(dict(
+            replica, master_sync_in_progress=1)).readable)
+        self.assertFalse(self._view(dict(
+            replica, master_link_down_since_seconds=-1)).readable)
+        missing = dict(replica)
+        del missing['master_link_down_since_seconds']
+        self.assertFalse(self._view(missing).readable)
+
     def test_no_primary_is_down(self):
         state = _sentinel_state('all-up')
         state['master']['is_odown'] = True

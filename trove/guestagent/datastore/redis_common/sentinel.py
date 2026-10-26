@@ -65,8 +65,10 @@ CHANGE_ID = 'sentinel'
 SYNC, ASYNC = 'sync', 'async'
 DOWN_AFTER_MS = 5000
 FAILOVER_TIMEOUT_MS = 60000
-# A replica serves reads while its link is up and it heard from its
-# primary within this many seconds.
+# A replica serves reads while it heard from its primary within this many
+# seconds: its link up and the primary not silent for longer, or its link
+# down for no longer (a replica the sentinels point at a new primary drops
+# its link for a few seconds).
 READ_MAX_SILENCE = 10
 # What a sentinel needs on a server (the sentinel documentation's list).
 SENTINEL_COMMANDS = ['+multi', '+slaveof', '+ping', '+exec', '+subscribe',
@@ -290,11 +292,17 @@ class SentinelAppMixin(object):
             # Started again a primary, the sentinels having elected
             # another meanwhile: a replica soon, when they reconfigure it.
             self.replaced_primary = elected is not None and elected != me
-        else:
+        elif info.get('master_link_status') == 'up':
             silence = info.get('master_last_io_seconds_ago')
-            readable = (info.get('master_link_status') == 'up' and
-                        silence is not None and
+            readable = (silence is not None and
                         int(silence) <= READ_MAX_SILENCE)
+        else:
+            # Not while it takes a full copy: it answers LOADING when it
+            # loads the copy.
+            down = info.get('master_link_down_since_seconds')
+            readable = (down is not None and
+                        0 <= int(down) <= READ_MAX_SILENCE and
+                        not int(info.get('master_sync_in_progress') or 0))
         return cluster_probe.MemberView(role, role, writable, False,
                                         readable)
 

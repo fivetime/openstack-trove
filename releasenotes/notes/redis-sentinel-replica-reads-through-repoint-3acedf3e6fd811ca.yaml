@@ -1,0 +1,9 @@
+---
+fixes:
+  - |
+    A replica of a Redis, Valkey or KeyDB cluster of the sentinel topology
+    keeps its read port open for the few seconds its link is down while the
+    sentinels point it at a new primary, as long as the link has been down
+    for no longer than the replica may be silent and it is not taking a
+    full copy. The read endpoint used to have no member for 3 to 6 seconds
+    on every failover.
