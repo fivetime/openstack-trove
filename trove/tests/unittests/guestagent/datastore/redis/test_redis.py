@@ -1099,6 +1099,22 @@ class TestRedisSentinelMember(trove_testtools.TestCase):
             del self.app.ready_port
             self.assertNotIn('writable', self.app.sentinel_health(), name)
 
+    def test_the_new_primary_says_so_once_its_sentinel_switched(self):
+        # kv1-redis-s (production, 2026-10-26): 38 s after the primary was
+        # killed, the sentinel of the promoted replica had switched to it
+        # (DEGRADED, the old primary held down as a replica) while the
+        # other member's sentinel still held the old primary down (DOWN):
+        # the promoted replica has to say it takes the writes then too.
+        self.app.sentinel_state = mock.Mock(
+            return_value=_sentinel_state('failed-over'))
+        self.app.ready_port = mock.Mock(**{'held.return_value': True})
+        health = self.app.sentinel_health()
+        self.assertEqual((ch.DEGRADED, True),
+                         (health['status'], health.get('writable')))
+        self.app.sentinel_state = mock.Mock(
+            return_value=_sentinel_state('all-up'))
+        self.assertTrue(self.app.sentinel_health().get('writable'))
+
     def test_a_replica_whose_link_just_dropped_serves_reads(self):
         # INFO replication of the replica .12 in the lab above, 4 s after
         # the primary was killed and before the sentinels pointed it at

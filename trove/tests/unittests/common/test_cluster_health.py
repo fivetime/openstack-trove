@@ -75,5 +75,14 @@ class TestCombine(trove_testtools.TestCase):
             ('r-3', ch.view(ch.DOWN, ['10.0.0.1'], said, '10.0.0.3'))],
             ['r-2'], {'10.0.0.1': 'r-2'})
         self.assertEqual(ch.DOWN, health['status'])
+        # Nor when the member that takes them sees the cluster degraded
+        # already (its sentinel switched) while another sees it down.
+        health = ch.combine([
+            ('r-1', ch.view(ch.DEGRADED, ['10.0.0.1'],
+                            'down as the sentinel sees it', '10.0.0.2',
+                            writable=True)),
+            ('r-3', ch.view(ch.DOWN, ['10.0.0.1'], said, '10.0.0.3'))],
+            ['r-2'], {'10.0.0.1': 'r-2'})
+        self.assertEqual(ch.DEGRADED, health['status'])
         # A view that does not say it is as before.
         self.assertNotIn('writable', ch.view(ch.HEALTHY))

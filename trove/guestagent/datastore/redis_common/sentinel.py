@@ -325,6 +325,11 @@ class SentinelAppMixin(object):
         the primary down.
         """
         me = self.get_node_ip()[0]
+        # Whether this member takes the writes (holds the write port): a
+        # replica the sentinels promoted does before every sentinel
+        # switches to it, whatever its own sentinel says by then.
+        port = getattr(self, 'ready_port', None)
+        writable = port is not None and port.held()
         state = self.sentinel_state()
         master = state['master']
         out = {r['ip'] for r in state['replicas']
@@ -333,18 +338,15 @@ class SentinelAppMixin(object):
         out |= {s['ip'] for s in state['sentinels'] if s.get('is_sdown')}
         if not master.get('ip') or master.get('is_sdown') or \
                 master.get('is_odown'):
-            # A replica the sentinels promoted takes the writes before
-            # they switch to it: told, the cluster is not down.
-            port = getattr(self, 'ready_port', None)
             return cluster_health.view(
                 cluster_health.DOWN, sorted(out | {master.get('ip')} - {None}),
-                'the sentinels hold the primary down', me,
-                writable=port is not None and port.held())
+                'the sentinels hold the primary down', me, writable)
         if out:
             return cluster_health.view(
                 cluster_health.DEGRADED, sorted(out),
-                'down as the sentinel sees it', me)
-        return cluster_health.view(cluster_health.HEALTHY, me=me)
+                'down as the sentinel sees it', me, writable)
+        return cluster_health.view(cluster_health.HEALTHY, me=me,
+                                   writable=writable)
 
     def drop_failed_sentinel_links(self):
         """The connections of sentinels that failed to log in to this
