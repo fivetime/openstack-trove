@@ -217,8 +217,17 @@ class HealthWatch(object):
         stale = stale_members(m.id for m in members)
         asked = [m for m in members if m.id not in stale]
         silent = [m.name for m in members if m.id in stale]
+        told = self._ask(context, asked)
+        if any(failed for _m, _a, failed in told):
+            # The look waited the whole timeout for a member that did not
+            # answer (one just powered off, its heartbeat not stale yet):
+            # what the others said is that old, a Redis replica the
+            # sentinels promoted meanwhile taking the writes already.
+            # Asked again, they tell how the cluster is now.
+            again = [m for m, _a, failed in told if not failed]
+            told = [t for t in told if t[2]] + self._ask(context, again)
         answers = []
-        for member, answer, failed in self._ask(context, asked):
+        for member, answer, failed in told:
             if failed or (answer and answer.get('down')):
                 silent.append(member.name)
             elif answer:

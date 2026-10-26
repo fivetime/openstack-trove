@@ -190,6 +190,56 @@ class TestHealthWatch(HealthTestBase):
         status, detail, _since = self._recorded(cluster.id)
         self.assertEqual(['c-member-3'], detail['out'])
 
+    def test_asked_again_when_a_member_kept_the_look_waiting(self):
+        # A Redis sentinel primary just powered off, its heartbeat not
+        # stale yet (production, 2026-10-26): the look waits the whole
+        # timeout for it, while the replica the sentinels promote takes
+        # the writes. What the others said when the look began is not
+        # recorded; what they say then is.
+        cluster, members = self._cluster()
+        down = ch.view(ch.DOWN, ['10.0.0.3'],
+                       'the sentinels hold the primary down')
+        told = {'c-member-1': [dict(down, me='10.0.0.1'),
+                               dict(down, me='10.0.0.1', writable=True)],
+                'c-member-2': [dict(down, me='10.0.0.2'),
+                               dict(down, me='10.0.0.2')]}
+        asked = []
+
+        def guest(context, member):
+            client = mock.Mock()
+            if member.name == 'c-member-3':
+                client.get_cluster_health.side_effect = (
+                    exception.GuestTimeout())
+            else:
+                asked.append(member.name)
+                client.get_cluster_health.return_value = told[
+                    member.name].pop(0)
+            return client
+
+        health.HealthWatch('redis', guest_factory=guest).check_now(
+            None, cluster, 'test')
+
+        status, detail, _since = self._recorded(cluster.id)
+        self.assertEqual(ch.DEGRADED, status)
+        self.assertEqual(['10.0.0.3', 'c-member-3'], detail['out'])
+        self.assertEqual(['c-member-1', 'c-member-1', 'c-member-2',
+                          'c-member-2'], sorted(asked))
+
+    def test_asked_once_when_every_member_answers(self):
+        cluster, members = self._cluster()
+        asked = []
+
+        def guest(context, member):
+            asked.append(member.name)
+            client = mock.Mock()
+            client.get_cluster_health.return_value = ch.view(ch.HEALTHY)
+            return client
+
+        health.HealthWatch('redis', guest_factory=guest).check_now(
+            None, cluster, 'test')
+        self.assertEqual(ch.HEALTHY, self._recorded(cluster.id)[0])
+        self.assertEqual(3, len(asked))
+
     def test_written_only_when_it_changes(self):
         cluster, members = self._cluster()
         answers = {'c-member-%d' % i: ch.view(ch.HEALTHY)

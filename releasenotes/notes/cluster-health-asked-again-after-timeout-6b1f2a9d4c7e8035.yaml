@@ -1,0 +1,16 @@
+---
+fixes:
+  - |
+    The health of a cluster is no longer recorded from answers as old as
+    ``cluster_health_timeout``. When a member does not answer (a member
+    just powered off, its heartbeat not stale yet), the members that did
+    answer are asked again and their new answers are recorded. Before, a
+    Redis sentinel cluster whose primary was powered off was shown
+    ``DOWN`` for one look about 30 seconds after the promoted replica
+    already took the writes.
+  - |
+    A Redis, Valkey or KeyDB sentinel replica that the sentinels have just
+    promoted no longer reports itself as "a primary the sentinels
+    replaced" while its own sentinel still names the old primary, which
+    it holds down. It still takes no writes from the cluster's endpoint
+    until its sentinel names it.
