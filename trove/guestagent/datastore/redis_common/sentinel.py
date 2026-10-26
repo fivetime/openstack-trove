@@ -325,9 +325,13 @@ class SentinelAppMixin(object):
         out |= {s['ip'] for s in state['sentinels'] if s.get('is_sdown')}
         if not master.get('ip') or master.get('is_sdown') or \
                 master.get('is_odown'):
+            # A replica the sentinels promoted takes the writes before
+            # they switch to it: told, the cluster is not down.
+            port = getattr(self, 'ready_port', None)
             return cluster_health.view(
                 cluster_health.DOWN, sorted(out | {master.get('ip')} - {None}),
-                'the sentinels hold the primary down', me)
+                'the sentinels hold the primary down', me,
+                writable=port is not None and port.held())
         if out:
             return cluster_health.view(
                 cluster_health.DEGRADED, sorted(out),

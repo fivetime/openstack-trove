@@ -1079,6 +1079,26 @@ class TestRedisSentinelMember(trove_testtools.TestCase):
                 return_value=_sentinel_state(name))
             self.assertEqual(health, self.app.sentinel_health(), name)
 
+    def test_the_promoted_replica_says_it_takes_the_writes(self):
+        # Valkey 9, three servers and sentinels (container lab,
+        # 2026-10-26): the primary .11 killed; 5.7 s later .13 was the
+        # primary with .12 following it, while the sentinel of .13 still
+        # had .11 as the primary (s_down, failover_in_progress) and the
+        # sentinel of .11, o_down.
+        for name in ('failing-over', 'failing-over-peer'):
+            self.app.sentinel_state = mock.Mock(
+                return_value=_sentinel_state(name))
+            self.app.ready_port = mock.Mock(**{'held.return_value': True})
+            health = self.app.sentinel_health()
+            self.assertEqual((ch.DOWN, ['172.31.251.11'], True),
+                             (health['status'], health['out'],
+                              health.get('writable')), name)
+            # A member whose ready port is closed does not say it.
+            self.app.ready_port.held.return_value = False
+            self.assertNotIn('writable', self.app.sentinel_health(), name)
+            del self.app.ready_port
+            self.assertNotIn('writable', self.app.sentinel_health(), name)
+
     def test_no_primary_is_down(self):
         state = _sentinel_state('all-up')
         state['master']['is_odown'] = True

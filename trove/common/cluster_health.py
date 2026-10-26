@@ -41,10 +41,15 @@ UNKNOWN = 'UNKNOWN'
 _RANK = {HEALTHY: 0, DEGRADED: 1, DOWN: 2}
 
 
-def view(status, out=(), reason=None, me=None):
-    """What a member tells of its cluster."""
-    return {'status': status, 'out': sorted(set(out)), 'reason': reason,
-            'me': me}
+def view(status, out=(), reason=None, me=None, writable=False):
+    """What a member tells of its cluster; ``writable`` when the member
+    itself takes the cluster's writes now.
+    """
+    result = {'status': status, 'out': sorted(set(out)), 'reason': reason,
+              'me': me}
+    if writable:
+        result['writable'] = True
+    return result
 
 
 def combine(answers, silent, known=None):
@@ -73,6 +78,12 @@ def combine(answers, silent, known=None):
                 key=lambda s: _RANK.get(s, 0))
     if worst not in _RANK:
         worst = HEALTHY
+    # A cluster one of whose members takes its writes is not down,
+    # whatever another member sees: the sentinels of a Redis primary that
+    # has just failed over hold the old primary down until the replicas
+    # follow the promoted one, while that one takes the writes already.
+    if worst == DOWN and any(a.get('writable') for _n, a in answers):
+        worst = DEGRADED
     out = set(silent)
     # The same words from several members are said once, with who said
     # them.

@@ -1,0 +1,9 @@
+---
+fixes:
+  - |
+    A Redis, Valkey or KeyDB cluster of the sentinel topology no longer
+    shows ``DOWN`` while a replica the sentinels promoted already takes the
+    writes. Until the other replicas follow the new primary, the sentinels
+    still report the old primary as down; a member now tells that it holds
+    the cluster's write port, and a cluster one of whose members takes the
+    writes is at worst ``DEGRADED``.

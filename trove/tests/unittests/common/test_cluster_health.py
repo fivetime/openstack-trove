@@ -54,3 +54,26 @@ class TestCombine(trove_testtools.TestCase):
                               'replica set rs1 has no primary'))], [])
         self.assertEqual(ch.DOWN, health['status'])
         self.assertEqual(['a:27017', 'b:27017', 'c:27019'], health['out'])
+
+    def test_not_down_while_a_member_takes_the_writes(self):
+        # kc9-keydb-s (production, 2026-10-26): the sentinels promoted a
+        # replica that took the writes 16 s after the primary was killed;
+        # both members' sentinels held the old primary down for 50 s
+        # more, until the other replica followed the new one, and the
+        # cluster showed DOWN all along.
+        said = 'the sentinels hold the primary down'
+        health = ch.combine([
+            ('r-1', ch.view(ch.DOWN, ['10.0.0.1'], said, '10.0.0.2',
+                            writable=True)),
+            ('r-3', ch.view(ch.DOWN, ['10.0.0.1'], said, '10.0.0.3'))],
+            ['r-2'], {'10.0.0.1': 'r-2'})
+        self.assertEqual(ch.DEGRADED, health['status'])
+        self.assertEqual(['r-2'], health['out'])
+        # No member takes them: down.
+        health = ch.combine([
+            ('r-1', ch.view(ch.DOWN, ['10.0.0.1'], said, '10.0.0.2')),
+            ('r-3', ch.view(ch.DOWN, ['10.0.0.1'], said, '10.0.0.3'))],
+            ['r-2'], {'10.0.0.1': 'r-2'})
+        self.assertEqual(ch.DOWN, health['status'])
+        # A view that does not say it is as before.
+        self.assertNotIn('writable', ch.view(ch.HEALTHY))
