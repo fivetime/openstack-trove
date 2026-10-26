@@ -269,6 +269,18 @@ class SentinelAppMixin(object):
             client.close()
         return addr[0] if addr else None
 
+    def sentinel_holds_down(self, ip):
+        """Whether this member's sentinel holds the primary it knows of,
+        at ``ip``, down.
+        """
+        client = self._sentinel()
+        try:
+            master = client.sentinel_master(MASTER_NAME)
+        finally:
+            client.close()
+        return (master.get('ip') == ip and
+                bool(master.get('is_sdown') or master.get('is_odown')))
+
     def sentinel_member_view(self):
         """The member as its server and its sentinel see it: a primary
         takes writes while its sentinel takes it for the primary too and,
@@ -291,7 +303,11 @@ class SentinelAppMixin(object):
                         (self.sentinel_mode() == ASYNC or replicas > 0))
             # Started again a primary, the sentinels having elected
             # another meanwhile: a replica soon, when they reconfigure it.
-            self.replaced_primary = elected is not None and elected != me
+            # Not when its sentinel holds the one it names down: this is
+            # the replica the sentinels have just promoted, its sentinel
+            # not switched to it yet.
+            self.replaced_primary = (elected is not None and elected != me
+                                     and not self._holds_down(elected))
         elif info.get('master_link_status') == 'up':
             silence = info.get('master_last_io_seconds_ago')
             readable = (silence is not None and
@@ -305,6 +321,13 @@ class SentinelAppMixin(object):
                         not int(info.get('master_sync_in_progress') or 0))
         return cluster_probe.MemberView(role, role, writable, False,
                                         readable)
+
+    def _holds_down(self, ip):
+        try:
+            return self.sentinel_holds_down(ip)
+        except Exception as err:
+            LOG.debug("The sentinel does not answer: %s", err)
+            return False
 
     def cluster_signal(self, view):
         """A primary the sentinels have replaced is not where it should

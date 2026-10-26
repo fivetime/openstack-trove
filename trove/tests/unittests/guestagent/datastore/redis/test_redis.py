@@ -873,9 +873,11 @@ class TestRedisSentinelMember(trove_testtools.TestCase):
                 'min-replicas-to-write'])
         self.app.adm.connection.replicaof.assert_not_called()
 
-    def _view(self, info, elected='172.31.250.195', mode='sync'):
+    def _view(self, info, elected='172.31.250.195', mode='sync',
+              held_down=False):
         self.app.adm.connection.info.return_value = info
         self.app.sentinel_primary = mock.Mock(return_value=elected)
+        self.app.sentinel_holds_down = mock.Mock(return_value=held_down)
         self.app.sentinel_mode = mock.Mock(return_value=mode)
         return self.app.sentinel_member_view()
 
@@ -913,6 +915,36 @@ class TestRedisSentinelMember(trove_testtools.TestCase):
         self.app.sentinel_primary = mock.Mock(side_effect=OSError('gone'))
         self.assertIsNone(self.app.cluster_signal(
             self.app.sentinel_member_view()))
+
+    def test_a_promoted_replica_is_not_a_replaced_primary(self):
+        # Promoted by the sentinels, a primary now, while its own sentinel
+        # still names the old primary, which it holds down (production,
+        # 2026-10-26): not a primary the sentinels replaced, and no writes
+        # until its sentinel names it.
+        self.app.is_sentinel_member = mock.Mock(return_value=True)
+        primary = {'role': 'master', 'connected_slaves': 1}
+        view = self._view(primary, elected='172.31.250.194',
+                          held_down=True)
+        self.assertIsNone(self.app.cluster_signal(view))
+        self.assertFalse(view.writable)
+        self.app.sentinel_holds_down.assert_called_once_with(
+            '172.31.250.194')
+        # Its sentinel does not answer the question: replaced, as before.
+        self.app.sentinel_holds_down = mock.Mock(side_effect=OSError('x'))
+        self.app.sentinel_member_view()
+        self.assertTrue(self.app.cluster_signal(view).abnormal)
+
+    def test_the_sentinel_holds_down_the_primary_it_names(self):
+        client = mock.Mock()
+        self.app._sentinel = mock.Mock(return_value=client)
+        client.sentinel_master.return_value = {
+            'ip': '172.31.250.194', 'is_sdown': True, 'is_odown': False}
+        self.assertTrue(self.app.sentinel_holds_down('172.31.250.194'))
+        self.assertFalse(self.app.sentinel_holds_down('172.31.250.9'))
+        client.sentinel_master.return_value = {
+            'ip': '172.31.250.194', 'is_sdown': False, 'is_odown': False}
+        self.assertFalse(self.app.sentinel_holds_down('172.31.250.194'))
+        client.close.assert_called()
 
     def test_a_node_of_the_cluster_topology_has_no_word_of_its_own(self):
         self.app.is_sentinel_member = mock.Mock(return_value=False)
