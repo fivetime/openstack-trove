@@ -166,6 +166,25 @@ def stale_members(member_ids):
     return set(member_ids) - fresh
 
 
+def seconds_to_expiry(member_ids):
+    """Seconds until the oldest heartbeat of the given members is older
+    than ``agent_heartbeat_expiry`` (at least 1), or None when none of
+    them has a heartbeat recorded.
+    """
+    member_ids = list(member_ids)
+    if not member_ids:
+        return None
+    with InstanceServiceStatus.query() as query:
+        beats = [status.updated_at for status in query.filter(
+            InstanceServiceStatus.instance_id.in_(member_ids)).all()
+            if status.updated_at]
+    if not beats:
+        return None
+    expires = min(beats) + datetime.timedelta(
+        seconds=CONF.agent_heartbeat_expiry)
+    return max(1, int((expires - timeutils.utcnow()).total_seconds()) + 1)
+
+
 class HealthWatch(object):
     """The look at a cluster of a datastore whose clusters heal
     themselves: ask, record, nothing else.

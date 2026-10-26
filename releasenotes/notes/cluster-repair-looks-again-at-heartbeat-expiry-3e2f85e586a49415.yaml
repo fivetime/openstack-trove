@@ -1,0 +1,9 @@
+---
+fixes:
+  - |
+    The repair of a cluster whose health is not ``HEALTHY`` while none of
+    its members' heartbeat is stale yet now looks at the cluster again when
+    the oldest heartbeat goes stale (``agent_heartbeat_expiry``). A member
+    that went down shortly after a heartbeat used to wait for the next
+    scan (``cluster_recovery_scan_interval``) to be started, up to a
+    minute or more later than needed.

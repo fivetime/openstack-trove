@@ -51,6 +51,7 @@ from oslo_utils import timeutils
 from trove.cluster.tasks import ClusterTasks
 from trove.common import cfg
 from trove.common import clients
+from trove.common import cluster_health as ch
 from trove.common import context as trove_context
 from trove.common.strategies.cluster.experimental.common import health
 from trove.common.strategies.cluster.experimental.common import replace
@@ -163,7 +164,7 @@ class ClusterRepair(object):
         quiet = [m for m in members
                  if m.id in stale and m.compute_instance_id]
         if not quiet:
-            return None
+            return self._until_stale(db_cluster, members, stale)
         nova = self.nova_factory(context)
         computes = {}
 
@@ -213,6 +214,19 @@ class ClusterRepair(object):
             if later is not None:
                 again = later if again is None else min(again, later)
         return again
+
+    @staticmethod
+    def _until_stale(db_cluster, members, stale):
+        """A cluster that is not healthy while none of its members is
+        quiet yet: a member that just went down still has a fresh
+        heartbeat, and nothing else would look at the cluster before the
+        next scan. Looked at again when the oldest heartbeat goes stale.
+        """
+        if health.status_of(db_cluster.id) in (None, ch.HEALTHY):
+            return None
+        return health.seconds_to_expiry(
+            m.id for m in members
+            if m.id not in stale and m.compute_instance_id)
 
     def start_decision(self, nova, member, computes=None):
         """Whether to start the server of a member that is quiet."""

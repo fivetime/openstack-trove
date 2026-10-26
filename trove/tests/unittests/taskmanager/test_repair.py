@@ -247,6 +247,51 @@ class TestClusterRepair(RepairTestBase):
         self.assertIsNone(self.repair.check_now(mock.Mock(), cluster))
         self.nova.servers.get.assert_not_called()
 
+    def _beat(self, member, seconds_ago):
+        with InstanceServiceStatus.query() as query:
+            query.filter_by(instance_id=member.id).update(
+                {'updated_at': timeutils.utcnow() -
+                 datetime.timedelta(seconds=seconds_ago)})
+
+    def _health(self, cluster, status, out=()):
+        mock.patch.object(common_health.rpc, 'get_notifier').start()
+        common_health.record(cluster.id, ch.view(
+            status, sorted(out), 'not answering' if out else None))
+        self.made.append(cluster_models.DBClusterHealth.find_by(
+            id=cluster.id))
+
+    def test_a_member_down_before_its_heartbeat_is_stale_is_looked_at_again(
+            self):
+        # kc5-mongodb (production, 2026-10-26): the member's server was
+        # killed 20 s after its last heartbeat; its peers told the cluster
+        # DEGRADED 42 s later, when that heartbeat was 62 s old. Nothing
+        # was quiet yet, and the start waited for the next scan, 131 s
+        # after the kill. Now the cluster is looked at again when the
+        # heartbeat goes stale (agent_heartbeat_expiry, 90 s).
+        cluster, members = self._quiet_cluster(stale=())
+        members[0].compute_instance_id = SERVER
+        members[0].save()
+        self._beat(members[0], 62)
+        self._health(cluster, ch.DEGRADED, ['c-member-1'])
+        again = self.repair.check_now(mock.Mock(), cluster)
+        self.assertIn(again, (28, 29, 30))
+        self.nova.servers.get.assert_not_called()
+        # When it is: started.
+        self._beat(members[0], 95)
+        self.repair.check_now(mock.Mock(), cluster)
+        self.nova.servers.start.assert_called_once_with(SERVER)
+
+    def test_a_healthy_cluster_with_an_old_heartbeat_is_left_alone(self):
+        cluster, members = self._quiet_cluster(stale=())
+        self._beat(members[0], 62)
+        self._health(cluster, ch.HEALTHY)
+        self.assertIsNone(self.repair.check_now(mock.Mock(), cluster))
+        # Nor one whose health nobody recorded.
+        cluster, members = self._quiet_cluster(stale=())
+        self._beat(members[0], 62)
+        self.assertIsNone(self.repair.check_now(mock.Mock(), cluster))
+        self.nova.servers.get.assert_not_called()
+
     def test_nothing_while_the_cluster_or_a_member_has_a_task(self):
         cluster, members = self._quiet_cluster(
             task=ClusterTasks.RECOVERING_CLUSTER)
