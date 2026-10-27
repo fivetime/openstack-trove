@@ -489,6 +489,83 @@ class TestWriters(HealthTestBase):
         health.record(cluster.id, self._seen(every))
         self.assertEqual(1, self._recorded(cluster.id)[1]['writer_changes'])
 
+    def _recorded_meanwhile(self, cluster_id, health_seen, times=1):
+        """The record as read, with another task manager recording
+        ``health_seen`` right after each of the first ``times`` reads.
+        """
+        read = health._previous
+        left = [times]
+
+        def previous(cid):
+            got = read(cid)
+            if left[0]:
+                left[0] -= 1
+                with mock.patch.object(health, '_previous', read):
+                    health.record(cid, health_seen)
+            return got
+        return mock.patch.object(health, '_previous', side_effect=previous)
+
+    def test_a_record_another_task_manager_wrote_meanwhile_stays(self):
+        # Two task managers look at the same cluster (2026-10-27): one finds
+        # the promoted replica and records the move; the other, which looked
+        # in the middle of the failover and read the record before that,
+        # does not write the count and the writer of before back.
+        cluster, _m = self._cluster()
+        health.record(cluster.id, self._seen(['c-member-1']))
+        with self._recorded_meanwhile(cluster.id, self._seen(['c-member-2'])):
+            self.assertTrue(health.record(
+                cluster.id, self._seen([], silent=['c-member-1'])))
+        status, detail, _since = self._recorded(cluster.id)
+        self.assertEqual((ch.DEGRADED, ['c-member-2'], 1),
+                         (status, detail['last_writers'],
+                          detail['writer_changes']))
+        # The move is told once, by the one that found it.
+        moved = [c[0][2] for c in self.notifier.info.call_args_list
+                 if c[0][2]['writer_changes'] == 1 and
+                 c[0][2]['previous_writers'] == ['c-member-1']]
+        self.assertEqual(1, len(moved))
+        # Its next look, the cluster as the other one found it: no change.
+        self.assertTrue(health.record(cluster.id,
+                                      self._seen(['c-member-2'])))
+        self.assertEqual(1, self._recorded(cluster.id)[1]['writer_changes'])
+
+    def test_the_same_health_recorded_meanwhile_is_no_change(self):
+        cluster, _m = self._cluster()
+        health.record(cluster.id, self._seen(['c-member-1']))
+        seen = self._seen(['c-member-2'])
+        with self._recorded_meanwhile(cluster.id, seen):
+            self.assertFalse(health.record(cluster.id, seen))
+        self.assertEqual(1, self._recorded(cluster.id)[1]['writer_changes'])
+
+    def test_a_first_record_another_task_manager_wrote_meanwhile(self):
+        cluster, _m = self._cluster()
+        with self._recorded_meanwhile(cluster.id, self._seen(['c-member-1'])):
+            self.assertTrue(health.record(cluster.id,
+                                          self._seen(['c-member-2'])))
+        status, detail, _since = self._recorded(cluster.id)
+        self.assertEqual((['c-member-2'], 1),
+                         (detail['last_writers'], detail['writer_changes']))
+
+    def test_a_record_that_keeps_changing_is_left_to_the_next_look(self):
+        cluster, _m = self._cluster()
+        health.record(cluster.id, self._seen(['c-member-1']))
+        others = iter([self._seen(['c-member-%d' % (2 + i % 2)])
+                       for i in range(health.RECORD_ATTEMPTS)])
+        read = health._previous
+
+        def previous(cid):
+            got = read(cid)
+            with mock.patch.object(health, '_previous', read):
+                health.record(cid, next(others))
+            return got
+        with mock.patch.object(health, '_previous', side_effect=previous):
+            self.assertFalse(health.record(
+                cluster.id, self._seen([], silent=['c-member-1'])))
+        # What the others recorded stays, the last of them.
+        status, detail, _since = self._recorded(cluster.id)
+        self.assertEqual((ch.HEALTHY, health.RECORD_ATTEMPTS),
+                         (status, detail['writer_changes']))
+
     def test_no_writers_named_leaves_the_record_as_before(self):
         # Cassandra, Vertica, or a guest agent that does not name them yet.
         cluster, _m = self._cluster()

@@ -41,8 +41,10 @@ import datetime
 import json
 import time
 
+from oslo_db import exception as db_exception
 from oslo_log import log as logging
 from oslo_utils import timeutils
+import sqlalchemy.exc
 
 from trove.cluster import models as cluster_models
 from trove.cluster.tasks import ClusterTasks
@@ -65,6 +67,10 @@ EVENT_TYPE = 'trove.cluster.health'
 # Seconds an answer may wait for the rest of a look before the member is
 # asked again.
 ANSWER_MAX_AGE = 5
+
+# Times the health is worked out again when the record changed between
+# reading and writing it (another task manager recorded the same cluster).
+RECORD_ATTEMPTS = 5
 
 
 # The tasks of a member that is up as it should be: none, or a
@@ -120,18 +126,18 @@ def _writers(before, health, now):
 
 
 def _previous(cluster_id):
-    """The last record: its status, detail and since; None, {}, None
-    when there is none.
+    """The last record: its status, its detail as stored and as read,
+    and since; None, None, {}, None when there is none.
     """
     try:
         row = cluster_models.DBClusterHealth.find_by(id=cluster_id)
     except exception.NotFound:
-        return None, {}, None
+        return None, None, {}, None
     try:
         detail = json.loads(row.detail or '{}')
     except ValueError:
         detail = {}
-    return row.status, detail, row.since
+    return row.status, row.detail, detail, row.since
 
 
 def known_members(cluster_id):
@@ -184,39 +190,68 @@ def notify(cluster_id, previous, health, since, writers=None,
                       "told.", cluster_id)
 
 
+def _create(cluster_id, status, detail, now):
+    """The first record of the cluster, inserted; False when there is one
+    already (another task manager's): ``create()`` merges, and would
+    write over it.
+    """
+    model = cluster_models.DBClusterHealth
+    try:
+        with model.query() as query:
+            query.session.add(model(id=cluster_id, status=status,
+                                    detail=detail, since=now, created=now,
+                                    updated=now))
+    except (db_exception.DBDuplicateEntry, sqlalchemy.exc.IntegrityError):
+        return False
+    return True
+
+
 def record(cluster_id, health):
     """Record the cluster's health when it changed, and tell it. Returns
     whether it did.
+
+    What is written is worked out from the last record (the writers and
+    their count go on from it), so it is written only over the record it
+    was worked out from: a task manager that looked at the same cluster
+    at the same time and recorded first is not undone, the record is read
+    again and the health worked out anew.
     """
-    now = timeutils.utcnow()
     model = cluster_models.DBClusterHealth
-    previous, before, since = _previous(cluster_id)
-    writers = _writers(before, health, now)
-    detail = _detail(health, writers)
-    # Since when the health is what it is: a writer that changed alone
-    # leaves it.
-    same = (previous == health['status'] and
-            _health_of(before) == _health_of(health))
-    values = {'status': health['status'], 'detail': detail, 'updated': now}
-    if not same:
-        values['since'] = since = now
-    with model.query() as query:
-        changed = query.filter(model.id == cluster_id).filter(
-            (model.status != health['status']) |
-            (model.detail != detail) | (model.detail.is_(None))).update(
-                values, synchronize_session=False)
-    if not changed:
-        try:
-            model.find_by(id=cluster_id)
-            return False
-        except exception.NotFound:
-            try:
-                model.create(id=cluster_id, status=health['status'],
-                             detail=detail, since=now)
-                since = now
-            except exception.DBConstraintError:
+    for _attempt in range(RECORD_ATTEMPTS):
+        now = timeutils.utcnow()
+        previous, stored, before, since = _previous(cluster_id)
+        writers = _writers(before, health, now)
+        detail = _detail(health, writers)
+        if previous is None:
+            if not _create(cluster_id, health['status'], detail, now):
                 # Another task manager recorded it first.
-                return record(cluster_id, health)
+                continue
+            since = now
+            break
+        if previous == health['status'] and stored == detail:
+            return False
+        # Since when the health is what it is: a writer that changed alone
+        # leaves it.
+        same = (previous == health['status'] and
+                _health_of(before) == _health_of(health))
+        values = {'status': health['status'], 'detail': detail,
+                  'updated': now}
+        if not same:
+            values['since'] = since = now
+        unchanged = (model.detail.is_(None) if stored is None
+                     else model.detail == stored)
+        with model.query() as query:
+            written = query.filter(model.id == cluster_id).filter(
+                model.status == previous).filter(unchanged).update(
+                    values, synchronize_session=False)
+        if written:
+            break
+        # Recorded by another task manager since it was read: again.
+    else:
+        LOG.warning("Cluster %s: its health was not recorded, the record "
+                    "changed under it %d times; the next look records it.",
+                    cluster_id, RECORD_ATTEMPTS)
+        return False
     moved = writers['writer_changes'] != (before.get('writer_changes') or 0)
     LOG.info("Cluster %(c)s is %(s)s%(r)s%(w)s.",
              {'c': cluster_id, 's': health['status'],

@@ -1,0 +1,13 @@
+---
+fixes:
+  - |
+    Two task managers that look at the same cluster at the same time no
+    longer undo each other's record of its health. The health is worked
+    out from the last record (the writers and their count go on from
+    it); it is now written only over the record it was worked out from,
+    and worked out again from the new one when another task manager
+    recorded first. Before, the one that wrote last won: a look in the
+    middle of a failover could write back the writer of before and its
+    count, the next look counting the move again and telling it twice.
+    The first record of a cluster is inserted, not merged, so the second
+    task manager to make it no longer writes over the first one's.
