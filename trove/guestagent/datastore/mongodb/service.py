@@ -174,11 +174,15 @@ class MongoDBApp(service.BaseDbApp):
         set has no primary (the shard takes no writes), degraded while a
         member is unreachable or not a primary or secondary, or a config
         server set has no primary (no chunk moves or metadata changes;
-        reads and writes go on).
+        reads and writes go on). The primary of a shard's set takes its
+        writes; a config server's primary takes the cluster's metadata,
+        not its writes.
         """
         status = self.adm.get_repl_status()
         members = status['members']
         me = next((m['name'] for m in members if m.get('self')), None)
+        writable = not self.is_config_server and any(
+            m.get('self') and m['state'] == RS_PRIMARY for m in members)
         out = [m['name'] for m in members
                if m.get('health') != 1 or
                m['state'] not in RS_HEALTHY_STATES + (RS_ARBITER,)]
@@ -194,8 +198,9 @@ class MongoDBApp(service.BaseDbApp):
             return cluster_health.view(
                 cluster_health.DEGRADED, out,
                 'replica set %s: %s out' % (name, ', '.join(sorted(out))),
-                me=me)
-        return cluster_health.view(cluster_health.HEALTHY, me=me)
+                me=me, writable=writable)
+        return cluster_health.view(cluster_health.HEALTHY, me=me,
+                                   writable=writable)
 
     @property
     def oplog_min_retention_hours(self):

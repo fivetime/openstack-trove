@@ -805,6 +805,11 @@ class TestMongoDBClusterHealth(MongoDBGuestTestCase):
         self.assertEqual('DEGRADED', health['status'])
         self.assertEqual(['m3:27017'], health['out'])
         self.assertEqual('replica set rs: m3:27017 out', health['reason'])
+        # As the primary m1 sees it: it takes the shard's writes.
+        self.assertTrue(health['writable'])
+        # A config server's primary takes the metadata, not the writes.
+        self.assertNotIn('writable', self._app(
+            'status-member-down', config_server=True).cluster_health())
         self.assertTrue(self._app('status-member-down').member_view(
         ).writable)
 

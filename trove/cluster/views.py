@@ -79,7 +79,12 @@ class ClusterView(object):
         return {'status': row.status,
                 'members_out': detail.get('out') or [],
                 'reason': detail.get('reason'),
-                'since': row.since}
+                'since': row.since,
+                # Who takes the writes, how many times a member started
+                # to, and since when the last one did.
+                'writers': detail.get('writers') or [],
+                'writer_changes': detail.get('writer_changes') or 0,
+                'writer_since': detail.get('writer_since')}
 
     def _build_links(self):
         return create_links("clusters", self.req, self.cluster.id)

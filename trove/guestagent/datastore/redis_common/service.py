@@ -477,14 +477,18 @@ class RedisApp(sentinel.SentinelAppMixin, service.BaseDbApp):
         """What this node sees of the cluster: down when the cluster
         state is fail (some hash slot has no master serving it), degraded
         while a node is failing (``fail``, ``fail?``: a master failed over
-        or about to be, a replica gone).
+        or about to be, a replica gone). A master that serves slots takes
+        the writes of its slots (none while the cluster state is fail).
         """
         if self.is_sentinel_member():
             return self.sentinel_health()
         info = self.adm.cluster_info()
         nodes = self.adm.cluster_nodes()
-        me = [n['address'] for n in nodes if 'myself' in n['flags']]
-        me = me[0] if me else None
+        myself = [n for n in nodes if 'myself' in n['flags']]
+        me = myself[0]['address'] if myself else None
+        writable = bool(myself) and myself[0]['role'] == 'master' and \
+            myself[0]['has_slots'] and \
+            not {'fail', 'fail?'} & set(myself[0]['flags'])
         failing = [n['address'] for n in nodes
                    if {'fail', 'fail?', 'noaddr'} & set(n['flags'])]
         if info.get('cluster_state') != 'ok':
@@ -496,8 +500,10 @@ class RedisApp(sentinel.SentinelAppMixin, service.BaseDbApp):
         if failing:
             return cluster_health.view(
                 cluster_health.DEGRADED, failing,
-                'failing: %s' % ', '.join(sorted(failing)), me=me)
-        return cluster_health.view(cluster_health.HEALTHY, me=me)
+                'failing: %s' % ', '.join(sorted(failing)), me=me,
+                writable=writable)
+        return cluster_health.view(cluster_health.HEALTHY, me=me,
+                                   writable=writable)
 
     def enable_cluster(self):
         """Start the server as a cluster node. Takes effect on start."""

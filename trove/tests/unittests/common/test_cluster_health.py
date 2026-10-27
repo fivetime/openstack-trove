@@ -86,3 +86,23 @@ class TestCombine(trove_testtools.TestCase):
         self.assertEqual(ch.DEGRADED, health['status'])
         # A view that does not say it is as before.
         self.assertNotIn('writable', ch.view(ch.HEALTHY))
+
+    def test_the_members_that_take_the_writes(self):
+        # A Redis sentinel primary just failed over (2026-10-27): the
+        # promoted replica takes the writes, the old primary does not.
+        health = ch.combine([
+            ('r-1', ch.view(ch.HEALTHY, me='10.0.0.1', writable=True)),
+            ('r-2', ch.view(ch.HEALTHY, me='10.0.0.2')),
+            ('r-3', ch.view(ch.HEALTHY, me='10.0.0.3'))], [])
+        self.assertEqual(['r-1'], health['writers'])
+        # Every member of a multi-primary group; one that is out, and one
+        # that does not answer, are not writers.
+        health = ch.combine([
+            ('g-1', ch.view(ch.HEALTHY, writable=True)),
+            ('g-2', ch.view(ch.DEGRADED, ['g-3'], 'out', writable=True))],
+            ['g-3'])
+        self.assertEqual(['g-1', 'g-2'], health['writers'])
+        # A datastore that names none (Cassandra), or no member answers.
+        self.assertEqual([], ch.combine(
+            [('c-1', ch.view(ch.HEALTHY))], [])['writers'])
+        self.assertEqual([], ch.combine([], ['c-1'])['writers'])

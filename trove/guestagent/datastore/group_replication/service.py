@@ -343,11 +343,16 @@ class GroupReplicationAppMixin(galera_service.GaleraAppMixin):
         """What the member sees of its group: the members the
         configuration names that are not ONLINE in it are out, and the
         group is down when it has lost the majority of its members (it
-        takes no writes then). A member not ONLINE sees itself out.
+        takes no writes then). A member not ONLINE sees itself out. The
+        member takes the writes when it is an ONLINE PRIMARY of a group
+        that has its majority: the primary, or every member of a
+        multi-primary group.
         """
         me = self._self_ip()
-        states = {host: state for host, state, _role in
-                  self.execute_sql(GROUP_QUERY)}
+        # A result is read once.
+        rows = list(self.execute_sql(GROUP_QUERY))
+        states = {host: state for host, state, _role in rows}
+        roles = {host: role for host, _state, role in rows}
         state = states.get(me)
         if state != 'ONLINE':
             return cluster_health.view(
@@ -361,10 +366,13 @@ class GroupReplicationAppMixin(galera_service.GaleraAppMixin):
                 cluster_health.DOWN,
                 out + [h for h, s in states.items() if s not in IN_GROUP],
                 'the group has lost the majority of its members', me)
+        writable = roles.get(me) == 'PRIMARY'
         if out:
             return cluster_health.view(
-                cluster_health.DEGRADED, out, 'not ONLINE in the group', me)
-        return cluster_health.view(cluster_health.HEALTHY, me=me)
+                cluster_health.DEGRADED, out, 'not ONLINE in the group', me,
+                writable)
+        return cluster_health.view(cluster_health.HEALTHY, me=me,
+                                   writable=writable)
 
     def _note_last_standing(self, alone):
         marked = self.configuration_manager.has_system_override(CNF_LAST)

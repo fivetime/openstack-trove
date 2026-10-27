@@ -306,7 +306,7 @@ class TestRedisClusterApp(trove_testtools.TestCase):
         admin.cluster_forget('m1')
         admin._connection.cluster.assert_called_once_with('FORGET', 'm1')
 
-    def _seen(self, state):
+    def _seen(self, state, nodes_text=None):
         # CLUSTER INFO and CLUSTER NODES of a Valkey 9 cluster of three
         # masters with a replica each, as one node printed them (2026-10-19):
         # all up; a master stopped and its replica failed over; then that
@@ -317,7 +317,8 @@ class TestRedisClusterApp(trove_testtools.TestCase):
         with open(os.path.join(here, 'info-%s.txt' % state)) as f:
             info = parsers.parse_cluster_info(f.read())
         with open(os.path.join(here, 'nodes-%s.txt' % state)) as f:
-            nodes = parsers.parse_cluster_nodes(f.read())
+            nodes = parsers.parse_cluster_nodes(
+                (nodes_text or (lambda text: text))(f.read()))
         admin = common_service.RedisAdmin()
         admin._connection = mock.Mock()
         admin._connection.cluster.side_effect = (
@@ -329,6 +330,8 @@ class TestRedisClusterApp(trove_testtools.TestCase):
         health = self.app.cluster_health()
         self.assertEqual('HEALTHY', health['status'])
         self.assertEqual('172.31.250.51', health['me'])
+        # A master serving slots takes their writes.
+        self.assertTrue(health['writable'])
         view = self.app.member_view()
         self.assertEqual(('ok', 'master', True, False),
                          (view.state, view.role, view.writable, view.down))
@@ -339,6 +342,7 @@ class TestRedisClusterApp(trove_testtools.TestCase):
         self.assertEqual('DEGRADED', health['status'])
         self.assertEqual(['172.31.250.53'], health['out'])
         self.assertEqual('failing: 172.31.250.53', health['reason'])
+        self.assertTrue(health['writable'])
 
     def test_slots_without_a_master(self):
         self._seen('down')
@@ -347,6 +351,42 @@ class TestRedisClusterApp(trove_testtools.TestCase):
         self.assertEqual(['172.31.250.53', '172.31.250.54'], health['out'])
         self.assertEqual('cluster_state fail, 10923 of 16384 slots served',
                          health['reason'])
+        # The cluster takes no writes while its state is fail.
+        self.assertNotIn('writable', health)
+
+    def _as_node(self, address):
+        # The same nodes as another node printed them: ``myself`` moved.
+        def moved(text):
+            lines = []
+            for line in text.splitlines():
+                fields = line.split(' ')
+                flags = [f for f in fields[2].split(',') if f != 'myself']
+                if fields[1].startswith(address + ':'):
+                    flags.insert(0, 'myself')
+                fields[2] = ','.join(flags)
+                lines.append(' '.join(fields))
+            return '\n'.join(lines) + '\n'
+        return moved
+
+    def test_a_replica_or_a_master_without_slots_takes_no_writes(self):
+        with open(os.path.join(os.path.dirname(__file__), '..',
+                               'redis_common', 'cluster',
+                               'nodes-healthy.txt')) as f:
+            text = f.read()
+        replica = next(line.split(' ')[1].split(':')[0]
+                       for line in text.splitlines() if 'slave' in line)
+        self._seen('healthy', self._as_node(replica))
+        health = self.app.cluster_health()
+        self.assertEqual((replica, 'HEALTHY'),
+                         (health['me'], health['status']))
+        self.assertNotIn('writable', health)
+
+        def no_slots(moved):
+            return lambda text: '\n'.join(
+                ' '.join(line.split(' ')[:8]) if 'myself' in line
+                else line for line in moved(text).splitlines()) + '\n'
+        self._seen('healthy', no_slots(self._as_node('172.31.250.51')))
+        self.assertNotIn('writable', self.app.cluster_health())
 
     def test_cluster_cli_password_in_environment(self):
         self.container.exec_run.return_value = (0, b'[OK] All good')

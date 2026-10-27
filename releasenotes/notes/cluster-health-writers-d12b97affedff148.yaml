@@ -1,0 +1,29 @@
+---
+features:
+  - |
+    The health of a cluster now tells who takes its writes and how many
+    times a member started taking them: ``writers``, ``writer_changes``
+    and ``writer_since`` in the ``health`` of a cluster shown by the API,
+    and ``writers``, ``previous_writers`` and ``writer_changes`` in the
+    ``trove.cluster.health`` notification. A primary that fails over and
+    is back within one look leaves the health as it was; the count, its
+    time and a notification still tell it, so that a cluster whose
+    writer keeps moving can be alerted on.
+
+    A member says it takes the writes with ``writable`` in what it tells
+    of its cluster, the same for every datastore: the Redis, Valkey and
+    KeyDB sentinel primary, the MySQL and Percona Group Replication
+    primary (every ONLINE member of a multi-primary group), the primary
+    of a MongoDB shard's replica set (not a config server's), a Redis
+    Cluster master serving slots, and the PostgreSQL primary and the
+    Galera writer as their recovery views had it. Cassandra and Vertica,
+    whose every node takes writes, name none. A member that starts taking
+    the writes counts once; a look in the middle of a failover, finding
+    no writer, leaves the last writers as they were. In a multi-primary
+    group a member that comes back counts as well.
+upgrade:
+  - |
+    Guest agents name the writers once they run the new code; until then,
+    and for the datastores that name none, the health record stays as it
+    was. A writer that changes alone does not move the ``since`` of the
+    health.

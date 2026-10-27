@@ -28,6 +28,12 @@ a cluster saved from an older read does not write an older health back.
 The task manager whose statement changed it sends the notification
 ``trove.cluster.health``, for the tenant's alarms (an Aodh event alarm
 through Ceilometer) and the operator's.
+
+The record also keeps who takes the writes (the members whose answer says
+``writable``) and how many times a member started taking them: a primary
+that fails over within one look leaves the health as it was, and the
+count, its time and a notification still tell it. A look in the middle of
+a failover, finding no writer, leaves the last writers as they were.
 """
 
 from concurrent import futures
@@ -69,11 +75,63 @@ SETTLED_TASKS = (inst_tasks.InstanceTasks.NONE,
                  inst_tasks.InstanceTasks.RESTART_REQUIRED)
 
 
-def _detail(health):
-    return json.dumps({'out': health.get('out') or [],
-                       'reason': health.get('reason'),
-                       'members': health.get('members') or {}},
-                      sort_keys=True)
+def _health_of(detail):
+    """What the health is beside its status: the members out, why, and
+    the names learnt (not who takes the writes).
+    """
+    return (sorted(detail.get('out') or []), detail.get('reason'),
+            detail.get('members') or {})
+
+
+def _detail(health, writers=None):
+    detail = {'out': health.get('out') or [],
+              'reason': health.get('reason'),
+              'members': health.get('members') or {}}
+    # Only what there is to tell: a datastore without writers to name, or
+    # a guest agent that does not name them yet, leaves the record as it
+    # was before writers were kept.
+    if writers and (writers['writers'] or writers['last_writers'] or
+                    writers['writer_changes']):
+        detail.update(writers)
+    return json.dumps(detail, sort_keys=True)
+
+
+def _writers(before, health, now):
+    """Who takes the writes, from the last record (``before``, its
+    detail) and the look's ``writers``: the writers found, the last ones
+    found (kept through a look that finds none, in the middle of a
+    failover), how many times a member started taking the writes, and
+    since when the last one did (the first writers found start it, not
+    counted).
+    """
+    last = list(before.get('last_writers') or [])
+    changes = before.get('writer_changes') or 0
+    since = before.get('writer_since')
+    found = list(health.get('writers') or [])
+    if found:
+        if not last:
+            since = since or trove_timeutils.isotime(now)
+        elif set(found) - set(last):
+            changes += 1
+            since = trove_timeutils.isotime(now)
+        last = found
+    return {'writers': found, 'last_writers': last,
+            'writer_changes': changes, 'writer_since': since}
+
+
+def _previous(cluster_id):
+    """The last record: its status, detail and since; None, {}, None
+    when there is none.
+    """
+    try:
+        row = cluster_models.DBClusterHealth.find_by(id=cluster_id)
+    except exception.NotFound:
+        return None, {}, None
+    try:
+        detail = json.loads(row.detail or '{}')
+    except ValueError:
+        detail = {}
+    return row.status, detail, row.since
 
 
 def known_members(cluster_id):
@@ -95,9 +153,12 @@ def status_of(cluster_id):
         return None
 
 
-def notify(cluster_id, previous, health, since):
+def notify(cluster_id, previous, health, since, writers=None,
+           previous_writers=None):
     """Tell that the cluster's health changed: what it is, what it was
-    (None for the first record), the members out and why.
+    (None for the first record), the members out and why; and who takes
+    the writes, who did and how many times a member started to (a writer
+    that changed with the health as it was is told too).
     """
     try:
         db_cluster = cluster_models.DBCluster.find_by(id=cluster_id)
@@ -112,6 +173,9 @@ def notify(cluster_id, previous, health, since):
             'reason': health.get('reason'),
             'since': trove_timeutils.isotime(since),
             'region': CONF.region,
+            'writers': list((writers or {}).get('writers') or []),
+            'previous_writers': list(previous_writers or []),
+            'writer_changes': (writers or {}).get('writer_changes') or 0,
         }
         rpc.get_notifier(service='taskmanager').info(
             trove_context.TroveContext(), EVENT_TYPE, payload)
@@ -124,16 +188,23 @@ def record(cluster_id, health):
     """Record the cluster's health when it changed, and tell it. Returns
     whether it did.
     """
-    detail = _detail(health)
     now = timeutils.utcnow()
     model = cluster_models.DBClusterHealth
-    previous = status_of(cluster_id)
+    previous, before, since = _previous(cluster_id)
+    writers = _writers(before, health, now)
+    detail = _detail(health, writers)
+    # Since when the health is what it is: a writer that changed alone
+    # leaves it.
+    same = (previous == health['status'] and
+            _health_of(before) == _health_of(health))
+    values = {'status': health['status'], 'detail': detail, 'updated': now}
+    if not same:
+        values['since'] = since = now
     with model.query() as query:
         changed = query.filter(model.id == cluster_id).filter(
             (model.status != health['status']) |
             (model.detail != detail) | (model.detail.is_(None))).update(
-                {'status': health['status'], 'detail': detail,
-                 'since': now, 'updated': now}, synchronize_session=False)
+                values, synchronize_session=False)
     if not changed:
         try:
             model.find_by(id=cluster_id)
@@ -142,14 +213,20 @@ def record(cluster_id, health):
             try:
                 model.create(id=cluster_id, status=health['status'],
                              detail=detail, since=now)
+                since = now
             except exception.DBConstraintError:
                 # Another task manager recorded it first.
                 return record(cluster_id, health)
-    LOG.info("Cluster %(c)s is %(s)s%(r)s.",
+    moved = writers['writer_changes'] != (before.get('writer_changes') or 0)
+    LOG.info("Cluster %(c)s is %(s)s%(r)s%(w)s.",
              {'c': cluster_id, 's': health['status'],
               'r': ': %s' % health['reason'] if health.get('reason')
-              else ''})
-    notify(cluster_id, previous, health, now)
+              else '',
+              'w': '; the writes moved to %s (%d times)' % (
+                  ', '.join(writers['writers']), writers['writer_changes'])
+              if moved else ''})
+    notify(cluster_id, previous, health, since, writers,
+           before.get('last_writers'))
     return True
 
 
@@ -296,10 +373,12 @@ def from_views(cluster_id, members, views, member_out, serving):
         elif member_out(answer):
             answers.append((member.name, cluster_health.view(
                 cluster_health.DEGRADED, [member.name],
-                'out of the cluster')))
+                'out of the cluster',
+                writable=bool(answer.get('writable')))))
         else:
-            answers.append((member.name,
-                            cluster_health.view(cluster_health.HEALTHY)))
+            answers.append((member.name, cluster_health.view(
+                cluster_health.HEALTHY,
+                writable=bool(answer.get('writable')))))
     health = cluster_health.combine(answers, silent)
     given = [answer for _m, answer in views if answer]
     if answers and not serving(given):

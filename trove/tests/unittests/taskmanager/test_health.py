@@ -119,7 +119,8 @@ class TestHealthNotification(HealthTestBase):
             {'cluster_id': cluster.id, 'cluster_name': 'c',
              'tenant_id': 't', 'datastore_version_id': 'v1',
              'status': ch.HEALTHY, 'previous_status': None,
-             'members_out': [], 'reason': None},
+             'members_out': [], 'reason': None, 'writers': [],
+             'previous_writers': [], 'writer_changes': 0},
             {k: v for k, v in first.items() if k not in ('since', 'region')})
         self.assertEqual(
             (ch.DEGRADED, ch.HEALTHY, ['c-member-2'],
@@ -407,6 +408,120 @@ class TestRecoveredHealth(HealthTestBase):
         self.assertIn(short.id, found)
 
 
+class TestWriters(HealthTestBase):
+    """Who takes the writes, and how many times a member started to."""
+
+    def setUp(self):
+        super(TestWriters, self).setUp()
+        self.notifier = mock.patch.object(
+            health.rpc, 'get_notifier').start().return_value
+        self.addCleanup(mock.patch.stopall)
+
+    @staticmethod
+    def _seen(writers, silent=()):
+        names = ['c-member-%d' % i for i in (1, 2, 3)
+                 if 'c-member-%d' % i not in silent]
+        return ch.combine(
+            [(n, ch.view(ch.DEGRADED if silent else ch.HEALTHY,
+                         list(silent), 'out' if silent else None,
+                         writable=n in writers)) for n in names],
+            list(silent))
+
+    def test_a_primary_that_fails_over_within_a_look(self):
+        # A Redis sentinel primary hard rebooted (kb8, kb9 on 2026-10-27):
+        # the promoted replica took the writes and the old primary came
+        # back as a replica within one look, which found the cluster as
+        # healthy as before. The health stays as it was; the writer moved.
+        cluster, _m = self._cluster()
+        self.assertTrue(health.record(cluster.id, self._seen(['c-member-3'])))
+        status, detail, since = self._recorded(cluster.id)
+        self.assertEqual((['c-member-3'], ['c-member-3'], 0),
+                         (detail['writers'], detail['last_writers'],
+                          detail['writer_changes']))
+        # The first writers found start the count, not counted.
+        self.assertIsNotNone(detail['writer_since'])
+
+        self.assertTrue(health.record(cluster.id, self._seen(['c-member-1'])))
+        status, detail, again = self._recorded(cluster.id)
+        self.assertEqual(ch.HEALTHY, status)
+        self.assertEqual((['c-member-1'], 1),
+                         (detail['writers'], detail['writer_changes']))
+        # Healthy since as before.
+        self.assertEqual(since, again)
+        told = self.notifier.info.call_args_list[-1][0][2]
+        self.assertEqual(
+            (ch.HEALTHY, ch.HEALTHY, ['c-member-1'], ['c-member-3'], 1),
+            (told['status'], told['previous_status'], told['writers'],
+             told['previous_writers'], told['writer_changes']))
+        self.assertEqual(since.isoformat()[:19], told['since'][:19])
+        # The other task manager records the same: not counted twice.
+        self.assertFalse(health.record(cluster.id,
+                                       self._seen(['c-member-1'])))
+
+    def test_no_writer_in_the_middle_of_a_failover(self):
+        # The old primary is gone and the replica not promoted yet: the
+        # last writer is kept, and its return is no change.
+        cluster, _m = self._cluster()
+        health.record(cluster.id, self._seen(['c-member-1']))
+        self.assertTrue(health.record(
+            cluster.id, self._seen([], silent=['c-member-1'])))
+        status, detail, _since = self._recorded(cluster.id)
+        self.assertEqual(([], ['c-member-1'], 0),
+                         (detail['writers'], detail['last_writers'],
+                          detail['writer_changes']))
+        health.record(cluster.id, self._seen(['c-member-1']))
+        self.assertEqual(0, self._recorded(cluster.id)[1]['writer_changes'])
+        # A replica promoted after the gap is a change.
+        health.record(cluster.id, self._seen([], silent=['c-member-1']))
+        health.record(cluster.id, self._seen(['c-member-2'],
+                                             silent=['c-member-1']))
+        self.assertEqual(1, self._recorded(cluster.id)[1]['writer_changes'])
+
+    def test_a_member_of_a_multi_primary_group_that_comes_back(self):
+        # Every member takes writes: one out is no change, its return is
+        # (it starts taking the writes again).
+        cluster, _m = self._cluster()
+        every = ['c-member-1', 'c-member-2', 'c-member-3']
+        health.record(cluster.id, self._seen(every))
+        health.record(cluster.id, self._seen(every[:2],
+                                             silent=['c-member-3']))
+        self.assertEqual(0, self._recorded(cluster.id)[1]['writer_changes'])
+        health.record(cluster.id, self._seen(every))
+        self.assertEqual(1, self._recorded(cluster.id)[1]['writer_changes'])
+
+    def test_no_writers_named_leaves_the_record_as_before(self):
+        # Cassandra, Vertica, or a guest agent that does not name them yet.
+        cluster, _m = self._cluster()
+        health.record(cluster.id, self._seen([]))
+        status, detail, _since = self._recorded(cluster.id)
+        self.assertEqual(['members', 'out', 'reason'], sorted(detail))
+
+    def test_a_watch_records_the_writer_its_members_name(self):
+        cluster, _m = self._cluster()
+        answers = {'c-member-%d' % i: ch.view(ch.HEALTHY, writable=i == 2)
+                   for i in (1, 2, 3)}
+
+        def guest(context, member):
+            client = mock.Mock()
+            client.get_cluster_health.return_value = answers[member.name]
+            return client
+        health.HealthWatch('redis', guest_factory=guest).check_now(
+            None, cluster, 'test')
+        self.assertEqual(['c-member-2'],
+                         self._recorded(cluster.id)[1]['writers'])
+
+    def test_a_recovery_records_the_writer_of_its_views(self):
+        # A Galera member's view says writable when it is the writer.
+        cluster, members = self._cluster()
+        views = [(members[0], {'in_group': True}),
+                 (members[1], {'in_group': True, 'writable': True}),
+                 (members[2], {'in_group': True})]
+        galera_recovery.GaleraClusterRecovery('mariadb')._record_health(
+            cluster.id, members, views)
+        self.assertEqual(['c-member-2'],
+                         self._recorded(cluster.id)[1]['writers'])
+
+
 class TestHealthView(HealthTestBase):
 
     def test_unknown_until_looked_at_then_recorded(self):
@@ -426,6 +541,17 @@ class TestHealthView(HealthTestBase):
         self.assertEqual(['c-member-2'], shown['members_out'])
         self.assertEqual('not answering: c-member-2', shown['reason'])
         self.assertEqual(row.since, shown['since'])
+        self.assertEqual(([], 0, None), (shown['writers'],
+                                         shown['writer_changes'],
+                                         shown['writer_since']))
+        health.record(cluster.id, ch.combine(
+            [('c-member-1', ch.view(ch.HEALTHY, writable=True))], []))
+        view.cluster = mock.Mock(health=DBClusterHealth.find_by(
+            id=cluster.id))
+        shown = cluster_views.ClusterView._build_health(view)
+        self.assertEqual((['c-member-1'], 0), (shown['writers'],
+                                               shown['writer_changes']))
+        self.assertIsNotNone(shown['writer_since'])
 
     def test_a_list_loads_them_at_once(self):
         one, _m = self._cluster()

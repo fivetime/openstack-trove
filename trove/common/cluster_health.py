@@ -20,7 +20,17 @@ knows the other members through the datastore's own gossip or heartbeats
     {'status': HEALTHY | DEGRADED | DOWN,
      'out': [the members it sees out, as the datastore names them],
      'reason': why, for people,
-     'me': this member, as the datastore names it}
+     'me': this member, as the datastore names it,
+     'writable': True when this member takes the cluster's writes now}
+
+``writable`` is how the writers of a cluster are known, whatever its
+datastore: a member that takes the writes says so (one primary, the
+primary of each shard, every member of a multi-primary group), and a
+datastore whose every member takes writes alike (Cassandra, Vertica) says
+nothing. The task manager records who the writers are and counts the
+times a member starts taking the writes (``record``): a writer that
+changes within one look still leaves its trace, while the health shows
+only how the cluster is when looked at.
 
 The task manager asks every member, adds the members that do not answer
 or whose heartbeat is stale, and records the cluster's health
@@ -63,7 +73,9 @@ def combine(answers, silent, known=None):
                   Trove's (what an earlier look learnt, for the members
                   silent now)
     :returns: a view of the cluster, ``out`` naming every member out as
-              Trove does where it can, and ``members`` the names learnt
+              Trove does where it can, ``members`` the names learnt, and
+              ``writers`` Trove's names of the members that said they take
+              the writes
     """
     known = dict(known or {})
     for name, answer in answers:
@@ -73,6 +85,7 @@ def combine(answers, silent, known=None):
     if not answers:
         result = view(DOWN, silent, 'no member answers')
         result['members'] = known
+        result['writers'] = []
         return result
     worst = max((a.get('status') for _n, a in answers),
                 key=lambda s: _RANK.get(s, 0))
@@ -102,4 +115,6 @@ def combine(answers, silent, known=None):
         status = DEGRADED
     result = view(status, out, '; '.join(reasons) or None)
     result['members'] = known
+    result['writers'] = sorted({name for name, answer in answers
+                                if answer.get('writable')})
     return result

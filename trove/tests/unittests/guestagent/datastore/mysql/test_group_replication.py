@@ -451,18 +451,24 @@ class TestGroupHealth(trove_testtools.TestCase):
         return self.app.cluster_health()
 
     def test_every_member_online(self):
-        self.assertEqual(ch.view(ch.HEALTHY, me='172.31.250.114'),
+        # The primary takes the writes; a secondary does not.
+        self.assertEqual(ch.view(ch.HEALTHY, me='172.31.250.114',
+                                 writable=True),
                          self._health('all-up'))
+        self.assertEqual(ch.view(ch.HEALTHY, me='172.31.250.115'),
+                         self._health('all-up', me='172.31.250.115'))
 
     def test_a_member_left_or_was_expelled(self):
         for name in ('member-left', 'member-expelled'):
             self.assertEqual(
                 ch.view(ch.DEGRADED, ['172.31.250.116'],
-                        'not ONLINE in the group', '172.31.250.114'),
+                        'not ONLINE in the group', '172.31.250.114',
+                        writable=True),
                 self._health(name), name)
 
     def test_the_group_lost_its_majority(self):
-        # Of the two left, the other is unreachable: no writes.
+        # Of the two left, the other is unreachable: no writes, the
+        # primary's neither.
         self.assertEqual(
             ch.view(ch.DOWN, ['172.31.250.115', '172.31.250.116'],
                     'the group has lost the majority of its members',
