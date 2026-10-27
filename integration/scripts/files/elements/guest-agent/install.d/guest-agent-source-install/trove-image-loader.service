@@ -2,14 +2,18 @@
 Description=OpenStack Trove image loader Service
 After=docker.service
 Requires=docker.service
+# Started by trove-image-loader.path once the guest agent has taken the
+# user-defined port down (or left it up for good): pulled before that,
+# dockerd connects through the port and keeps connections that die with it.
+ConditionPathExists=/run/trove/user-port-settled
 
 [Service]
 Type=oneshot
+# Once a boot: the path unit would start it again while the file is there.
+RemainAfterExit=yes
 User=root
 Group=root
 # Only written when controller_address is set, which is for development.
 EnvironmentFile=-/etc/trove/controller.conf
-ExecStart=/usr/local/sbin/trove-image-loader
-
-[Install]
-WantedBy=multi-user.target
+# A pull that fails is left to the agent, which pulls the image itself.
+ExecStart=-/usr/local/sbin/trove-image-loader

@@ -1,0 +1,9 @@
+[Unit]
+Description=Start the Trove image loader once the guest agent has settled the user-defined port
+
+[Path]
+PathExists=/run/trove/user-port-settled
+Unit=trove-image-loader.service
+
+[Install]
+WantedBy=multi-user.target

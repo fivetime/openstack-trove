@@ -82,6 +82,13 @@ def main():
                         "network_isolation is set to true due to: %s."
                         "pass...", str(e))
             pass
+    # The image loader waits for this (trove-image-loader.path), so that it
+    # pulls only once the user-defined port is down or is to stay up.
+    try:
+        guestagent_utils.mark_user_port_settled()
+    except Exception as e:
+        LOG.warning("failed to tell the image loader that the user defined "
+                    "port is settled: %s", str(e))
 
     # Create user and group for running docker container.
     LOG.info('Creating user and group for database service')

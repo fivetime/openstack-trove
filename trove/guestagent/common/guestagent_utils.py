@@ -201,6 +201,21 @@ def disable_user_defined_port():
                                        as_root=True)
 
 
+def mark_user_port_settled():
+    """Tell the image loader that the user-defined port is as it stays.
+
+    The loader pulls the database image at boot. Started before the agent
+    takes the user-defined port down, dockerd connects through that port
+    and keeps the connections, which die with it; the agent's own pull
+    then hangs on them. trove-image-loader.path starts the loader once
+    this file is there (it is under /run, so on every boot anew).
+    """
+    operating_system.ensure_directory(
+        os.path.dirname(constants.USER_PORT_SETTLED_PATH), as_root=True)
+    operating_system.write_file(constants.USER_PORT_SETTLED_PATH, '',
+                                as_root=True)
+
+
 # This helper method allows upgrade only between minor versions e.g. from 16.10
 # to 16.11. Attempt to upgrade from 16.10 to 17.1  will throw a TroveError.
 def prevent_major_version_upgrade(cur_ver, new_ver):

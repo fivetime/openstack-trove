@@ -15,6 +15,9 @@
 BACKUP_TYPE_FULL = 'full'
 BACKUP_TYPE_INC = 'incremental'
 ETH1_CONFIG_PATH = "/etc/trove/eth1.json"
+# Written by the guest agent once the user-defined port is as it stays;
+# trove-image-loader.path starts the image loader then.
+USER_PORT_SETTLED_PATH = "/run/trove/user-port-settled"
 DOCKER_NETWORK_NAME = "database-network"
 DOCKER_HOST_NIC_MODE = "docker-hostnic"
 DOCKER_BRIDGE_MODE = "bridge"

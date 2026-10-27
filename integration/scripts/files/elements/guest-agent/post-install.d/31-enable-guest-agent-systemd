@@ -7,7 +7,9 @@ set -eu
 set -o pipefail
 
 if [ "$DIB_INIT_SYSTEM" == "systemd" ]; then
-    systemctl enable $(svc-map guest-agent docker-hostnic.socket trove-image-loader)
+    # The image loader is started by its path unit, once the guest agent has
+    # settled the user-defined port.
+    systemctl enable $(svc-map guest-agent docker-hostnic.socket trove-image-loader.path)
 fi
 
 if [[ ${SYNC_LOG_TO_CONTROLLER} == "True" ]]; then

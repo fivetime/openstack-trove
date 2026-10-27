@@ -1,0 +1,13 @@
+---
+fixes:
+  - |
+    The guest's image loader no longer pulls the database image before the
+    guest agent has taken the user-defined port down. Started at boot, it
+    could have dockerd connect through that port and keep connections that
+    die with it, the agent's own pull then hanging on them. The agent now
+    writes ``/run/trove/user-port-settled`` once the port is down, or is to
+    stay up, and the new ``trove-image-loader.path`` unit starts the loader
+    then, once a boot. A pull that fails is no longer a failed unit: the
+    agent pulls the image itself. Guest images built with the
+    ``guest-agent`` element enable ``trove-image-loader.path`` in place of
+    ``trove-image-loader.service``.
