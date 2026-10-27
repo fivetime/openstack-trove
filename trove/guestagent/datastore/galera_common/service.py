@@ -821,13 +821,25 @@ class GaleraAppMixin(object):
     def recovery_view(self):
         """Where the member stands, for the task manager: in a primary
         component, waiting for one (database port closed, or non-primary),
-        or neither (the server is down or starting); and its position.
+        or neither (the server is down or starting); its position; and
+        whether it takes the writes: synced in the primary component and,
+        in single writer mode, holding the ready port (the writer's, which
+        the load balancer sends the writes to). Read here, not elected:
+        a recovery is no time to ask the other members.
         """
         status = self._wsrep_status()
+        writable = False
         if status is not None:
             in_group = (status.get('wsrep_cluster_status') == PRIMARY and
                         status.get('wsrep_local_state_comment') !=
                         'Initialized')
+            if in_group and status.get('wsrep_ready') == 'ON':
+                state = status.get('wsrep_local_state_comment')
+                if self.writer_mode == MULTI_WRITER:
+                    writable = state == SYNCED
+                else:
+                    writable = (state in (SYNCED, DONOR) and
+                                self._holds_ready_port())
             waiting = not in_group
             position = (status.get('wsrep_cluster_state_uuid'),
                         int(status.get('wsrep_last_committed') or 0))
@@ -852,7 +864,8 @@ class GaleraAppMixin(object):
         return {'ip': self._self_ip(), 'in_group': in_group,
                 'waiting': waiting, 'position': position,
                 'safe_to_bootstrap': safe,
-                'bootstrapped': self.started_with_bootstrap()}
+                'bootstrapped': self.started_with_bootstrap(),
+                'writable': writable}
 
     _waiting_since = None
 

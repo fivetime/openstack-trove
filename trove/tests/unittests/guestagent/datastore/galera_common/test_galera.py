@@ -1365,7 +1365,8 @@ class TestRecoveryView(trove_testtools.TestCase):
         self.assertEqual(
             {'ip': '10.0.0.2', 'in_group': False, 'waiting': True,
              'position': ('eb210882-c280-11f1-9bce-6fce320fdaa0', 31),
-             'safe_to_bootstrap': True, 'bootstrapped': False},
+             'safe_to_bootstrap': True, 'bootstrapped': False,
+             'writable': False},
             self.app.recovery_view())
         self.files['/var/lib/mysql/data/grastate.dat'] = GRASTATE.replace(
             'safe_to_bootstrap: 1', 'safe_to_bootstrap: 0')
@@ -1392,7 +1393,7 @@ class TestRecoveryView(trove_testtools.TestCase):
         self.assertEqual(
             {'ip': '10.0.0.2', 'in_group': True, 'waiting': False,
              'position': ('u1', 40), 'safe_to_bootstrap': False,
-             'bootstrapped': False},
+             'bootstrapped': False, 'writable': False},
             self.app.recovery_view())
         # Cut off: non-Primary, waiting.
         self.app.execute_sql = mock.Mock(side_effect=lambda sql: list(
@@ -1400,6 +1401,33 @@ class TestRecoveryView(trove_testtools.TestCase):
                     wsrep_local_state_comment='Initialized').items()))
         view = self.app.recovery_view()
         self.assertEqual((False, True), (view['in_group'], view['waiting']))
+
+    def test_the_writer_says_it_takes_the_writes(self):
+        # Single writer mode: the member that holds the ready port, synced
+        # (or donating) in the primary component; not elected again.
+        self.app.ready_port = mock.Mock()
+        self.app.ready_port.held.return_value = True
+        self.app._elect_writer = mock.Mock()
+        for state, writable in (('Synced', True), ('Donor/Desynced', True),
+                                ('Joined', False)):
+            self.app.execute_sql = mock.Mock(side_effect=lambda sql: list(
+                _status(wsrep_local_state_comment=state).items()))
+            self.assertEqual(writable,
+                             self.app.recovery_view()['writable'], state)
+        self.app.execute_sql = mock.Mock(side_effect=lambda sql: list(
+            _status(wsrep_ready='OFF').items()))
+        self.assertFalse(self.app.recovery_view()['writable'])
+        self.app.ready_port.held.return_value = False
+        self.app.execute_sql = mock.Mock(side_effect=lambda sql: list(
+            _status().items()))
+        self.assertFalse(self.app.recovery_view()['writable'])
+        self.app._elect_writer.assert_not_called()
+        # Multi writer mode: every synced member of the primary component.
+        self.sections['trove'] = {'cluster_writer_mode': 'multi'}
+        self.assertTrue(self.app.recovery_view()['writable'])
+        self.app.execute_sql = mock.Mock(side_effect=lambda sql: list(
+            _status(wsrep_cluster_status='non-Primary').items()))
+        self.assertFalse(self.app.recovery_view()['writable'])
 
     def test_the_recovery_run_waits_for_the_grace_period(self):
         # A server that crashed and is starting looks like one waiting:
