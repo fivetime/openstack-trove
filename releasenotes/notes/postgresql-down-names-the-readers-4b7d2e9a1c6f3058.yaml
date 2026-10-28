@@ -1,0 +1,11 @@
+---
+fixes:
+  - |
+    A PostgreSQL cluster with no member taking writes (its primary failed
+    and none has taken over yet) is still DOWN, but the reason of its
+    health now says so, ``no member takes writes``, and names the
+    standbys that serve reads meanwhile (within the cluster's
+    ``replica_read_grace``): ``no member takes writes; reads served by
+    <members>``. It said ``no member serves`` before, also while its read
+    endpoint kept serving. The standbys report whether they serve reads
+    with a new guest; with one of before, no standby is named.

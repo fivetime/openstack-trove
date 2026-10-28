@@ -915,8 +915,8 @@ class FailoverTest(ClusterAppTestBase):
         self.assertEqual(
             {'ip': '10.0.0.2', 'state': 'primary', 'role': 'PRIMARY',
              'mode': 'sync', 'self_id': 'i2', 'primary_id': 'i2',
-             'sync_set': None, 'writable': True, 'fenced': False,
-             'lease_fresh': True,
+             'sync_set': None, 'writable': True, 'readable': False,
+             'fenced': False, 'lease_fresh': True,
              'standbys': {'i3': {'state': 'streaming',
                                  'sync_state': 'quorum', 'lag_bytes': 0}},
              'lsn': 1000, 'timeline': 1, 'no_standby_for': None}, view)
@@ -952,8 +952,9 @@ class FailoverTest(ClusterAppTestBase):
             {'ip': '10.0.0.2', 'state': 'standby', 'role': 'DETACHED',
              'mode': 'sync', 'self_id': 'i2', 'primary_id': 'i1',
              'sync_set': None,
-             'writable': False, 'fenced': False, 'lease_fresh': False,
-             'receiver': None, 'lsn': 900, 'replay_lsn': 900,
+             'writable': False, 'readable': False, 'fenced': False,
+             'lease_fresh': False, 'receiver': None, 'lsn': 900,
+             'replay_lsn': 900,
              'timeline': 1, 'disconnected_for': 30,
              'peers': {'i1': False, 'i3': True}}, view)
         self.app.docker_client.containers.get.assert_called_with('database')
@@ -969,7 +970,11 @@ class FailoverTest(ClusterAppTestBase):
                       ('SELECT timeline_id', [(1,)]),
                       ('SELECT pg_wal_lsn_diff', [(900,)]))
         container.exec_run.reset_mock()
-        self.assertNotIn('peers', self.app.recovery_view())
+        view = self.app.recovery_view()
+        self.assertNotIn('peers', view)
+        # It serves reads: the task manager names it while no member
+        # takes writes.
+        self.assertTrue(view['readable'])
         container.exec_run.assert_not_called()
 
     def test_a_probe_that_fails_says_nothing(self):

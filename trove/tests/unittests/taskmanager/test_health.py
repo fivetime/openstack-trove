@@ -28,6 +28,8 @@ from trove.common.strategies.cluster.experimental.common import (
 from trove.common.strategies.cluster.experimental.common import health
 from trove.common.strategies.cluster.experimental.galera_common import (
     recovery as galera_recovery)
+from trove.common.strategies.cluster.experimental.postgresql import (
+    recovery as pg_recovery)
 from trove.common import utils
 from trove.instance.models import DBInstance
 from trove.instance.models import InstanceServiceStatus
@@ -418,6 +420,34 @@ class TestRecoveredHealth(HealthTestBase):
         galera._record_health(cluster.id, members, views)
         self.assertEqual(ch.HEALTHY, self._recorded(cluster.id)[0])
         self.assertFalse(galera.still_watching(cluster.id))
+
+    def test_a_postgresql_cluster_down_names_who_serves_the_reads(self):
+        # The primary powered off (e2-pg18g, 2026-10-28): no member takes
+        # writes, the standbys within the cluster's read grace still
+        # serve reads; the reason says so, the status stays DOWN.
+        cluster, members = self._cluster()
+        detached = {'state': 'standby', 'receiver': None, 'writable': False}
+        views = [(members[0], None),
+                 (members[1], dict(detached, readable=True)),
+                 (members[2], dict(detached, readable=False))]
+        pg = pg_recovery.PostgresqlClusterRecovery('postgresql')
+        pg._record_health(cluster.id, members, views)
+        status, detail, _since = self._recorded(cluster.id)
+        self.assertEqual(ch.DOWN, status)
+        self.assertTrue(detail['reason'].startswith(
+            'no member takes writes; reads served by c-member-2;'),
+            detail['reason'])
+        # None serves reads (no read grace, or past it; a guest of
+        # before that does not say): only the writes.
+        views = [(members[0], None),
+                 (members[1], dict(detached)),
+                 (members[2], dict(detached, readable=False))]
+        pg._record_health(cluster.id, members, views)
+        status, detail, _since = self._recorded(cluster.id)
+        self.assertEqual(ch.DOWN, status)
+        self.assertTrue(detail['reason'].startswith(
+            'no member takes writes;'), detail['reason'])
+        self.assertNotIn('reads served', detail['reason'])
 
     def test_the_scan_looks_at_a_cluster_not_looked_at_yet(self):
         new, _m = self._cluster()

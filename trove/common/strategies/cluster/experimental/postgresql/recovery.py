@@ -83,6 +83,16 @@ class PostgresqlClusterRecovery(common_recovery.ClusterRecovery):
         return any(a.get('state') == topology.PRIMARY and a.get('writable')
                    for a in answers)
 
+    def _down_reason(self, heard):
+        """No member takes writes; the standbys that still serve reads
+        meanwhile (the cluster's read grace) named.
+        """
+        readers = [m.name for m, a in heard if a.get('readable')]
+        if readers:
+            return ('no member takes writes; reads served by %s'
+                    % ', '.join(readers))
+        return 'no member takes writes'
+
     def __init__(self, manager, guest_factory=None, nova_factory=None):
         super(PostgresqlClusterRecovery, self).__init__(manager,
                                                         guest_factory)

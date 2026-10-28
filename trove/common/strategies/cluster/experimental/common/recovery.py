@@ -153,10 +153,14 @@ class ClusterRecovery(object):
     def _serving(self, answers):
         return bool(answers)
 
+    def _down_reason(self, heard):
+        return 'no member serves'
+
     def _record_health(self, cluster_id, members, views):
         try:
             found = health.from_views(cluster_id, members, views,
-                                      self._member_out, self._serving)
+                                      self._member_out, self._serving,
+                                      self._down_reason)
             if found['status'] == cluster_health.HEALTHY:
                 self.unhealthy.discard(cluster_id)
             else:

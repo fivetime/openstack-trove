@@ -432,19 +432,23 @@ class HealthWatch(object):
         return self.conf.cluster_health_interval
 
 
-def from_views(cluster_id, members, views, member_out, serving):
+def from_views(cluster_id, members, views, member_out, serving,
+               down_reason=None):
     """The health of a cluster its recovery looked at: a member that did
     not answer or whose heartbeat is stale is out, and so is one its
     datastore says is out of the cluster (``member_out(answer)``); the
     cluster is down when no member answers or ``serving(answers)`` says
-    none serves.
+    none serves, why in ``down_reason(heard)`` (the members that answered
+    with a fresh heartbeat and their answers) when given.
     """
     stale = stale_members(m.id for m in members)
-    answers, silent = [], []
+    answers, silent, heard = [], [], []
     for member, answer in views:
         if answer is None or member.id in stale:
             silent.append(member.name)
-        elif member_out(answer):
+            continue
+        heard.append((member, answer))
+        if member_out(answer):
             answers.append((member.name, cluster_health.view(
                 cluster_health.DEGRADED, [member.name],
                 'out of the cluster',
@@ -458,6 +462,7 @@ def from_views(cluster_id, members, views, member_out, serving):
     if answers and not serving(given):
         health['status'] = cluster_health.DOWN
         health['reason'] = '; '.join(
-            r for r in ('no member serves', health.get('reason')) if r)
+            r for r in (down_reason(heard) if down_reason
+                        else 'no member serves', health.get('reason')) if r)
     record(cluster_id, health)
     return health

@@ -467,7 +467,7 @@ class HealthyRecoveryTest(RecoveryTestBase):
         self._healthy()
         self.answers['i3'] = None
         self._check_at(0)
-        cluster_id, members, views, _out, _serving = recorded.call_args[0]
+        cluster_id, members, views = recorded.call_args[0][:3]
         self.assertEqual('c1', cluster_id)
         self.assertEqual(['i1', 'i2', 'i3'], [m.id for m in members])
         self.assertIsNone(dict((m.id, a) for m, a in views)['i3'])

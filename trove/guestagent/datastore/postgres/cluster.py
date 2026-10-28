@@ -746,6 +746,7 @@ class PostgresqlClusterAppMixin(object):
                   'primary_id': cluster.get('primary_id'),
                   'sync_set': cluster.get('sync_set'),
                   'writable': bool(view.writable),
+                  'readable': bool(view.readable),
                   'fenced': self.fenced, 'lease_fresh': self.lease_fresh()}
         try:
             if view.state == PRIMARY:
