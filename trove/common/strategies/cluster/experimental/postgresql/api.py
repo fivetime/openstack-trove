@@ -27,6 +27,11 @@ LOG = logging.getLogger(__name__)
 # The tenant chooses with the extended property ``replication_mode`` how a
 # commit on the primary waits for the standbys.
 MODE_KEY = 'replication_mode'
+# With the extended property ``replica_read_grace`` (seconds, 0 by
+# default), a standby that stopped streaming keeps serving reads for that
+# long: through a failover, what it serves is that much older at most.
+READ_GRACE_KEY = 'replica_read_grace'
+READ_GRACE_MAX = 3600
 ASYNC = 'async'
 SYNC = 'sync'
 STRICT = 'strict'
@@ -68,6 +73,25 @@ class PostgresqlCluster(common_api.HomogeneousCluster):
     MODE_KEY = MODE_KEY
     MODES = MODES
     DEFAULT_MODE = SYNC
+    KEPT_PROPERTIES = (READ_GRACE_KEY,)
+
+    @classmethod
+    def _validate_mode(cls, extended_properties):
+        properties = super(PostgresqlCluster, cls)._validate_mode(
+            extended_properties)
+        grace = properties.get(READ_GRACE_KEY)
+        if grace is not None:
+            try:
+                grace = int(grace)
+            except (TypeError, ValueError):
+                grace = -1
+            if not 0 <= grace <= READ_GRACE_MAX:
+                raise exception.BadRequest(
+                    _("The extended property %(key)s is a number of "
+                      "seconds from 0 to %(max)s.") % {
+                          'key': READ_GRACE_KEY, 'max': READ_GRACE_MAX})
+            properties[READ_GRACE_KEY] = grace
+        return properties
 
     def _roles(self, instance_ids):
         """The members' role answers, for those that answer."""

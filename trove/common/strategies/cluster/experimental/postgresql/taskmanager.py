@@ -96,14 +96,15 @@ class PostgresqlClusterTasks(common_taskmanager.ClusterEntryTasksMixin,
         primary = primaries[0]
         return primary, self.get_guest(primary).get_cluster_context()
 
-    @staticmethod
-    def _config(members, mode, replication_user, self_id, primary):
+    def _config(self, members, mode, replication_user, self_id, primary):
         """What a member is installed with: ``primary`` is None on the
-        primary, the primary's id and host on a standby.
+        primary, the primary's id and host on a standby; the read grace
+        the cluster was created with.
         """
+        grace = self.db_info.get_properties().get(pg_api.READ_GRACE_KEY)
         return {'members': members, 'mode': mode,
                 'replication_user': replication_user, 'self_id': self_id,
-                'primary': primary}
+                'primary': primary, 'read_grace': int(grace or 0)}
 
     def _install_standby(self, primary, primary_guest, instance, members,
                          mode, replication_user):

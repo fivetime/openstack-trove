@@ -1,0 +1,10 @@
+---
+features:
+  - |
+    A PostgreSQL cluster takes the extended property
+    ``replica_read_grace`` (seconds, 0 to 3600): a standby that stopped
+    streaming, its primary gone, serves reads on for that long after it
+    last kept up, so that the read endpoint goes on through a failover;
+    what it serves meanwhile is that much older at most. 0, the default,
+    keeps standbys serving only while they stream and keep up. Members
+    added later, by a grow or a repair, get the cluster's grace too.

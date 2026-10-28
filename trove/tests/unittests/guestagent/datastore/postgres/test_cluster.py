@@ -314,6 +314,71 @@ class MemberViewTest(ClusterAppTestBase):
         self._standby([])
         self.assertEqual('DETACHED', self.app.member_view().role)
 
+    def test_a_standby_serves_on_for_the_read_grace(self):
+        # mc-pg18 (production, Incus, 2026-10-28): the primary powered off,
+        # both standbys closed their read port within 5 s and the read
+        # endpoint had no member for 55 s, until one was promoted.
+        clock = mock.patch.object(cluster.time, 'monotonic').start()
+        clock.return_value = 1000.0
+        self._standby([('streaming', '10.0.0.1', 1.0, 0)])
+        self.assertTrue(self.app.member_view().readable)
+        # Without a grace (as before): closed as soon as it stops.
+        clock.return_value = 1005.0
+        self._standby([('streaming', '10.0.0.1', 25.0, 0)])
+        self.assertFalse(self.app.member_view().readable)
+        # With one, it serves on that long after it last kept up.
+        self.app._update_cluster(read_grace=60)
+        self._standby([('streaming', '10.0.0.1', 1.0, 0)])
+        self.assertTrue(self.app.member_view().readable)
+        self._standby([('streaming', '10.0.0.1', 25.0, 0)])
+        self.assertTrue(self.app.member_view().readable)
+        clock.return_value = 1064.0
+        self._standby([])
+        self.assertTrue(self.app.member_view().readable)
+        clock.return_value = 1066.0
+        self._standby([])
+        self.assertFalse(self.app.member_view().readable)
+        # Keeping up again starts it over.
+        clock.return_value = 1100.0
+        self._standby([('streaming', '10.0.0.1', 1.0, 0)])
+        self.assertTrue(self.app.member_view().readable)
+
+    def test_no_grace_after_a_stop_or_as_the_primary(self):
+        clock = mock.patch.object(cluster.time, 'monotonic').start()
+        clock.return_value = 1000.0
+        self.app._update_cluster(read_grace=60)
+        self._standby([('streaming', '10.0.0.1', 1.0, 0)])
+        self.assertTrue(self.app.member_view().readable)
+        # The server stopped: started again, it catches up first.
+        self.app.adm.query.side_effect = Exception('refused')
+        self.app.member_view()
+        clock.return_value = 1010.0
+        self._standby([])
+        self.assertFalse(self.app.member_view().readable)
+        # Promoted, then a standby again (rewound): nothing of before.
+        self._standby([('streaming', '10.0.0.1', 1.0, 0)])
+        self.assertTrue(self.app.member_view().readable)
+        self._primary([])
+        self.app.member_view()
+        self._standby([])
+        self.assertFalse(self.app.member_view().readable)
+
+    def test_a_member_keeps_the_read_grace_it_is_installed_with(self):
+        with mock.patch.object(self.app, '_apply_cluster_settings'), \
+                mock.patch.object(self.app, '_install_primary',
+                                  create=True), \
+                mock.patch.object(self.app, '_install_standby'):
+            try:
+                self.app.install_cluster(
+                    {'members': {'i2': '10.0.0.2'}, 'mode': 'sync',
+                     'replication_user': {'name': 'r', 'password': 'p'},
+                     'self_id': 'i2', 'primary': {'id': 'i1',
+                                                  'host': '10.0.0.1'},
+                     'read_grace': 45})
+            except Exception:
+                pass
+        self.assertEqual(45, self.app._read_cluster()['read_grace'])
+
     def test_stopped_and_rebuilding(self):
         self.app.adm.query.side_effect = Exception('refused')
         self.assertEqual(('stopped', None, False, False, False),

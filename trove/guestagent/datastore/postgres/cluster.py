@@ -149,6 +149,10 @@ class PostgresqlClusterAppMixin(object):
     # members it last reached on the tenant network meanwhile.
     _detached_since = None
     _reached = None
+    # When the standby last served reads as one that keeps up, and the
+    # cluster's read grace (read once from the cluster file).
+    _readable_at = None
+    _read_grace = None
 
     # What the member knows of its cluster
 
@@ -169,6 +173,8 @@ class PostgresqlClusterAppMixin(object):
                                as_root=True)
 
     def _update_cluster(self, **changes):
+        if 'read_grace' in changes:
+            self._read_grace = None
         cluster = self._read_cluster()
         cluster.update(changes)
         self._write_cluster(cluster)
@@ -413,6 +419,7 @@ class PostgresqlClusterAppMixin(object):
         self_id = cluster_config.get('self_id') or CONF.guest_id
         self._update_cluster(
             members=members, mode=mode, self_id=self_id,
+            read_grace=int(cluster_config.get('read_grace') or 0),
             replication_user=replication_user,
             primary_id=self_id if primary is None else primary['id'],
             complete=False)
@@ -438,6 +445,7 @@ class PostgresqlClusterAppMixin(object):
         self._apply_cluster_access_rules(replication_user['name'])
         self._write_replication(primary['host'], replication_user)
         self.rebuilding = True
+        self._readable_at = None
         try:
             self.stop_db()
             self._base_backup(primary, replication_user)
@@ -580,11 +588,14 @@ class PostgresqlClusterAppMixin(object):
             in_recovery = self.adm.query("SELECT pg_is_in_recovery()")[0][0]
         except Exception as err:
             LOG.debug("The server does not answer: %s", err)
+            # Started again, it has to catch up before it serves.
+            self._readable_at = None
             return cluster_probe.MemberView(STOPPED, None, False, False)
         if not in_recovery:
             standbys = self._standbys_of_primary()
             self._standbys = standbys
             self._detached_since = None
+            self._readable_at = None
             return cluster_probe.MemberView(
                 PRIMARY, 'PRIMARY', self._primary_writable(standbys), False)
         receiver = self._receiver()
@@ -599,6 +610,18 @@ class PostgresqlClusterAppMixin(object):
                     receiver['last_msg_age'] < 2 * conf.cluster_wal_timeout
                     and (receiver['replay_lag_bytes'] <
                          conf.cluster_read_max_lag_bytes))
+        if self._read_grace is None:
+            self._read_grace = int(
+                self._read_cluster().get('read_grace') or 0)
+        if self._read_grace:
+            # The cluster's read grace: a standby that kept up until a
+            # moment ago (its primary just failed) serves on for that
+            # long, what it serves that much older at most.
+            now = time.monotonic()
+            if readable:
+                self._readable_at = now
+            elif self._readable_at is not None:
+                readable = now - self._readable_at <= self._read_grace
         return cluster_probe.MemberView(
             STANDBY, 'STREAMING' if streaming else 'DETACHED', False,
             False, readable)
@@ -974,6 +997,8 @@ class PostgresqlClusterAppMixin(object):
         replication_user = cluster['replication_user']
         self.fenced = False
         self.rebuilding = True
+        # A copy taken anew serves nothing of before.
+        self._readable_at = None
         try:
             self._update_cluster(primary_id=primary['id'])
             self.configuration_manager.remove_system_override(CNF_SYNC)

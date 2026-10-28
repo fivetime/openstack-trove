@@ -20,4 +20,12 @@ to the standbys that keep up, which answer on their read port. The tenant
 chooses how a commit waits for the standbys with the extended property
 ``replication_mode``: ``async``, ``sync`` (the default: one standby, none
 when no standby is there) or ``strict`` (one standby, always).
+
+A standby serves reads while it streams and keeps up, so when the primary
+fails every standby stops serving until one is promoted. With the
+extended property ``replica_read_grace`` (seconds, 0 to 3600; 0, the
+default, keeps that) a standby that kept up serves on for that long after
+it stopped streaming: the read endpoint goes on through a failover, and
+what it serves meanwhile is that much older than the primary's last
+commits at most.
 """

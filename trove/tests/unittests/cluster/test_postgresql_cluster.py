@@ -83,6 +83,23 @@ class PostgresqlAPITest(trove_testtools.TestCase):
                                                  'strict'}))
         self.assertRaises(exception.BadRequest, cluster._validate_mode,
                           {'replication_mode': 'eventual'})
+
+    def test_the_read_grace(self):
+        cluster = pg_api.PostgresqlCluster
+        # As the client sends it, a string; kept as a number.
+        self.assertEqual({'replication_mode': 'sync',
+                          'replica_read_grace': 60},
+                         cluster._validate_mode({'replica_read_grace': '60'}))
+        for wrong in ('-1', '3601', 'soon', ''):
+            self.assertRaises(exception.BadRequest, cluster._validate_mode,
+                              {'replica_read_grace': wrong})
+        self.assertEqual({'replica_read_grace': 0},
+                         cluster._kept_properties(
+                             {'replica_read_grace': 0,
+                              'replication_mode': 'sync'}))
+        # None asked: none kept, the standbys serve as they did.
+        self.assertEqual({}, cluster._kept_properties(
+            cluster._validate_mode(None)))
         self.assertEqual(
             {'id': 'c1', 'instance_type': 'member',
              'replication_mode': 'async'},
@@ -264,6 +281,10 @@ class PostgresqlTasksTest(trove_testtools.TestCase):
             pg_taskmanager.PostgresqlClusterTasks)
         self.tasks._datastore_version = mock.Mock()
         self.tasks.ds_version = mock.Mock(manager='postgresql')
+        # The cluster's kept properties.
+        self.props = {}
+        self.tasks.db_info = mock.Mock(
+            get_properties=lambda: dict(self.props))
         self.calls = []
         self.guests = {}
         self.roles = {'i1': 'primary', 'i2': 'standby', 'i3': 'standby'}
@@ -324,12 +345,26 @@ class PostgresqlTasksTest(trove_testtools.TestCase):
     def _instances(self, *ids):
         return [mock.Mock(id=i) for i in ids]
 
-    def _config(self, self_id, primary, mode='strict', members=None):
+    def _config(self, self_id, primary, mode='strict', members=None,
+                read_grace=0):
         return {'members': members or {'i1': '10.0.0.1', 'i2': '10.0.0.2',
                                        'i3': '10.0.0.3'},
                 'mode': mode,
                 'replication_user': {'name': 'replicator', 'password': 'pw'},
-                'self_id': self_id, 'primary': primary}
+                'self_id': self_id, 'primary': primary,
+                'read_grace': read_grace}
+
+    @mock.patch.object(pg_taskmanager, 'Instance')
+    @mock.patch.object(pg_taskmanager, 'DBInstance')
+    def test_every_member_gets_the_read_grace(self, db_instance, instance):
+        self.props = {'replica_read_grace': 60}
+        db_instance.find_all.return_value.all.return_value = (
+            self._instances('i3', 'i1', 'i2'))
+        instance.load.side_effect = lambda ctx, i: mock.Mock(id=i)
+        self.tasks.create_cluster('ctx', 'c1')
+        installed = [c[2] for c in self.calls if c[0] == 'install_cluster']
+        self.assertEqual(3, len(installed))
+        self.assertEqual({60}, {c['read_grace'] for c in installed})
 
     @mock.patch.object(pg_taskmanager, 'Instance')
     @mock.patch.object(pg_taskmanager, 'DBInstance')
