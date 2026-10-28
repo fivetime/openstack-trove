@@ -40,7 +40,7 @@ or whose heartbeat is stale, and records the cluster's health
 * DEGRADED: the cluster serves, short of members (one is out, a member
   sees one out, or a part of the cluster says it is degraded);
 * DOWN: no member answers, or one says the cluster, or a part of it, no
-  longer serves;
+  longer serves (and no member it holds out answers that it does not);
 * UNKNOWN: not looked at yet (shown for a cluster without a record).
 """
 
@@ -60,6 +60,26 @@ def view(status, out=(), reason=None, me=None, writable=False):
     if writable:
         result['writable'] = True
     return result
+
+
+def _believed(name, answer, answers, known):
+    """A member's view, or, when it sees the cluster down while a member
+    it holds out answers and does not, the member itself out: its
+    database has not caught up with the others (a Cassandra node just
+    started holds every other node down until it hears from them).
+    A cluster that is down is seen down by every member that answers.
+    """
+    if answer.get('status') != DOWN:
+        return answer
+    told = {n: a.get('status') for n, a in answers}
+    answering = sorted({known.get(x, x) for x in answer.get('out') or ()
+                        if told.get(known.get(x, x)) not in (None, DOWN)})
+    if not answering:
+        return answer
+    return view(DEGRADED, [answer.get('me') or name],
+                'sees the cluster down, while %s answer' % ', '.join(
+                    answering),
+                answer.get('me'), bool(answer.get('writable')))
 
 
 def combine(answers, silent, known=None):
@@ -82,6 +102,8 @@ def combine(answers, silent, known=None):
         if answer.get('me'):
             known[answer['me']] = name
     silent = sorted(set(silent))
+    answers = [(name, _believed(name, answer, answers, known))
+               for name, answer in answers]
     if not answers:
         result = view(DOWN, silent, 'no member answers')
         result['members'] = known

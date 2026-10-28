@@ -1,0 +1,10 @@
+---
+fixes:
+  - |
+    A cluster no longer shows ``DOWN`` while a member that has not caught
+    up with the others sees it down: a member that says the cluster is
+    down is not believed when a member it holds out answers and does not
+    say so; the cluster shows ``DEGRADED`` with that member out instead.
+    A Cassandra node back from a reboot holds every other node down until
+    it hears from them, and a three node cluster showed ``DOWN`` for about
+    20 seconds while the other two served.

@@ -106,3 +106,47 @@ class TestCombine(trove_testtools.TestCase):
         self.assertEqual([], ch.combine(
             [('c-1', ch.view(ch.HEALTHY))], [])['writers'])
         self.assertEqual([], ch.combine([], ['c-1'])['writers'])
+
+    def test_a_member_that_has_not_caught_up_does_not_take_it_down(self):
+        # ic-cass2 (production, Incus, 2026-10-28): a Cassandra node back
+        # from a hard reboot held both other nodes down until it heard
+        # from them; they answered, and the cluster showed DOWN for 21 s.
+        late = ch.view(ch.DOWN, ['10.0.0.1', '10.0.0.3'],
+                       '2 of 3 nodes down: 10.0.0.1, 10.0.0.3', '10.0.0.2')
+        for other in (ch.view(ch.HEALTHY, me='10.0.0.1'),
+                      ch.view(ch.DEGRADED, ['10.0.0.2'],
+                              'not up and normal: 10.0.0.2 UJ', '10.0.0.1')):
+            third = dict(other, me='10.0.0.3')
+            health = ch.combine([('c-1', other), ('c-2', late),
+                                 ('c-3', third)], [])
+            self.assertEqual(ch.DEGRADED, health['status'])
+            self.assertEqual(['c-2'], health['out'])
+            self.assertIn('sees the cluster down, while c-1, c-3 answer '
+                          '(c-2)', health['reason'])
+        # One of them answering is enough: the other is silent.
+        health = ch.combine([('c-1', ch.view(ch.HEALTHY, me='10.0.0.1')),
+                             ('c-2', late)], ['c-3'], {'10.0.0.3': 'c-3'})
+        self.assertEqual(ch.DEGRADED, health['status'])
+        self.assertEqual(['c-2', 'c-3'], health['out'])
+
+    def test_down_when_the_members_held_out_do_not_say_otherwise(self):
+        late = ch.view(ch.DOWN, ['10.0.0.1', '10.0.0.3'],
+                       '2 of 3 nodes down: 10.0.0.1, 10.0.0.3', '10.0.0.2')
+        # They do not answer.
+        health = ch.combine([('c-2', late)], ['c-1', 'c-3'],
+                            {'10.0.0.1': 'c-1', '10.0.0.3': 'c-3'})
+        self.assertEqual(ch.DOWN, health['status'])
+        # Every node cut off from the others sees the others down.
+        views = [('c-%d' % i, ch.view(
+            ch.DOWN, ['10.0.0.%d' % j for j in (1, 2, 3) if j != i],
+            'nodes down', '10.0.0.%d' % i)) for i in (1, 2, 3)]
+        self.assertEqual(ch.DOWN, ch.combine(views, [])['status'])
+        # A member answering that a DOWN view does not hold out says
+        # nothing of it (a shard without a primary, the other shard
+        # healthy).
+        health = ch.combine([
+            ('rs1-1', ch.view(ch.DOWN, ['a:27017'],
+                              'replica set rs1 has no primary', 'b:27017')),
+            ('rs2-1', ch.view(ch.HEALTHY, me='c:27017'))], ['rs1-2'],
+            {'a:27017': 'rs1-2'})
+        self.assertEqual(ch.DOWN, health['status'])
