@@ -1,0 +1,10 @@
+---
+fixes:
+  - |
+    A cluster's health names the member that takes the writes within
+    seconds of a failover even while a member keeps the look waiting (one
+    powered off whose heartbeat is not stale yet): once the others have
+    answered, they are asked again every few seconds and what they say is
+    recorded with that member not answering, until it answers or its call
+    times out. The writer and the writer changes were recorded only after
+    the call timed out, up to ``cluster_health_timeout`` (30 s) late.

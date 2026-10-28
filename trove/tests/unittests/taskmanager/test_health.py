@@ -192,11 +192,13 @@ class TestHealthWatch(HealthTestBase):
         status, detail, _since = self._recorded(cluster.id)
         self.assertEqual(['c-member-3'], detail['out'])
 
-    def _slow_look(self, slow):
+    def _slow_look(self, slow, records=None):
         """A look at a cluster whose primary c-member-3 is gone: the others
         first answer DOWN, then (asked again) c-member-1 takes the writes;
         c-member-3 keeps the look waiting, then answers or fails as
-        ``slow`` gives. Returns the record and who was asked.
+        ``slow`` gives. Returns the record and who was asked; ``records``
+        gets every record written, with whether c-member-3's call had
+        ended then.
         """
         cluster, members = self._cluster()
         down = ch.view(ch.DOWN, ['10.0.0.3'],
@@ -207,12 +209,16 @@ class TestHealthWatch(HealthTestBase):
                                dict(down, me='10.0.0.2')],
                 'c-member-3': [slow]}
         asked = []
+        ended = []
 
         def answer(name):
             asked.append(name)
-            given = told[name].pop(0)
+            # The last answer, once the others are given, again.
+            given = told[name].pop(0) if len(told[name]) > 1 \
+                else told[name][0]
             if name == 'c-member-3':
                 time.sleep(0.3)
+                ended.append(True)
             if isinstance(given, Exception):
                 raise given
             return given
@@ -223,7 +229,16 @@ class TestHealthWatch(HealthTestBase):
                 lambda timeout: answer(member.name))
             return client
 
-        with mock.patch.object(health, 'ANSWER_MAX_AGE', 0.1, create=True):
+        real_record = health.record
+
+        def record(cluster_id, view):
+            if records is not None:
+                records.append((bool(ended), view['status'],
+                                view.get('writers')))
+            return real_record(cluster_id, view)
+
+        with mock.patch.object(health, 'ANSWER_MAX_AGE', 0.1, create=True), \
+                mock.patch.object(health, 'record', side_effect=record):
             health.HealthWatch('redis', guest_factory=guest).check_now(
                 None, cluster, 'test')
         return self._recorded(cluster.id), sorted(asked)
@@ -238,16 +253,32 @@ class TestHealthWatch(HealthTestBase):
             exception.GuestTimeout())
         self.assertEqual(ch.DEGRADED, status)
         self.assertEqual(['10.0.0.3', 'c-member-3'], detail['out'])
-        self.assertEqual(['c-member-1', 'c-member-1', 'c-member-2',
-                          'c-member-2', 'c-member-3'], asked)
+        # Asked again while it kept the look waiting, and at the end.
+        self.assertEqual(1, asked.count('c-member-3'))
+        self.assertGreaterEqual(asked.count('c-member-1'), 3)
+        self.assertEqual(asked.count('c-member-1'),
+                         asked.count('c-member-2'))
+
+    def test_the_writer_known_while_a_member_keeps_the_look_waiting(self):
+        # mc-valkey-s (production, Incus, 2026-10-28): the replica the
+        # sentinels promoted took the writes 4 s after the event, Octavia
+        # had it as the primary then; the record named it 26 s later, once
+        # the call to the powered off member had timed out.
+        records = []
+        (status, detail, _since), _asked = self._slow_look(
+            exception.GuestTimeout(), records)
+        before = [r for r in records if not r[0]]
+        self.assertTrue(before, records)
+        self.assertEqual((False, ch.DEGRADED, ['c-member-1']), before[0])
+        self.assertEqual(['c-member-1'], detail['writers'])
 
     def test_asked_again_when_a_member_was_slow_to_answer(self):
         # A primary hard rebooted (production, 2026-10-26): it answers,
         # late; the others are asked again, not it.
         (status, detail, _since), asked = self._slow_look(None)
         self.assertEqual(ch.DEGRADED, status)
-        self.assertEqual(['c-member-1', 'c-member-1', 'c-member-2',
-                          'c-member-2', 'c-member-3'], asked)
+        self.assertEqual(1, asked.count('c-member-3'))
+        self.assertGreaterEqual(asked.count('c-member-1'), 3)
 
     def test_asked_once_when_every_member_answers(self):
         cluster, members = self._cluster()

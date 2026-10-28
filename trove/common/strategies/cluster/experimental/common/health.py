@@ -334,7 +334,18 @@ class HealthWatch(object):
         stale = stale_members(m.id for m in members)
         asked = [m for m in members if m.id not in stale]
         silent = [m.name for m in members if m.id in stale]
-        told = self._ask(context, asked)
+
+        def interim(told, slow):
+            # A member keeps the look waiting (powered off, its heartbeat
+            # not stale yet): the others are asked again now, and what
+            # they say is recorded with it not answering, so that a
+            # replica promoted meanwhile is known as the writer within
+            # seconds, not once the slow member's call times out.
+            fresh = self._ask(context, [t[0] for t in told])
+            record(cluster_id, self._combine(
+                cluster_id, fresh, silent + [m.name for m in slow]))
+
+        told = self._ask(context, asked, interim)
         # The look waited for a member slow to answer or that did not (one
         # just restarted, or powered off, its heartbeat not stale yet):
         # what the others said is that old, a Redis replica the sentinels
@@ -346,6 +357,18 @@ class HealthWatch(object):
         if again:
             told = [t for t in told if t[0].id not in again] + self._ask(
                 context, [m for m in asked if m.id in again])
+        health = self._combine(cluster_id, told, silent)
+        record(cluster_id, health)
+        if health['status'] == cluster_health.HEALTHY:
+            self.unhealthy.discard(cluster_id)
+        else:
+            self.unhealthy.add(cluster_id)
+
+    def _combine(self, cluster_id, told, silent):
+        """The health from the members' answers, those in ``silent`` and
+        those that failed to answer counted out.
+        """
+        silent = list(silent)
         answers = []
         for member, answer, failed, _at in told:
             if failed or (answer and answer.get('down')):
@@ -358,15 +381,15 @@ class HealthWatch(object):
                 # heartbeat tells.
                 answers.append((member.name,
                                 cluster_health.view(cluster_health.HEALTHY)))
-        health = cluster_health.combine(answers, silent,
-                                        known_members(cluster_id))
-        record(cluster_id, health)
-        if health['status'] == cluster_health.HEALTHY:
-            self.unhealthy.discard(cluster_id)
-        else:
-            self.unhealthy.add(cluster_id)
+        return cluster_health.combine(answers, silent,
+                                      known_members(cluster_id))
 
-    def _ask(self, context, members):
+    def _ask(self, context, members, interim=None):
+        """Every member's answer, in the members' order. While some keep
+        the others waiting for more than ANSWER_MAX_AGE, ``interim`` is
+        called with the answers so far and the members still asked, once
+        every ANSWER_MAX_AGE.
+        """
         def ask(member):
             try:
                 answer = self.guest_factory(
@@ -384,7 +407,23 @@ class HealthWatch(object):
         if len(members) < 2:
             return [ask(member) for member in members]
         with futures.ThreadPoolExecutor(max_workers=len(members)) as pool:
-            return list(pool.map(ask, members))
+            pending = {pool.submit(ask, member): member
+                       for member in members}
+            told = {}
+            while pending:
+                done, _rest = futures.wait(
+                    pending, timeout=ANSWER_MAX_AGE if told else None,
+                    return_when=futures.FIRST_COMPLETED)
+                if not done:
+                    if interim:
+                        interim([told[m.id] for m in members
+                                 if m.id in told],
+                                list(pending.values()))
+                    continue
+                for future in done:
+                    member = pending.pop(future)
+                    told[member.id] = future.result()
+            return [told[member.id] for member in members]
 
     def still_watching(self, cluster_id):
         return cluster_id in self.unhealthy
