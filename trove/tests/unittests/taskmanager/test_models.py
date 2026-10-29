@@ -1105,6 +1105,49 @@ class RebuildActionTest(trove_testtools.TestCase):
 
         unmount_volume.assert_called_once_with()
 
+    def _rebuild_server(self, cloudinit):
+        instance = Mock()
+        instance.datastore_version.manager = 'vertica'
+        instance.get_injected_files.return_value = {
+            '/etc/trove/conf.d/guest_info.conf': 'guest_info'}
+        instance.prepare_userdata.return_value = cloudinit
+        # The real ones: combining with no cloudinit failed every rebuild.
+        instance.prepare_cloud_config = (
+            lambda files: BaseInstance.prepare_cloud_config(instance, files))
+        instance.combine_cloudinit_userdata = (
+            BaseInstance.combine_cloudinit_userdata)
+        action = taskmanager_models.RebuildAction(instance, 'image-id')
+        with patch.object(action, '_unmount_volume'):
+            action._initiate_nova_action()
+        instance.prepare_userdata.assert_called_once_with('vertica')
+        return instance.server.rebuild.call_args
+
+    def test_a_rebuild_without_a_cloudinit_has_the_injected_files(self):
+        call = self._rebuild_server(None)
+        self.assertEqual('image-id', call[0][0])
+        userdata = call[1]['userdata']
+        self.assertTrue(userdata.startswith('#cloud-config'))
+        self.assertIn('/etc/trove/conf.d/guest_info.conf', userdata)
+
+    def test_a_rebuild_with_a_cloudinit_combines_them(self):
+        call = self._rebuild_server('#cloud-config\nruncmd:\n- echo hi\n')
+        userdata = call[1]['userdata']
+        self.assertIn('/etc/trove/conf.d/guest_info.conf', userdata)
+        self.assertIn('echo hi', userdata)
+
+    def test_the_guest_is_told_the_properties_on_a_rebuild(self):
+        instance = Mock()
+        instance.configuration = None
+        instance.slaves = []
+        instance.slave_of_id = None
+        instance.db_info.get_properties.return_value = {'sync_writes': True}
+        action = taskmanager_models.RebuildAction(instance, 'image-id')
+        with patch.object(action, '_assert_guest_is_ok'), \
+                patch.object(action, 'wait_for_healthy'):
+            action._assert_processes_are_ok()
+        self.assertEqual({'sync_writes': True},
+                         instance.guest.rebuild.call_args.kwargs['properties'])
+
 
 class BuiltInstanceTasksTest(trove_testtools.TestCase):
 

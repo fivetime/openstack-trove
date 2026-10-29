@@ -795,7 +795,8 @@ class API(object):
         return self._call("module_remove", self.agent_high_timeout,
                           version=version, module=module)
 
-    def rebuild(self, ds_version, config_contents=None, config_overrides=None):
+    def rebuild(self, ds_version, config_contents=None, config_overrides=None,
+                properties=None):
         """Make an asynchronous call to rebuild the database service."""
         LOG.debug("Sending the call to rebuild database service in the guest.")
         version = self.API_BASE_VERSION
@@ -806,9 +807,14 @@ class API(object):
         # didn't create a queue on time.
         self._create_guest_queue()
 
-        self._cast("rebuild", version=version,
-                   ds_version=ds_version, config_contents=config_contents,
-                   config_overrides=config_overrides)
+        rebuild_args = dict(ds_version=ds_version,
+                            config_contents=config_contents,
+                            config_overrides=config_overrides)
+        # As prepare: only when there are some, for the guests of datastores
+        # that take none.
+        if properties:
+            rebuild_args['properties'] = properties
+        self._cast("rebuild", version=version, **rebuild_args)
 
     def pre_create_backup(self, **kwargs):
         version = "1.2"

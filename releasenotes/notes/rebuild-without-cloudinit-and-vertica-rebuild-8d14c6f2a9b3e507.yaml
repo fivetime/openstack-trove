@@ -1,0 +1,17 @@
+---
+fixes:
+  - |
+    An instance rebuild failed for every datastore without a
+    ``<manager>.cloudinit`` under ``cloudinit_location``: refreshing the
+    userdata combined the injected files with no userdata and raised
+    ``'NoneType' object has no attribute 'read'`` after the data volume
+    was unmounted, and the database came up on the empty mount point. The
+    rebuild now takes the injected files alone then, as an instance
+    creation does.
+  - |
+    A Vertica single instance can be rebuilt. The guest brings the
+    database of the data volume back on the new root disk as after a
+    restore: the admin's files and certificates are made again and the
+    admin gets a new password; the sync writes the instance was created
+    with are told to the guest again. A member of a Vertica cluster is not
+    rebuilt (400).

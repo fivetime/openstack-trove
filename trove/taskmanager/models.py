@@ -2500,11 +2500,17 @@ class RebuildAction(ResizeActionBase, VolumeUnmountActionBase):
                 "Rebuilding Nova server for instance %s, refresh userdata",
                 self.instance.id)
 
+            # As _create_server: without a <manager>.cloudinit, the injected
+            # files alone (combining with None failed every rebuild where
+            # cloudinit_location has none).
             userdata = self.instance.prepare_userdata(
-                self.instance.datastore.name)
-            userdata = self.instance.combine_cloudinit_userdata(
-                self.instance.prepare_cloud_config(files),
-                userdata)
+                self.instance.datastore_version.manager)
+            if not userdata:
+                userdata = self.instance.prepare_cloud_config(files)
+            elif files:
+                userdata = self.instance.combine_cloudinit_userdata(
+                    self.instance.prepare_cloud_config(files),
+                    userdata)
 
             self.instance.server.rebuild(
                 self.image_id,
@@ -2546,9 +2552,13 @@ class RebuildAction(ResizeActionBase, VolumeUnmountActionBase):
             overrides = user_config.get_configuration_overrides()
 
         LOG.info(f"Sending rebuild request to the instance {self.instance.id}")
+        # What the guest was told when it was prepared: a new root disk has
+        # lost what the old guest kept of it.
         self.instance.guest.rebuild(
             self.instance.datastore_version.version,
-            config_contents=config_contents, config_overrides=overrides)
+            config_contents=config_contents, config_overrides=overrides,
+            properties=instance_properties.guest_properties(
+                self.instance.db_info.get_properties()))
 
         LOG.info(f"Waiting for instance {self.instance.id} healthy after "
                  f"rebuild")

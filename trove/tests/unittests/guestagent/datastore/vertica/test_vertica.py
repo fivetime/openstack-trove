@@ -1459,6 +1459,44 @@ class TestVerticaManager(VerticaGuestTestCase):
                           'apply_sync_writes'],
                          [call[0] for call in order.mock_calls])
 
+    def _rebuild(self, manager, **kwargs):
+        order = mock.Mock()
+        for name in ('plan_sync_writes', 'secure', 'start_db',
+                     'reset_admin_password', 'apply_settings',
+                     'apply_sync_writes'):
+            order.attach_mock(getattr(manager.app, name), name)
+        order.attach_mock(manager.status.end_install, 'end_install')
+        manager.rebuild(None, '25.4.0-0-minimal', config_contents='conf',
+                        config_overrides={'a': 1}, **kwargs)
+        return [call[0] for call in order.mock_calls]
+
+    def test_a_rebuild_brings_the_database_of_the_volume_back(self):
+        # As after a restore: the admin, its files and certificates made
+        # again on the new root disk, a new password, the settings.
+        manager = self._manager()
+        self.assertEqual(['plan_sync_writes', 'secure', 'start_db',
+                          'reset_admin_password', 'apply_settings',
+                          'apply_sync_writes', 'end_install'],
+                         self._rebuild(manager,
+                                       properties={'sync_writes': True}))
+        manager.app.plan_sync_writes.assert_called_once_with()
+        manager.app.start_db.assert_called_once_with(
+            ds_version='25.4.0-0-minimal')
+        manager.app.create_database.assert_not_called()
+        manager.status.end_install.assert_called_once_with(
+            error_occurred=False)
+
+    def test_a_rebuild_without_sync_writes_asks_for_none(self):
+        manager = self._manager()
+        self.assertNotIn('plan_sync_writes', self._rebuild(manager))
+
+    def test_a_rebuild_that_fails_ends_the_install_with_the_error(self):
+        manager = self._manager()
+        manager.app.start_db.side_effect = exception.TroveError('no')
+        self.assertRaises(exception.TroveError, self._rebuild, manager)
+        manager.status.end_install.assert_called_once_with(
+            error_occurred=True)
+
     def test_sync_writes_are_kept_periodically(self):
         manager = self._manager()
         self.assertIn('keep_sync_writes',

@@ -665,6 +665,20 @@ class TestInstanceResizeVolume(trove_testtools.TestCase):
                                'must not be smaller',
                                self.instance.resize_volume, 1)
 
+    @patch.object(task_api.API, 'get_client', Mock(return_value=Mock()))
+    @patch.object(task_api.API, 'rebuild')
+    def test_a_member_of_a_vertica_cluster_is_not_rebuilt(self, rebuild):
+        self.instance.db_info.cluster_id = 'cluster-1'
+        with patch.object(type(self.instance), 'datastore_version',
+                          new_callable=PropertyMock) as version:
+            version.return_value.manager = 'vertica'
+            self.assertRaisesRegex(exception.BadRequest,
+                                   'Vertica cluster cannot be rebuilt',
+                                   self.instance.rebuild, 'image-id')
+            version.return_value.manager = 'mysql'
+            self.instance.rebuild('image-id')
+        rebuild.assert_called_once_with(self.instance.id, 'image-id')
+
     def _load(self):
         with patch.object(models, 'load_guest_info'), \
                 patch('trove.common.clients.create_neutron_client'), \

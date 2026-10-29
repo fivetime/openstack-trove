@@ -80,6 +80,21 @@ class GuestAPIPrepareTest(trove_testtools.TestCase):
             guest.prepare(768, None, [], [], properties=none)
             self.assertNotIn('properties', cast.call_args.kwargs)
 
+    @mock.patch.object(api.API, '_cast')
+    @mock.patch.object(api.API, '_create_guest_queue')
+    @mock.patch.object(api.API, 'get_client')
+    def test_a_rebuild_tells_the_properties_too(
+            self, get_client, create_guest_queue, cast):
+        guest = api.API(mock.Mock(), 'instance-id')
+
+        guest.rebuild('25.4', properties={'sync_writes': True})
+        self.assertEqual({'sync_writes': True},
+                         cast.call_args.kwargs['properties'])
+
+        for none in (None, {}):
+            guest.rebuild('25.4', properties=none)
+            self.assertNotIn('properties', cast.call_args.kwargs)
+
 
 class GuestAPIMessagePartitionTest(trove_testtools.TestCase):
     """A guest on a guest message partition is reached through its broker."""

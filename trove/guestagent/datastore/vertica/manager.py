@@ -110,6 +110,35 @@ class Manager(cluster_member.ClusterWatchMixin, manager.Manager):
         # Before the instance is ACTIVE: no commit of the user unsynced.
         self.app.apply_sync_writes()
 
+    def rebuild(self, context, ds_version, config_contents=None,
+                config_overrides=None, properties=None):
+        """Bring the database of the data volume back on the new root disk
+        of a rebuilt single instance. What the old guest kept outside the
+        volume (the admin's password, the start script, the certificates,
+        the sync writes asked for) is gone: as after a restore, it is made
+        again and the admin gets a new password.
+        """
+        LOG.info("Starting to restore database service")
+        self.status.begin_install()
+        try:
+            if (properties or {}).get('sync_writes'):
+                self.app.plan_sync_writes()
+            self.app.configuration_manager.reset_configuration(
+                config_contents)
+            self.app.update_overrides(config_overrides)
+            self.app.secure()
+            self.app.start_db(ds_version=ds_version)
+            self.app.reset_admin_password()
+            self.app.apply_settings()
+            self.app.apply_sync_writes()
+        except Exception as e:
+            LOG.error("Failed to restore database service after rebuild, "
+                      "error: %s", e)
+            self.prepare_error = True
+            raise
+        finally:
+            self.status.end_install(error_occurred=self.prepare_error)
+
     def restart(self, context):
         self.app.restart()
 

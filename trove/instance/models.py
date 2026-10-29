@@ -1983,6 +1983,12 @@ class Instance(BuiltInstance):
                                            datastore_version.id)
 
     def rebuild(self, image_id):
+        # The guest of a member does not bring back its place in the
+        # cluster (vertica_cluster.yaml, certificates, the other members).
+        if (self.db_info.cluster_id is not None and
+                self.datastore_version.manager == 'vertica'):
+            raise exception.BadRequest(_(
+                "A member of a Vertica cluster cannot be rebuilt."))
         self.update_db(task_status=InstanceTasks.BUILDING)
         task_api.API(self.context).rebuild(self.id, image_id)
 
