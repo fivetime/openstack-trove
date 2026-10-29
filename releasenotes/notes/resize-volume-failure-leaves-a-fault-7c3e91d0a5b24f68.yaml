@@ -1,0 +1,27 @@
+---
+fixes:
+  - |
+    A volume resize whose filesystem step fails now leaves a fault on the
+    instance (``fault`` in ``instance show``): ``Volume resize to <N>G
+    failed: the filesystem was not grown; resize to <N>G again to retry``.
+    Before, the failure set the status to ``FAILED`` only until the next
+    heartbeat set it back to ``HEALTHY``, so the instance looked resized
+    while its filesystem kept the old size. A volume that never finishes
+    extending leaves a fault too, and so does a guest that still sees its
+    volume at the old size (some hypervisors show a running guest the new
+    size only after its server is stopped and started): ``the instance
+    still sees the volume at its old size; resize to <N>G again once it
+    sees the new one``.
+  - |
+    After growing the filesystem, Trove checks it: the guest must see its
+    device at the new size, and the filesystem must fill most of that
+    device. It checked only the size Cinder reported before. A guest of
+    before does not report its device size; with one, only the
+    filesystem's size is checked.
+features:
+  - |
+    A volume can be resized to the size it already has. That only grows
+    the filesystem to the volume again, without touching Cinder: the
+    retry of a resize whose filesystem step failed. A resize that
+    succeeds clears the fault an earlier failed resize left. A smaller
+    size is still refused.

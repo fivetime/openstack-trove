@@ -31,6 +31,7 @@ from cinderclient import exceptions as cinder_exceptions
 from cinderclient.v3 import volumes as cinderclient_volumes
 from novaclient import exceptions as nova_exceptions
 from oslo_config import cfg
+from oslo_utils import units
 from swiftclient.client import ClientException
 from testtools.matchers import Equals
 from testtools.matchers import Is
@@ -926,6 +927,11 @@ class ResizeVolumeTest(trove_testtools.TestCase):
     def test_resize_volume_active_server_succeeds(self, *args):
         server = Mock(status=InstanceStatus.ACTIVE)
         self.instance.attach_mock(server, 'server')
+        self.instance.guest.resize_fs.return_value = {
+            'device_size': 2 * units.Gi}
+        self.instance.guest.get_volume_info.return_value = {
+            'total_blocks': 500000, 'block_size': 4096}
+        self.instance.fault = None
 
         self.action.execute()
 
@@ -939,6 +945,141 @@ class ResizeVolumeTest(trove_testtools.TestCase):
 
         self.assertRaises(TroveError, self.action.execute)
         self.instance.reset_mock()
+
+
+class ResizeVolumeFaultTest(trove_testtools.TestCase):
+    """A resize that does not reach the filesystem leaves a fault, and a
+    resize to the same size retries the filesystem step.
+    """
+
+    def setUp(self):
+        super(ResizeVolumeFaultTest, self).setUp()
+        self.patch_conf_property('online_volume_resize', True)
+        poll_until = patch.object(utils, 'poll_until')
+        poll_until.start()
+        self.addCleanup(poll_until.stop)
+        find_status = patch.object(taskmanager_models.InstanceServiceStatus,
+                                   'find_by')
+        self.find_status = find_status.start()
+        self.addCleanup(find_status.stop)
+        save_fault = patch.object(taskmanager_models.inst_models,
+                                  'save_instance_fault')
+        self.save_fault = save_fault.start()
+        self.addCleanup(save_fault.stop)
+
+        self.instance = Mock()
+        self.instance.id = 'instance-1'
+        self.instance.datastore_version.manager = 'mysql'
+        self.instance.server.status = InstanceStatus.ACTIVE
+        self.instance.fault = None
+        self.instance.volume_client.volumes.get.return_value = Mock(
+            size=2, status='in-use')
+        self.guest = self.instance.guest
+        self.guest.resize_fs.return_value = {'device_size': 2 * units.Gi}
+        # ext4 on 2 GiB keeps about 97% of it after its metadata.
+        self.guest.get_volume_info.return_value = {
+            'total_blocks': 508000, 'block_size': 4096}
+
+    def _resize(self, old_size=1, new_size=2):
+        action = taskmanager_models.ResizeVolumeAction(
+            self.instance, old_size, new_size)
+        action.execute()
+
+    def _fault_message(self):
+        self.assertEqual(1, self.save_fault.call_count)
+        instance_id, message, _details = self.save_fault.call_args[0]
+        self.assertEqual('instance-1', instance_id)
+        return message
+
+    def test_a_filesystem_that_fails_to_grow_leaves_a_fault(self):
+        self.guest.resize_fs.side_effect = GuestError('resize2fs failed')
+
+        self.assertRaises(GuestError, self._resize)
+
+        self.assertEqual(
+            'Volume resize to 2G failed: the filesystem was not grown; '
+            'resize to 2G again to retry', self._fault_message())
+        self.find_status.return_value.set_status.assert_called_once_with(
+            ServiceStatuses.FAILED)
+        self.instance.reset_task_status.assert_called_once_with()
+
+    def test_a_device_the_guest_still_sees_small_leaves_a_fault(self):
+        self.guest.resize_fs.return_value = {'device_size': units.Gi}
+
+        self.assertRaises(taskmanager_models.DeviceNotGrown, self._resize)
+
+        self.assertEqual(
+            'Volume resize to 2G failed: the instance still sees the volume '
+            'at its old size; resize to 2G again once it sees the new one',
+            self._fault_message())
+
+    def test_a_filesystem_smaller_than_its_device_leaves_a_fault(self):
+        # The device grew but the filesystem stayed at 1 GiB.
+        self.guest.get_volume_info.return_value = {
+            'total_blocks': 254000, 'block_size': 4096}
+
+        self.assertRaises(TroveError, self._resize)
+
+        self.assertIn('the filesystem was not grown', self._fault_message())
+
+    def test_a_guest_that_does_not_answer_the_device_size(self):
+        self.guest.resize_fs.return_value = None
+        self.guest.get_volume_info.return_value = {
+            'total_blocks': 254000, 'block_size': 4096}
+
+        self.assertRaises(TroveError, self._resize)
+
+        self.assertIn('the filesystem was not grown', self._fault_message())
+
+    def test_a_volume_that_never_finished_extending_leaves_a_fault(self):
+        utils.poll_until.side_effect = PollTimeOut
+        self.instance.volume_client.volumes.get.return_value = Mock(
+            size=1, status='extending')
+
+        self.assertRaises(PollTimeOut, self._resize)
+
+        self.assertEqual(
+            'Volume resize to 2G failed: the volume did not finish '
+            'extending', self._fault_message())
+        self.guest.resize_fs.assert_not_called()
+
+    def test_a_resize_that_succeeds_clears_its_own_fault(self):
+        fault = Mock(message='Volume resize to 2G failed: the filesystem '
+                             'was not grown; resize to 2G again to retry')
+        self.instance.fault = fault
+
+        self._resize()
+
+        fault.delete.assert_called_once_with()
+        self.save_fault.assert_not_called()
+
+    def test_a_resize_that_succeeds_keeps_another_fault(self):
+        fault = Mock(message='Backup failed')
+        self.instance.fault = fault
+
+        self._resize()
+
+        fault.delete.assert_not_called()
+
+    def test_the_same_size_only_grows_the_filesystem(self):
+        self._resize(old_size=2, new_size=2)
+
+        self.instance.volume_client.volumes.extend.assert_not_called()
+        self.guest.resize_fs.assert_called_once_with(
+            device_path=mock.ANY, mount_point=mock.ANY, online=True)
+        self.save_fault.assert_not_called()
+
+    def test_the_same_size_offline_does_not_detach_the_volume(self):
+        self.patch_conf_property('online_volume_resize', False)
+
+        self._resize(old_size=2, new_size=2)
+
+        self.instance.nova_client.volumes.delete_server_volume.\
+            assert_not_called()
+        self.instance.volume_client.volumes.extend.assert_not_called()
+        self.guest.resize_fs.assert_called_once_with(
+            device_path=mock.ANY, mount_point=mock.ANY, online=False)
+        self.instance.restart.assert_called_once_with()
 
 
 class RebuildActionTest(trove_testtools.TestCase):

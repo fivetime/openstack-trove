@@ -1668,9 +1668,11 @@ class Instance(BuiltInstance):
         if not self.volume_size:
             raise exception.BadRequest(_("Instance %s has no volume.")
                                        % self.id)
-        if new_size_l <= self.volume_size:
-            raise exception.BadRequest(_("The new volume 'size' must be "
-                                         "larger than the current volume "
+        # The current size is allowed: it grows the filesystem to the volume
+        # again, the retry when that step of an earlier resize failed.
+        if new_size_l < self.volume_size:
+            raise exception.BadRequest(_("The new volume 'size' must not be "
+                                         "smaller than the current volume "
                                          "size of '%s'.") % self.volume_size)
         validate_volume_size(new_size_l)
         self.validate_can_perform_action()

@@ -436,7 +436,9 @@ class Manager(periodic_task.PeriodicTasks, SSLManager):
                   online=False):
         LOG.info(f"Resizing the filesystem at {mount_point}, online: {online}")
         device = volume.VolumeDevice(device_path)
-        device.resize_fs(mount_point, online=online)
+        # The device size lets the taskmanager tell a device that never grew
+        # from a filesystem that did.
+        return {'device_size': device.resize_fs(mount_point, online=online)}
 
     def get_volume_info(self):
         # Method for providing additional volume info, for example

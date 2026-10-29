@@ -258,3 +258,29 @@ class FstabTest(testtools.TestCase):
             'mount', '-o', 'remount,defaults,noatime,sync',
             '/var/lib/vertica', run_as_root=True, root_helper='sudo')
         self.assertEqual(content, self._read())
+
+
+class VolumeDeviceResizeTest(testtools.TestCase):
+    """What resize_fs tells the taskmanager about the device."""
+
+    @mock.patch.object(volume.utils, "execute")
+    def test_resize_fs_answers_the_size_the_guest_sees(self, mock_execute):
+        def execute(*cmd, **kwargs):
+            if cmd[:2] == ("blockdev", "--getsize64"):
+                return ("2147483648\n", "")
+            return ("", "")
+        mock_execute.side_effect = execute
+
+        size = volume.VolumeDevice("/dev/vdb").resize_fs(
+            "/var/lib/mysql", online=True)
+
+        self.assertEqual(2147483648, size)
+        self.assertIn(mock.call("resize2fs", "/dev/vdb", run_as_root=True,
+                                root_helper="sudo"),
+                      mock_execute.call_args_list)
+
+    @mock.patch.object(volume.utils, "execute")
+    def test_a_size_it_cannot_read_is_none(self, mock_execute):
+        mock_execute.side_effect = processutils.ProcessExecutionError()
+
+        self.assertIsNone(volume.VolumeDevice("/dev/vdb").get_size())

@@ -358,6 +358,20 @@ class VolumeDevice(object):
             log_fmt = "Error resizing the filesystem with device '%s'."
             exc_fmt = _("Error resizing the filesystem with device '%s'.")
             log_and_raise(log_fmt, exc_fmt, self.device_path)
+        return self.get_size()
+
+    def get_size(self):
+        """The size of the device in bytes, as this guest sees it, or None
+        when it cannot tell.
+        """
+        try:
+            out, _err = utils.execute("blockdev", "--getsize64",
+                                      self.device_path, run_as_root=True,
+                                      root_helper="sudo")
+            return int(out.strip())
+        except (exception.ProcessExecutionError, ValueError):
+            LOG.warning("Could not read the size of '%s'.", self.device_path)
+            return None
 
     def unmount(self, mount_point):
         if operating_system.is_mount(mount_point):

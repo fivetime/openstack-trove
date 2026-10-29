@@ -594,6 +594,76 @@ class TestInstanceUpgrade(trove_testtools.TestCase):
             instance_model.delete()
 
 
+class TestInstanceResizeVolume(trove_testtools.TestCase):
+    """The API accepts the current size, the retry of a resize whose
+    filesystem step failed, and nothing smaller.
+    """
+
+    def setUp(self):
+        super(TestInstanceResizeVolume, self).setUp()
+        self.context = trove_testtools.TroveTestContext(self, is_admin=True)
+        self.datastore = datastore_models.DBDatastore.create(
+            id=str(uuid.uuid4()),
+            name='test' + str(uuid.uuid4()),
+            default_version_id=str(uuid.uuid4()))
+        self.addCleanup(self.datastore.delete)
+        self.datastore_version = datastore_models.DBDatastoreVersion.create(
+            id=self.datastore.default_version_id,
+            name='name' + str(uuid.uuid4()),
+            image_id='image',
+            packages=str(uuid.uuid4()),
+            datastore_id=self.datastore.id,
+            manager='mysql',
+            registry_ext='registry_ext',
+            repl_strategy='repl_strategy',
+            active=1)
+        self.addCleanup(self.datastore_version.delete)
+        self.safe_nova_client = clients.create_nova_client
+        clients.create_nova_client = nova.fake_create_nova_client
+        self.addCleanup(setattr, clients, 'create_nova_client',
+                        self.safe_nova_client)
+
+        db_info = DBInstance(
+            InstanceTasks.NONE,
+            id=str(uuid.uuid4()),
+            name='TestResizeVolume',
+            tenant_id=self.context.project_id,
+            volume_size=2,
+            datastore_version_id=self.datastore_version.id)
+        db_info.set_task_status(InstanceTasks.NONE)
+        db_info.save()
+        self.addCleanup(db_info.delete)
+        status = InstanceServiceStatus(ServiceStatuses.HEALTHY,
+                                       id=str(uuid.uuid4()),
+                                       instance_id=db_info.id)
+        status.save()
+        self.addCleanup(status.delete)
+        # Loading asks the guest for its filesystem stats and Neutron for
+        # the addresses; there is neither.
+        with patch.object(models, 'load_guest_info'), \
+                patch('trove.common.clients.create_neutron_client'), \
+                patch('trove.tests.fakes.nova.LOG'):
+            self.instance = models.load_instance(models.Instance,
+                                                 self.context, db_info.id)
+
+    @patch.object(task_api.API, 'get_client', Mock(return_value=Mock()))
+    @patch.object(task_api.API, 'resize_volume')
+    @patch.object(models.Instance, 'validate_can_perform_action')
+    def test_the_current_size_is_accepted(self, validate, resize_volume):
+        with patch.object(models, 'run_with_quotas',
+                          side_effect=lambda tenant, deltas, f, *args:
+                          f(*args)) as run_with_quotas:
+            self.instance.resize_volume(2)
+
+        resize_volume.assert_called_once_with(2, self.instance.id)
+        self.assertEqual({'volumes': 0}, run_with_quotas.call_args[0][1])
+
+    def test_a_smaller_size_is_refused(self):
+        self.assertRaisesRegex(exception.BadRequest,
+                               'must not be smaller',
+                               self.instance.resize_volume, 1)
+
+
 class TestReplication(trove_testtools.TestCase):
 
     def setUp(self):

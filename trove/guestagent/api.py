@@ -588,8 +588,9 @@ class API(object):
             resize_args.pop('online')
             version = '1.0'
 
-        self._call("resize_fs",
-                   self.agent_high_timeout, version=version, **resize_args)
+        # Guests from before the device size answer None.
+        return self._call("resize_fs", self.agent_high_timeout,
+                          version=version, **resize_args)
 
     def update_overrides(self, overrides, remove=False):
         """Update the overrides."""

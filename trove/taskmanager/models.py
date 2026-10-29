@@ -14,11 +14,13 @@
 
 import copy
 import semantic_version
+import sys
 import time
 import traceback
 
 from oslo_log import log as logging
 from oslo_utils import timeutils as otimeutils
+from oslo_utils import units
 
 from trove.backup.models import Backup
 from trove.backup.models import DBBackup
@@ -1878,13 +1880,25 @@ class VolumeUnmountActionBase(object):
                                       'id': self.instance.id})
 
 
+class DeviceNotGrown(exception.TroveError):
+    """The guest still sees its volume at the size it had."""
+
+
 class ResizeVolumeAction(VolumeUnmountActionBase):
     """Performs volume resize action."""
+
+    # Every fault this action leaves starts with this, so a later resize
+    # that succeeds clears its own fault and no other.
+    FAULT_PREFIX = 'Volume resize'
+    # A filesystem that fills its device still loses some of it to its own
+    # metadata (journal, inode tables), a few percent at most.
+    FS_MIN_FRACTION = 0.9
 
     def __init__(self, instance, old_size, new_size):
         self.instance = instance
         self.old_size = int(old_size)
         self.new_size = int(new_size)
+        self.device_size = None
 
     def _fail(self, orig_func):
         LOG.error("%(func)s encountered an error when "
@@ -1895,6 +1909,30 @@ class ResizeVolumeAction(VolumeUnmountActionBase):
         service = InstanceServiceStatus.find_by(instance_id=self.instance.id)
         service.set_status(srvstatus.ServiceStatuses.FAILED)
         service.save()
+        # The next heartbeat sets the status back from the database's
+        # health, so the fault is what keeps the failure visible.
+        if orig_func.__name__ == '_verify_extend':
+            message = (f"{self.FAULT_PREFIX} to {self.new_size}G failed: "
+                       f"the volume did not finish extending")
+        elif isinstance(sys.exc_info()[1], DeviceNotGrown):
+            # Some hypervisors show a running guest the new size only after
+            # its server is stopped and started; a retry before is no use.
+            message = (f"{self.FAULT_PREFIX} to {self.new_size}G failed: "
+                       f"the instance still sees the volume at its old "
+                       f"size; resize to {self.new_size}G again once it "
+                       f"sees the new one")
+        else:
+            message = (f"{self.FAULT_PREFIX} to {self.new_size}G failed: "
+                       f"the filesystem was not grown; resize to "
+                       f"{self.new_size}G again to retry")
+        inst_models.save_instance_fault(self.instance.id, message,
+                                        traceback.format_exc())
+
+    def _clear_fault(self):
+        # Deleted outright: a soft-deleted fault is still found and shown.
+        fault = self.instance.fault
+        if fault and fault.message.startswith(self.FAULT_PREFIX):
+            fault.delete()
 
     def _recover_restart(self, orig_func):
         LOG.exception("%(func)s encountered an error when attempting to "
@@ -1977,11 +2015,33 @@ class ResizeVolumeAction(VolumeUnmountActionBase):
                  f"online: {online}")
         mount_point = self.get_mount_point()
         device_path = self.get_device_path()
-        self.instance.guest.resize_fs(device_path=device_path,
-                                      mount_point=mount_point,
-                                      online=online)
+        answer = self.instance.guest.resize_fs(device_path=device_path,
+                                               mount_point=mount_point,
+                                               online=online)
+        if isinstance(answer, dict):
+            self.device_size = answer.get('device_size')
         LOG.debug(f"Successfully resized volume {self.instance.volume_id} "
                   f"filesystem for instance {self.instance.id}")
+
+    @try_recover
+    def _verify_fs(self):
+        """Fail unless the guest sees the device at its new size and the
+        filesystem fills it; Cinder's size alone says neither.
+        """
+        expected = self.new_size * units.Gi
+        if self.device_size is not None and self.device_size < expected:
+            raise DeviceNotGrown(
+                f"The instance sees a device of {self.device_size} bytes, "
+                f"the volume is {self.new_size}G")
+        stats = self.instance.guest.get_volume_info()
+        fs_size = stats['total_blocks'] * stats['block_size']
+        device_size = self.device_size or expected
+        LOG.info(f"Instance {self.instance.id} has a filesystem of "
+                 f"{fs_size} bytes on a device of {device_size} bytes")
+        if fs_size < device_size * self.FS_MIN_FRACTION:
+            raise exception.TroveError(
+                f"The filesystem is {fs_size} bytes on a device of "
+                f"{device_size} bytes")
 
     @try_recover
     def _mount_volume(self):
@@ -2054,17 +2114,32 @@ class ResizeVolumeAction(VolumeUnmountActionBase):
             raise
 
     def _resize_active_volume(self):
+        # A resize to the size the volume already has only grows the
+        # filesystem: the retry after a resize whose filesystem step failed.
+        extend = self.new_size > self.old_size
         if CONF.online_volume_resize:
-            try:
-                self._extend()
-            except Exception as e:
-                LOG.error(f'Failed to extend volume, error: {str(e)}')
+            if extend:
+                try:
+                    self._extend()
+                except Exception as e:
+                    LOG.error(f'Failed to extend volume, error: {str(e)}')
 
-            self._verify_extend()
+                self._verify_extend()
             self._resize_fs(recover_func=self._fail, online=True)
+            self._verify_fs(recover_func=self._fail)
+            self._clear_fault()
             return
 
         self._stop_db()
+        if not extend:
+            self._unmount_volume(recover_func=self._recover_restart)
+            self._resize_fs(recover_func=self._fail, online=False)
+            self._mount_volume(recover_func=self._fail)
+            self.instance.restart()
+            self._verify_fs(recover_func=self._fail)
+            self._clear_fault()
+            return
+
         self._unmount_volume(recover_func=self._recover_restart)
         self._detach_volume(recover_func=self._recover_mount_restart)
         self._extend(recover_func=self._recover_full)
@@ -2074,6 +2149,8 @@ class ResizeVolumeAction(VolumeUnmountActionBase):
         self._resize_fs(recover_func=self._fail, online=False)
         self._mount_volume(recover_func=self._fail)
         self.instance.restart()
+        self._verify_fs(recover_func=self._fail)
+        self._clear_fault()
 
     def execute(self):
         LOG.debug("Resizing instance %(id)s volume for server "
