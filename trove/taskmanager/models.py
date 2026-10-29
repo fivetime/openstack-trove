@@ -1940,10 +1940,9 @@ class ResizeVolumeAction(VolumeUnmountActionBase):
         self.fault_message = message
 
     def _clear_fault(self):
-        # Deleted outright: a soft-deleted fault is still found and shown.
         fault = self.instance.fault
         if fault and fault.message.startswith(self.FAULT_PREFIX):
-            fault.delete()
+            self.instance.set_instance_fault_deleted()
 
     def _recover_restart(self, orig_func):
         LOG.exception("%(func)s encountered an error when attempting to "

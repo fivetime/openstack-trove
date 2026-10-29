@@ -24,6 +24,7 @@ from trove.common import clients
 from trove.common import constants
 from trove.common import exception
 from trove.common import neutron
+from trove.common import utils
 from trove.datastore import models as datastore_models
 from trove.instance import models
 from trove.instance.models import DBInstance
@@ -37,6 +38,7 @@ from trove.instance.models import SimpleInstance
 from trove.instance.service_status import ServiceStatuses
 from trove.instance.tasks import InstanceTasks
 from trove.taskmanager import api as task_api
+from trove.taskmanager import models as taskmanager_models
 from trove.tests.fakes import nova
 from trove.tests.unittests import trove_testtools
 
@@ -662,6 +664,42 @@ class TestInstanceResizeVolume(trove_testtools.TestCase):
         self.assertRaisesRegex(exception.BadRequest,
                                'must not be smaller',
                                self.instance.resize_volume, 1)
+
+    def _load(self):
+        with patch.object(models, 'load_guest_info'), \
+                patch('trove.common.clients.create_neutron_client'), \
+                patch('trove.tests.fakes.nova.LOG'):
+            return models.load_instance(models.Instance, self.context,
+                                        self.instance.id)
+
+    def test_a_resize_that_succeeds_hides_the_fault_of_one_that_failed(self):
+        self.addCleanup(self._delete_fault)
+        failed = ('Volume resize to 2G failed: the filesystem was not '
+                  'grown; resize to 2G again to retry')
+        models.save_instance_fault(self.instance.id, failed, 'details')
+        instance = self._load()
+        # Saved faults are wrapped for display.
+        self.assertEqual(utils.format_output(failed), instance.fault.message)
+
+        taskmanager_models.ResizeVolumeAction(instance, 2, 2)._clear_fault()
+
+        self.assertIsNone(self._load().fault)
+
+    def test_a_fault_after_a_cleared_one_is_shown(self):
+        self.addCleanup(self._delete_fault)
+        models.save_instance_fault(self.instance.id,
+                                   'Volume resize to 2G failed: x', 'd')
+        self._load().set_instance_fault_deleted()
+
+        models.save_instance_fault(self.instance.id, 'Backup failed', 'd')
+
+        self.assertEqual('Backup failed', self._load().fault.message)
+
+    def _delete_fault(self):
+        try:
+            DBInstanceFault.find_by(instance_id=self.instance.id).delete()
+        except exception.ModelNotFoundError:
+            pass
 
 
 class TestReplication(trove_testtools.TestCase):

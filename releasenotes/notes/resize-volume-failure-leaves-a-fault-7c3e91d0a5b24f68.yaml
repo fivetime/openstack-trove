@@ -28,3 +28,7 @@ features:
     retry of a resize whose filesystem step failed. A resize that
     succeeds clears the fault an earlier failed resize left. A smaller
     size is still refused.
+  - |
+    A cleared instance fault is no longer shown. Faults are soft-deleted,
+    and ``instance show`` found the row whether it was deleted or not; a
+    fault saved later over a cleared one is shown again.

@@ -1055,7 +1055,7 @@ class ResizeVolumeFaultTest(trove_testtools.TestCase):
 
         self._resize()
 
-        fault.delete.assert_called_once_with()
+        self.instance.set_instance_fault_deleted.assert_called_once_with()
         self.save_fault.assert_not_called()
 
     def test_a_resize_that_succeeds_keeps_another_fault(self):
@@ -1064,7 +1064,7 @@ class ResizeVolumeFaultTest(trove_testtools.TestCase):
 
         self._resize()
 
-        fault.delete.assert_not_called()
+        self.instance.set_instance_fault_deleted.assert_not_called()
 
     def test_the_same_size_only_grows_the_filesystem(self):
         self._resize(old_size=2, new_size=2)

@@ -469,7 +469,10 @@ class SimpleInstance(object):
         # Fault can be non-existent, so we have a loaded flag
         if not self._fault_loaded:
             try:
-                self._fault = DBInstanceFault.find_by(instance_id=self.id)
+                # A fault is soft-deleted once cleared (a resize that
+                # succeeds after one that failed) or with its instance.
+                self._fault = DBInstanceFault.find_by(instance_id=self.id,
+                                                      deleted=False)
                 # Get rid of the stack trace if we're not admin
                 if not self.context.is_admin:
                     self._fault.details = None
@@ -2340,6 +2343,9 @@ def save_instance_fault(instance_id, message, details, skip_delta=None):
                         "Skipping fault message in favor of previous one")
                 else:
                     fault.set_info(msg, det)
+                    # The one row of the instance may be a cleared fault.
+                    fault.deleted = False
+                    fault.deleted_at = None
                     fault.save()
             except exception.ModelNotFoundError:
                 DBInstanceFault.create(
