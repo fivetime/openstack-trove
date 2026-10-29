@@ -985,20 +985,23 @@ class ResizeVolumeFaultTest(trove_testtools.TestCase):
             self.instance, old_size, new_size)
         action.execute()
 
-    def _fault_message(self):
+    def _fails(self):
+        error = self.assertRaises(taskmanager_models.ResizeVolumeFailed,
+                                  self._resize)
         self.assertEqual(1, self.save_fault.call_count)
         instance_id, message, _details = self.save_fault.call_args[0]
         self.assertEqual('instance-1', instance_id)
+        # The task's error notification saves the error's message as the
+        # fault as well (persist_instance_fault): it must be the same.
+        self.assertEqual(message, str(error))
         return message
 
     def test_a_filesystem_that_fails_to_grow_leaves_a_fault(self):
         self.guest.resize_fs.side_effect = GuestError('resize2fs failed')
 
-        self.assertRaises(GuestError, self._resize)
-
         self.assertEqual(
             'Volume resize to 2G failed: the filesystem was not grown; '
-            'resize to 2G again to retry', self._fault_message())
+            'resize to 2G again to retry', self._fails())
         self.find_status.return_value.set_status.assert_called_once_with(
             ServiceStatuses.FAILED)
         self.instance.reset_task_status.assert_called_once_with()
@@ -1006,42 +1009,44 @@ class ResizeVolumeFaultTest(trove_testtools.TestCase):
     def test_a_device_the_guest_still_sees_small_leaves_a_fault(self):
         self.guest.resize_fs.return_value = {'device_size': units.Gi}
 
-        self.assertRaises(taskmanager_models.DeviceNotGrown, self._resize)
-
         self.assertEqual(
             'Volume resize to 2G failed: the instance still sees the volume '
             'at its old size; resize to 2G again once it sees the new one',
-            self._fault_message())
+            self._fails())
 
     def test_a_filesystem_smaller_than_its_device_leaves_a_fault(self):
         # The device grew but the filesystem stayed at 1 GiB.
         self.guest.get_volume_info.return_value = {
             'total_blocks': 254000, 'block_size': 4096}
 
-        self.assertRaises(TroveError, self._resize)
-
-        self.assertIn('the filesystem was not grown', self._fault_message())
+        self.assertIn('the filesystem was not grown', self._fails())
 
     def test_a_guest_that_does_not_answer_the_device_size(self):
         self.guest.resize_fs.return_value = None
         self.guest.get_volume_info.return_value = {
             'total_blocks': 254000, 'block_size': 4096}
 
-        self.assertRaises(TroveError, self._resize)
-
-        self.assertIn('the filesystem was not grown', self._fault_message())
+        self.assertIn('the filesystem was not grown', self._fails())
 
     def test_a_volume_that_never_finished_extending_leaves_a_fault(self):
         utils.poll_until.side_effect = PollTimeOut
         self.instance.volume_client.volumes.get.return_value = Mock(
             size=1, status='extending')
 
-        self.assertRaises(PollTimeOut, self._resize)
-
         self.assertEqual(
             'Volume resize to 2G failed: the volume did not finish '
-            'extending', self._fault_message())
+            'extending', self._fails())
         self.guest.resize_fs.assert_not_called()
+
+    def test_an_error_that_left_no_fault_is_raised_as_it_is(self):
+        self.instance.volume_client.volumes.extend.side_effect = (
+            cinder_exceptions.ClientException(413, 'quota'))
+        utils.poll_until.side_effect = PollTimeOut
+        self.instance.volume_client.volumes.get.return_value = Mock(
+            size=1, status='available')
+
+        self.assertRaises(PollTimeOut, self._resize)
+        self.save_fault.assert_not_called()
 
     def test_a_resize_that_succeeds_clears_its_own_fault(self):
         fault = Mock(message='Volume resize to 2G failed: the filesystem '

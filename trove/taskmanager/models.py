@@ -1884,6 +1884,15 @@ class DeviceNotGrown(exception.TroveError):
     """The guest still sees its volume at the size it had."""
 
 
+class ResizeVolumeFailed(exception.TroveError):
+    """A resize that failed, with the fault it left as its message.
+
+    The error notification of the task saves its message as the
+    instance's fault too (persist_instance_fault); raised in place of the
+    step's own error, it says the same as the fault this action saved.
+    """
+
+
 class ResizeVolumeAction(VolumeUnmountActionBase):
     """Performs volume resize action."""
 
@@ -1899,6 +1908,7 @@ class ResizeVolumeAction(VolumeUnmountActionBase):
         self.old_size = int(old_size)
         self.new_size = int(new_size)
         self.device_size = None
+        self.fault_message = None
 
     def _fail(self, orig_func):
         LOG.error("%(func)s encountered an error when "
@@ -1927,6 +1937,7 @@ class ResizeVolumeAction(VolumeUnmountActionBase):
                        f"{self.new_size}G again to retry")
         inst_models.save_instance_fault(self.instance.id, message,
                                         traceback.format_exc())
+        self.fault_message = message
 
     def _clear_fault(self):
         # Deleted outright: a soft-deleted fault is still found and shown.
@@ -2164,6 +2175,10 @@ class ResizeVolumeAction(VolumeUnmountActionBase):
                                            InstanceStatus.HEALTHY]:
             try:
                 self._resize_active_volume()
+            except Exception as e:
+                if self.fault_message:
+                    raise ResizeVolumeFailed(self.fault_message) from e
+                raise
             finally:
                 self.instance.reset_task_status()
 

@@ -2,11 +2,14 @@
 fixes:
   - |
     A volume resize whose filesystem step fails now leaves a fault on the
-    instance (``fault`` in ``instance show``): ``Volume resize to <N>G
-    failed: the filesystem was not grown; resize to <N>G again to retry``.
-    Before, the failure set the status to ``FAILED`` only until the next
-    heartbeat set it back to ``HEALTHY``, so the instance looked resized
-    while its filesystem kept the old size. A volume that never finishes
+    instance (``fault`` in ``instance show``) that says what happened and
+    how to retry: ``Volume resize to <N>G failed: the filesystem was not
+    grown; resize to <N>G again to retry``. Before, the status was
+    ``FAILED`` only until the next heartbeat set it back to ``HEALTHY``;
+    the fault, when the step raised, was only the step's own error (such
+    as ``Timeout trying to connect to the Guest Agent.``) and stayed after
+    a later resize succeeded, and a filesystem that did not grow without
+    an error left none. A volume that never finishes
     extending leaves a fault too, and so does a guest that still sees its
     volume at the old size (some hypervisors show a running guest the new
     size only after its server is stopped and started): ``the instance
