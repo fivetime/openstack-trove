@@ -1,7 +1,7 @@
 ---
 fixes:
   - |
-    Vertica ``sync_writes`` (instances and clusters) no longer mounts the
+    A Vertica single instance with ``sync_writes`` no longer mounts the
     data volume with ``sync``. The guest has the server sync its commits
     itself: ``FsyncCatalogForLuck`` (the catalog after each commit) and
     ``FsyncDataForLuck`` (each data file as it is written), set at the
@@ -13,10 +13,17 @@ fixes:
     failed, and it committed about a quarter as fast. With the parameters,
     a power loss after ten minutes of writes lost no acknowledged commit
     and the database started again by itself, as with the sync mount.
+    A member of a cluster with ``sync_writes`` has the parameters set and
+    keeps its data volume mounted with ``sync`` as well: with the
+    parameters alone, a cluster whose three members lost power at once
+    did not start again (``VX001/2973 Data consistency problems found`` on
+    one member).
 upgrade:
   - |
-    The sync mount of an instance or a cluster created with
-    ``sync_writes`` by an earlier guest comes off once the server reports
+    An instance or a cluster created with ``sync_writes`` by an earlier
+    guest keeps its sync mount, and has the two parameters set too: only
+    a single instance created by this guest goes without the mount. A
+    single instance's sync mount comes off only once the server reports
     the two parameters set, so no commit is unprotected in between. A
     configuration group that sets them to 0 is overruled while
     ``sync_writes`` is on. The two parameters are not in the Vertica

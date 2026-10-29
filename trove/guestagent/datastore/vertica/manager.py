@@ -87,7 +87,7 @@ class Manager(cluster_member.ClusterWatchMixin, manager.Manager):
         # syncs its commits once the database answers (apply_sync_writes).
         if (cluster_config or getattr(self, '_properties', {})).get(
                 'sync_writes'):
-            self.app.plan_sync_writes()
+            self.app.plan_sync_writes(cluster=bool(cluster_config))
 
         LOG.info('Preparing database config files')
         self.app.configuration_manager.reset_configuration(config_contents)

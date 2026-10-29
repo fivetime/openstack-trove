@@ -713,7 +713,8 @@ class TestVerticaSyncWrites(VerticaGuestTestCase):
                                  "/dev/vdb /var/lib/vertica ext4 %s 0 0\n"
                                  % options)
 
-    def _apply(self, wanted=True, status=None, running=True, server=None):
+    def _apply(self, wanted=True, status=None, running=True, server=None,
+               alone=True):
         app = self._app()
         app.status.get_actual_db_status.return_value = (
             status or service_status.ServiceStatuses.HEALTHY)
@@ -723,6 +724,8 @@ class TestVerticaSyncWrites(VerticaGuestTestCase):
         order = mock.Mock()
         with mock.patch.object(app, 'wants_sync_writes',
                                return_value=wanted), \
+                mock.patch.object(app, '_sync_by_fsync_alone',
+                                  return_value=alone), \
                 mock.patch.object(app, 'database_is_running',
                                   return_value=running), \
                 mock.patch.object(volume.VolumeDevice,
@@ -746,9 +749,49 @@ class TestVerticaSyncWrites(VerticaGuestTestCase):
     def test_sync_writes_are_asked_for_in_the_conf_dir(self, mock_write):
         self._app().plan_sync_writes()
         mock_write.assert_called_once_with(
-            '/etc/vertica-trove/sync_writes', 'true\n', as_root=True)
+            '/etc/vertica-trove/sync_writes', 'fsync\n', as_root=True)
         with open(self.fstab) as f:
             self.assertNotIn('sync', f.read())
+
+    @mock.patch.object(vertica_service.operating_system, 'write_file')
+    def test_a_cluster_member_asks_for_the_sync_mount_too(self, mock_write):
+        self._app().plan_sync_writes(cluster=True)
+        mock_write.assert_called_once_with(
+            '/etc/vertica-trove/sync_writes', 'sync\n', as_root=True)
+
+    def test_what_the_marker_says(self):
+        app = self._app()
+        for content, alone in (('fsync\n', True), ('sync\n', False),
+                               # What earlier builds wrote, for both.
+                               ('true\n', False)):
+            with mock.patch.object(vertica_service.operating_system,
+                                   'read_file', return_value=content):
+                self.assertEqual(alone, app._sync_by_fsync_alone(),
+                                 content)
+
+    def test_a_cluster_member_mounts_with_sync_once_it_answers(self):
+        self._mounted('rw,noatime')
+        self._apply(alone=False).assert_called_once_with(
+            '/var/lib/vertica', 'defaults,noatime,sync', keep=False)
+        # The server's fsync as well.
+        self.assertEqual(2, len(self._set()))
+
+    def test_a_cluster_member_keeps_its_sync_mount(self):
+        self._mounted('rw,sync,noatime')
+        self._apply(alone=False).assert_not_called()
+
+    def test_a_cluster_member_mounts_with_sync_without_the_parameters(self):
+        self._mounted('rw,noatime')
+        with mock.patch.object(FakeServer, '_handle', autospec=True,
+                               side_effect=lambda self, s: []):
+            self._apply(alone=False).assert_called_once_with(
+                '/var/lib/vertica', 'defaults,noatime,sync', keep=False)
+
+    def test_a_cluster_member_is_async_while_no_server_runs(self):
+        self._mounted('rw,sync,noatime')
+        self._apply(status=service_status.ServiceStatuses.SHUTDOWN,
+                    running=False, alone=False).assert_called_once_with(
+            '/var/lib/vertica', 'defaults,noatime,async', keep=False)
 
     def test_the_server_syncs_commits_once_the_database_answers(self):
         self._mounted('rw,noatime')
@@ -1355,6 +1398,7 @@ class TestVerticaManager(VerticaGuestTestCase):
                                                'sync_writes': True})
         self.assertEqual(['plan_sync_writes', 'start_db'],
                          [call[0] for call in order.mock_calls])
+        manager.app.plan_sync_writes.assert_called_once_with(cluster=True)
         manager.app.apply_sync_writes.assert_not_called()
 
     def test_a_member_without_sync_writes_keeps_its_mount(self):
@@ -1381,6 +1425,7 @@ class TestVerticaManager(VerticaGuestTestCase):
             manager, properties={'sync_writes': True})
         self.assertEqual(['plan_sync_writes', 'start_db', 'create_database'],
                          [call[0] for call in order.mock_calls])
+        manager.app.plan_sync_writes.assert_called_once_with(cluster=False)
         # The base prepare takes no properties.
         self.assertNotIn('properties', base.call_args.kwargs)
 

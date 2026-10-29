@@ -70,8 +70,11 @@ WATCH_INTERVAL = 5
 # it.
 START_SCRIPT = 'start.sh'
 # Present when each commit is to be on disk before it returns (the
-# instance's or the cluster's sync_writes).
+# instance's or the cluster's sync_writes). SYNC_BY_FSYNC in it: by the
+# server's fsync alone (a single instance); anything else, also what
+# earlier builds wrote: by mounting the data volume with sync too.
 SYNC_WRITES_FILE = 'sync_writes'
+SYNC_BY_FSYNC = 'fsync'
 # What has the server sync a commit itself: the catalog after each commit,
 # each data file as it is written. Not in the documentation of the server;
 # its configuration_parameters describe them.
@@ -488,33 +491,45 @@ class VerticaApp(service.BaseDbApp):
         return volume.VolumeDevice(
             cfg.get_configuration_property('device_path'))
 
-    def plan_sync_writes(self):
+    def plan_sync_writes(self, cluster=False):
         """Ask for each commit to be on disk before it returns. By default
         the server does not sync what it commits, and a single instance,
         or a cluster whose members all lose power at once, loses its last
         commits or does not start again.
+
+        A member of a cluster keeps its data volume mounted with sync as
+        well: with the server's fsync alone, a cluster that lost power on
+        every member did not start again (a member's data files were not
+        all on disk: VX001/2973), where a single instance did.
         """
-        operating_system.write_file(self._conf_path(SYNC_WRITES_FILE),
-                                    'true\n', as_root=True)
+        operating_system.write_file(
+            self._conf_path(SYNC_WRITES_FILE),
+            'sync\n' if cluster else SYNC_BY_FSYNC + '\n', as_root=True)
 
     def wants_sync_writes(self):
         return operating_system.exists(self._conf_path(SYNC_WRITES_FILE),
                                        as_root=True)
 
+    def _sync_by_fsync_alone(self):
+        return operating_system.read_file(
+            self._conf_path(SYNC_WRITES_FILE),
+            as_root=True).strip() == SYNC_BY_FSYNC
+
     def apply_sync_writes(self):
         """With sync writes asked for, have the server sync each commit
-        itself (FSYNC_PARAMETERS, kept in its catalog, for every node),
-        and leave the data volume mounted without sync.
+        itself (FSYNC_PARAMETERS, kept in its catalog, for every node); a
+        single instance then leaves its data volume mounted without sync,
+        a member of a cluster mounts it with sync too (plan_sync_writes).
 
         Earlier builds mounted the data volume with sync while the
         database answered. That synced every write, the data collector's
         and vertica.log's too, about 25 times the bytes of the commits; a
         database that had been written to took longer to shut down than
         state_change_wait_time, so its backups failed, and it committed
-        about a quarter as fast. The sync mount of such a build comes off
-        only once the server has the parameters set, so that no commit is
-        unprotected in between; while no server runs, there is no commit
-        to protect.
+        about a quarter as fast. The sync mount of a single instance comes
+        off only once the server has the parameters set, so that no commit
+        is unprotected in between; while no server runs, there is no
+        commit to protect.
 
         A configuration group that sets the parameters otherwise is
         overruled: sync_writes is what the instance was created with.
@@ -524,21 +539,29 @@ class VerticaApp(service.BaseDbApp):
         mounted = (volume.mounted_options(self.mount_point) or '').split(',')
         if (self.status.get_actual_db_status() !=
                 service_status.ServiceStatuses.HEALTHY):
+            # Not from fstab: before it starts, the server's catalog is
+            # read by catalog editors that rewrite the data collector
+            # files in many small writes, which take longer than vcluster
+            # waits on a volume mounted with sync.
             if 'sync' in mounted and not self.database_is_running():
-                self._unsync_data_volume()
+                self._remount_data_volume('async')
             return
-        if not self._fsync_parameters_set():
+        fsynced = self._fsync_parameters_set()
+        if not fsynced:
             for name in FSYNC_PARAMETERS:
                 self.adm.set_parameter(name, 1)
-            if not self._fsync_parameters_set():
-                LOG.warning("The server does not report %s set; the data "
-                            "volume keeps its mount options.",
+            fsynced = self._fsync_parameters_set()
+            if fsynced:
+                LOG.info("Commits are synced by the server (%s).",
+                         ', '.join(FSYNC_PARAMETERS))
+            else:
+                LOG.warning("The server does not report %s set.",
                             ', '.join(FSYNC_PARAMETERS))
-                return
-            LOG.info("Commits are synced by the server (%s).",
-                     ', '.join(FSYNC_PARAMETERS))
-        if 'sync' in mounted:
-            self._unsync_data_volume()
+        if not self._sync_by_fsync_alone():
+            if 'sync' not in mounted:
+                self._remount_data_volume('sync')
+        elif 'sync' in mounted and fsynced:
+            self._remount_data_volume('async')
 
     def _fsync_parameters_set(self):
         rows = self.adm.query(
@@ -551,11 +574,11 @@ class VerticaApp(service.BaseDbApp):
             values.setdefault(name, set()).add(value)
         return all(values.get(name) == {'1'} for name in FSYNC_PARAMETERS)
 
-    def _unsync_data_volume(self):
+    def _remount_data_volume(self, option):
         base = (volume.fstab_options(self.mount_point) or
                 CONF.mount_options)
         self._data_volume().remount(
-            self.mount_point, volume.with_option(base, 'async'), keep=False)
+            self.mount_point, volume.with_option(base, option), keep=False)
 
     def database_exists(self):
         return operating_system.exists(
