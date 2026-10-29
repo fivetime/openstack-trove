@@ -83,8 +83,8 @@ class Manager(cluster_member.ClusterWatchMixin, manager.Manager):
         of a cluster stops at its agent: the taskmanager has the first
         member create the database on all of them.
         """
-        # Asked for by the cluster, or by a single instance; the data
-        # volume gets sync once the database answers (keep_mount_options).
+        # Asked for by the cluster, or by a single instance; the server
+        # syncs its commits once the database answers (apply_sync_writes).
         if (cluster_config or getattr(self, '_properties', {})).get(
                 'sync_writes'):
             self.app.plan_sync_writes()
@@ -107,6 +107,8 @@ class Manager(cluster_member.ClusterWatchMixin, manager.Manager):
         elif not self.app.database_exists():
             self.app.create_database()
         self.app.apply_settings()
+        # Before the instance is ACTIVE: no commit of the user unsynced.
+        self.app.apply_sync_writes()
 
     def restart(self, context):
         self.app.restart()
@@ -136,19 +138,19 @@ class Manager(cluster_member.ClusterWatchMixin, manager.Manager):
 
     def cluster_complete(self, context):
         # The database exists on every member by now.
-        self.app.apply_mount_options()
+        self.app.apply_sync_writes()
         super(Manager, self).cluster_complete(context)
 
     @periodic_task.periodic_task
-    def keep_mount_options(self, context):
-        """The data volume mounted with sync while the database answers,
-        when the cluster asked for it, after a reboot or a restart too.
+    def keep_sync_writes(self, context):
+        """The commits synced by the server when sync writes were asked
+        for, after a reboot, a restart or a restore too, and the sync mount
+        of an earlier build taken off.
         """
         try:
-            self.app.apply_mount_options()
+            self.app.apply_sync_writes()
         except Exception:
-            LOG.exception("Failed to apply the mount options of the data "
-                          "volume.")
+            LOG.exception("Failed to apply sync writes.")
 
     def stop_db(self, context):
         self.app.stop_db()

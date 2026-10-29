@@ -87,11 +87,13 @@ class FakeServer(object):
     statements it runs.
     """
 
-    def __init__(self):
+    def __init__(self, nodes=1):
         self.schemas = []
         self.users = []
         self.grants = {}
         self.statements = []
+        # The current value of each parameter on each node.
+        self.parameters = [{} for _ in range(nodes)]
 
     def run(self, statements, password=None):
         rows = []
@@ -110,6 +112,18 @@ class FakeServer(object):
 
     def _handle(self, statement):
         names = self._names(statement)
+        if statement.startswith('SELECT DISTINCT parameter_name, '
+                                'current_value FROM '
+                                'v_monitor.configuration_parameters'):
+            wanted = statement.split('IN (')[1].split(')')[0]
+            wanted = [part.strip().strip("'") for part in wanted.split(',')]
+            return sorted({(name, node.get(name, '0'))
+                           for node in self.parameters for name in wanted})
+        if statement.startswith('ALTER DATABASE DEFAULT SET PARAMETER'):
+            value = statement.rsplit('= ', 1)[1]
+            for node in self.parameters:
+                node[names[0]] = value
+            return []
         if statement.startswith('SELECT schema_name'):
             return [[name] for name in sorted(
                 self.schemas + ['public', 'v_func', 'v_txtindex'])]
@@ -699,18 +713,34 @@ class TestVerticaSyncWrites(VerticaGuestTestCase):
                                  "/dev/vdb /var/lib/vertica ext4 %s 0 0\n"
                                  % options)
 
-    def _apply(self, wanted=True, status=None, running=True):
+    def _apply(self, wanted=True, status=None, running=True, server=None):
         app = self._app()
         app.status.get_actual_db_status.return_value = (
             status or service_status.ServiceStatuses.HEALTHY)
+        self.server = server or FakeServer()
+        app.adm.run = self.server.run
+        app.adm.query = self.server.query
+        order = mock.Mock()
         with mock.patch.object(app, 'wants_sync_writes',
                                return_value=wanted), \
                 mock.patch.object(app, 'database_is_running',
                                   return_value=running), \
                 mock.patch.object(volume.VolumeDevice,
                                   'remount') as mock_remount:
-            app.apply_mount_options()
+            order.attach_mock(mock_remount, 'remount')
+            real_run = self.server.run
+
+            def run(statements, password=None):
+                order.run(statements)
+                return real_run(statements, password)
+            app.adm.run = run
+            app.apply_sync_writes()
+        self.order = [call[0] for call in order.mock_calls]
         return mock_remount
+
+    def _set(self):
+        return [s for s in self.server.statements
+                if s.startswith('ALTER DATABASE DEFAULT SET PARAMETER')]
 
     @mock.patch.object(vertica_service.operating_system, 'write_file')
     def test_sync_writes_are_asked_for_in_the_conf_dir(self, mock_write):
@@ -720,28 +750,72 @@ class TestVerticaSyncWrites(VerticaGuestTestCase):
         with open(self.fstab) as f:
             self.assertNotIn('sync', f.read())
 
-    def test_sync_once_the_database_answers(self):
+    def test_the_server_syncs_commits_once_the_database_answers(self):
         self._mounted('rw,noatime')
-        self._apply().assert_called_once_with(
-            '/var/lib/vertica', 'defaults,noatime,sync', keep=False)
-
-    def test_nothing_while_it_is_sync_and_runs(self):
-        self._mounted('rw,sync,noatime')
         self._apply().assert_not_called()
+        self.assertEqual(
+            ['ALTER DATABASE DEFAULT SET PARAMETER "FsyncCatalogForLuck" = 1',
+             'ALTER DATABASE DEFAULT SET PARAMETER "FsyncDataForLuck" = 1'],
+            self._set())
+
+    def test_nothing_set_again_once_the_server_has_them(self):
+        server = FakeServer()
+        server.parameters[0].update(FsyncCatalogForLuck='1',
+                                    FsyncDataForLuck='1')
+        self._mounted('rw,noatime')
+        self._apply(server=server).assert_not_called()
+        self.assertEqual([], self._set())
+
+    def test_a_configuration_group_that_unsets_them_is_overruled(self):
+        server = FakeServer()
+        server.parameters[0].update(FsyncCatalogForLuck='1',
+                                    FsyncDataForLuck='0')
+        self._mounted('rw,noatime')
+        self._apply(server=server)
+        self.assertEqual({'FsyncCatalogForLuck': '1',
+                          'FsyncDataForLuck': '1'}, server.parameters[0])
+
+    def test_every_node_of_a_cluster_must_have_them(self):
+        server = FakeServer(nodes=3)
+        for node in server.parameters[:2]:
+            node.update(FsyncCatalogForLuck='1', FsyncDataForLuck='1')
+        self._mounted('rw,noatime')
+        self._apply(server=server)
+        self.assertEqual(2, len(self._set()))
+        self.assertEqual(['1'], sorted({value for node in server.parameters
+                                        for value in node.values()}))
+
+    def test_the_sync_mount_of_an_earlier_build_comes_off_after_them(self):
+        self._mounted('rw,sync,noatime')
+        self._apply().assert_called_once_with(
+            '/var/lib/vertica', 'defaults,noatime,async', keep=False)
+        # The parameters first: no commit is unprotected in between.
+        self.assertEqual(['run', 'run', 'remount'],
+                         [name for name in self.order
+                          if name in ('run', 'remount')][-3:])
+
+    def test_the_sync_mount_stays_if_the_server_does_not_take_them(self):
+        server = FakeServer()
+        self._mounted('rw,sync,noatime')
+        with mock.patch.object(FakeServer, '_handle', autospec=True,
+                               side_effect=lambda self, s: []):
+            self._apply(server=server).assert_not_called()
+
+    def test_nothing_before_the_database_answers(self):
+        # Created or starting: no SQL yet, and a running server keeps the
+        # mount it has.
+        self._mounted('rw,sync,noatime')
         self._apply(status=service_status.ServiceStatuses.RUNNING
                     ).assert_not_called()
-
-    def test_not_before_the_database_answers(self):
-        # Created or starting: its catalog is read on the async volume.
-        self._mounted('rw,noatime')
-        self._apply(status=service_status.ServiceStatuses.RUNNING,
-                    running=False).assert_not_called()
+        self.assertEqual([], self.server.statements)
 
     def test_async_while_no_server_runs(self):
+        # No commit to protect.
         self._mounted('rw,sync,noatime')
         self._apply(status=service_status.ServiceStatuses.SHUTDOWN,
                     running=False).assert_called_once_with(
             '/var/lib/vertica', 'defaults,noatime,async', keep=False)
+        self.assertEqual([], self.server.statements)
 
     def test_sync_left_in_fstab_by_an_earlier_build_is_taken_out(self):
         self._write(self.fstab, "/dev/vdb /var/lib/vertica ext4 "
@@ -752,8 +826,9 @@ class TestVerticaSyncWrites(VerticaGuestTestCase):
             '/var/lib/vertica', 'defaults,noatime,async', keep=False)
 
     def test_nothing_without_sync_writes(self):
-        self._mounted('rw,noatime')
+        self._mounted('rw,sync,noatime')
         self._apply(wanted=False).assert_not_called()
+        self.assertEqual([], self.server.statements)
 
 
 class TestVerticaServerProcess(VerticaGuestTestCase):
@@ -1280,7 +1355,7 @@ class TestVerticaManager(VerticaGuestTestCase):
                                                'sync_writes': True})
         self.assertEqual(['plan_sync_writes', 'start_db'],
                          [call[0] for call in order.mock_calls])
-        manager.app.apply_mount_options.assert_not_called()
+        manager.app.apply_sync_writes.assert_not_called()
 
     def test_a_member_without_sync_writes_keeps_its_mount(self):
         manager = self._manager()
@@ -1316,25 +1391,38 @@ class TestVerticaManager(VerticaGuestTestCase):
         manager.app.plan_sync_writes.assert_not_called()
         manager.app.create_database.assert_called()
 
-    def test_the_mount_options_apply_before_the_member_is_ready(self):
+    def test_sync_writes_apply_before_the_member_is_ready(self):
         manager = self._manager()
         order = mock.Mock()
-        order.attach_mock(manager.app.apply_mount_options,
-                          'apply_mount_options')
+        order.attach_mock(manager.app.apply_sync_writes,
+                          'apply_sync_writes')
         order.attach_mock(manager.status.end_install, 'end_install')
         manager.cluster_complete(None)
-        self.assertEqual(['apply_mount_options', 'end_install'],
+        self.assertEqual(['apply_sync_writes', 'end_install'],
                          [call[0] for call in order.mock_calls])
 
-    def test_the_mount_options_are_kept_periodically(self):
+    def test_sync_writes_apply_before_a_single_instance_is_ready(self):
+        # At the end of its prepare: no commit of the user unsynced.
         manager = self._manager()
-        self.assertIn('keep_mount_options',
+        order = mock.Mock()
+        for name in ('create_database', 'apply_settings',
+                     'apply_sync_writes'):
+            order.attach_mock(getattr(manager.app, name), name)
+        self._prepare_through_the_rpc(manager,
+                                      properties={'sync_writes': True})
+        self.assertEqual(['create_database', 'apply_settings',
+                          'apply_sync_writes'],
+                         [call[0] for call in order.mock_calls])
+
+    def test_sync_writes_are_kept_periodically(self):
+        manager = self._manager()
+        self.assertIn('keep_sync_writes',
                       [name for name, _task in manager._periodic_tasks])
-        manager.keep_mount_options(None)
-        manager.app.apply_mount_options.assert_called_once_with()
+        manager.keep_sync_writes(None)
+        manager.app.apply_sync_writes.assert_called_once_with()
         # A failure is logged, the other periodic tasks still run.
-        manager.app.apply_mount_options.side_effect = exception.TroveError()
-        manager.keep_mount_options(None)
+        manager.app.apply_sync_writes.side_effect = exception.TroveError()
+        manager.keep_sync_writes(None)
 
     def test_the_communal_credential_reaches_the_app(self):
         manager = self._manager()

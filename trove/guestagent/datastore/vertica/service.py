@@ -69,9 +69,13 @@ WATCH_INTERVAL = 5
 # What the container runs: the node management agent, and the database on
 # it.
 START_SCRIPT = 'start.sh'
-# Present when the data volume is to be mounted with sync while the
-# database runs (the cluster's sync_writes).
+# Present when each commit is to be on disk before it returns (the
+# instance's or the cluster's sync_writes).
 SYNC_WRITES_FILE = 'sync_writes'
+# What has the server sync a commit itself: the catalog after each commit,
+# each data file as it is written. Not in the documentation of the server;
+# its configuration_parameters describe them.
+FSYNC_PARAMETERS = ('FsyncCatalogForLuck', 'FsyncDataForLuck')
 # A license a module installed, for the creation of a database that needs
 # one.
 LICENSE_FILE = 'license.key'
@@ -485,11 +489,10 @@ class VerticaApp(service.BaseDbApp):
             cfg.get_configuration_property('device_path'))
 
     def plan_sync_writes(self):
-        """Ask for the data volume to be mounted with sync while the
-        database runs. The server does not sync what it commits to disk;
-        with sync every write reaches the disk before it returns, so the
-        members of a cluster that all lose power at once keep their
-        commits and start again by themselves.
+        """Ask for each commit to be on disk before it returns. By default
+        the server does not sync what it commits, and a single instance,
+        or a cluster whose members all lose power at once, loses its last
+        commits or does not start again.
         """
         operating_system.write_file(self._conf_path(SYNC_WRITES_FILE),
                                     'true\n', as_root=True)
@@ -498,32 +501,61 @@ class VerticaApp(service.BaseDbApp):
         return operating_system.exists(self._conf_path(SYNC_WRITES_FILE),
                                        as_root=True)
 
-    def apply_mount_options(self):
-        """With sync writes asked for, mount the data volume with sync
-        while the database answers, and without it while no server runs.
+    def apply_sync_writes(self):
+        """With sync writes asked for, have the server sync each commit
+        itself (FSYNC_PARAMETERS, kept in its catalog, for every node),
+        and leave the data volume mounted without sync.
 
-        Not from fstab: before it starts, the server's catalog is read by
-        catalog editors that rewrite the data collector files in many
-        small writes, which take longer than vcluster waits on a volume
-        mounted with sync, so a database created or started there does
-        not come up. The writes between the start and the next check are
-        not synced.
+        Earlier builds mounted the data volume with sync while the
+        database answered. That synced every write, the data collector's
+        and vertica.log's too, about 25 times the bytes of the commits; a
+        database that had been written to took longer to shut down than
+        state_change_wait_time, so its backups failed, and it committed
+        about a quarter as fast. The sync mount of such a build comes off
+        only once the server has the parameters set, so that no commit is
+        unprotected in between; while no server runs, there is no commit
+        to protect.
+
+        A configuration group that sets the parameters otherwise is
+        overruled: sync_writes is what the instance was created with.
         """
         if not self.wants_sync_writes():
             return
+        mounted = (volume.mounted_options(self.mount_point) or '').split(',')
+        if (self.status.get_actual_db_status() !=
+                service_status.ServiceStatuses.HEALTHY):
+            if 'sync' in mounted and not self.database_is_running():
+                self._unsync_data_volume()
+            return
+        if not self._fsync_parameters_set():
+            for name in FSYNC_PARAMETERS:
+                self.adm.set_parameter(name, 1)
+            if not self._fsync_parameters_set():
+                LOG.warning("The server does not report %s set; the data "
+                            "volume keeps its mount options.",
+                            ', '.join(FSYNC_PARAMETERS))
+                return
+            LOG.info("Commits are synced by the server (%s).",
+                     ', '.join(FSYNC_PARAMETERS))
+        if 'sync' in mounted:
+            self._unsync_data_volume()
+
+    def _fsync_parameters_set(self):
+        rows = self.adm.query(
+            'SELECT DISTINCT parameter_name, current_value FROM '
+            'v_monitor.configuration_parameters WHERE parameter_name IN '
+            '(%s)' % ', '.join(quote_literal(name)
+                               for name in FSYNC_PARAMETERS))
+        values = {}
+        for name, value in rows:
+            values.setdefault(name, set()).add(value)
+        return all(values.get(name) == {'1'} for name in FSYNC_PARAMETERS)
+
+    def _unsync_data_volume(self):
         base = (volume.fstab_options(self.mount_point) or
                 CONF.mount_options)
-        mounted = (volume.mounted_options(self.mount_point) or '').split(',')
-        if 'sync' not in mounted:
-            if (self.status.get_actual_db_status() ==
-                    service_status.ServiceStatuses.HEALTHY):
-                self._data_volume().remount(
-                    self.mount_point, volume.with_option(base, 'sync'),
-                    keep=False)
-        elif not self.database_is_running():
-            self._data_volume().remount(
-                self.mount_point, volume.with_option(base, 'async'),
-                keep=False)
+        self._data_volume().remount(
+            self.mount_point, volume.with_option(base, 'async'), keep=False)
 
     def database_exists(self):
         return operating_system.exists(
