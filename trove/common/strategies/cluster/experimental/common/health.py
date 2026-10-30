@@ -283,6 +283,19 @@ def stale_members(member_ids):
     return set(member_ids) - fresh
 
 
+def heartbeats_since(member_ids, since):
+    """Of the given members, those whose heartbeat is from ``since`` or
+    later.
+    """
+    member_ids = list(member_ids)
+    if not member_ids:
+        return set()
+    with InstanceServiceStatus.query() as query:
+        return {status.instance_id for status in query.filter(
+            InstanceServiceStatus.instance_id.in_(member_ids)).all()
+            if status.updated_at and status.updated_at >= since}
+
+
 def seconds_to_expiry(member_ids):
     """Seconds until the oldest heartbeat of the given members is older
     than ``agent_heartbeat_expiry`` (at least 1), or None when none of
@@ -345,6 +358,7 @@ class HealthWatch(object):
             record(cluster_id, self._combine(
                 cluster_id, fresh, silent + [m.name for m in slow]))
 
+        started = timeutils.utcnow()
         told = self._ask(context, asked, interim)
         # The look waited for a member slow to answer or that did not (one
         # just restarted, or powered off, its heartbeat not stale yet):
@@ -354,6 +368,14 @@ class HealthWatch(object):
         done = time.monotonic()
         again = {m.id for m, _a, failed, at in told
                  if not failed and done - at > ANSWER_MAX_AGE}
+        # A member that did not answer but whose heartbeat is from after
+        # the call came back while the look waited for it (its host reset
+        # and the member evacuated, production Kata 2026-10-30: the call
+        # to the old guest timed out as the new one answered the other
+        # task manager's look). Asked again, it answers now; recorded as
+        # not answering, it would undo the record made from its answer.
+        again |= heartbeats_since(
+            (m.id for m, _a, failed, _at in told if failed), started)
         if again:
             told = [t for t in told if t[0].id not in again] + self._ask(
                 context, [m for m in asked if m.id in again])

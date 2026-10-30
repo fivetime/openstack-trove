@@ -1,0 +1,11 @@
+---
+fixes:
+  - |
+    A look at a cluster's health that waited for a member which did not
+    answer (its host reset, the member evacuated or rebooted while its
+    heartbeat was not yet stale) recorded it as not answering, although it
+    had come back during the wait and answered another task manager's look
+    meanwhile: the cluster showed DEGRADED again for the time until the
+    next look, and the change was notified. A member that did not answer
+    but whose heartbeat is from after the call is now asked once more
+    before the health is recorded.

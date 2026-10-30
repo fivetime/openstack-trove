@@ -282,6 +282,60 @@ class TestHealthWatch(HealthTestBase):
         self.assertEqual(1, asked.count('c-member-3'))
         self.assertGreaterEqual(asked.count('c-member-1'), 3)
 
+    def _look_with_a_member_back(self, renewed):
+        """A look whose c-member-3 does not answer the first call; while
+        the call lasted its heartbeat was renewed (or not); asked again
+        it answers HEALTHY. Returns the record and who was asked.
+        """
+        cluster, members = self._cluster()
+        asked = []
+        third = [exception.GuestTimeout(), ch.view(ch.HEALTHY, me='10.0.0.3')]
+
+        def answer(member):
+            asked.append(member.name)
+            if member.name != 'c-member-3':
+                return ch.view(ch.HEALTHY, me='10.0.0.' + member.name[-1])
+            given = third.pop(0)
+            if isinstance(given, Exception):
+                if renewed:
+                    # Back while the look waited for it: the new guest's
+                    # heartbeat is from after the call began.
+                    with InstanceServiceStatus.query() as query:
+                        query.filter_by(instance_id=member.id).update(
+                            {'updated_at': timeutils.utcnow() +
+                             datetime.timedelta(seconds=1)})
+                raise given
+            return given
+
+        def guest(context, member):
+            client = mock.Mock()
+            client.get_cluster_health.side_effect = (
+                lambda timeout: answer(member))
+            return client
+
+        health.HealthWatch('redis', guest_factory=guest).check_now(
+            None, cluster, 'test')
+        return self._recorded(cluster.id), asked
+
+    def test_a_member_back_while_the_look_waited_for_it_is_asked_again(self):
+        # kx-percona (production Kata, 2026-10-30): a member's host reset
+        # and the member evacuated; the look that began before its
+        # heartbeat went stale waited the timeout for the old guest and
+        # recorded it as not answering 1 s after the other task manager
+        # had recorded the new guest's answer: a DEGRADED of 42 s, told.
+        (status, detail, _since), asked = self._look_with_a_member_back(
+            renewed=True)
+        self.assertEqual(ch.HEALTHY, status)
+        self.assertEqual([], detail['out'])
+        self.assertEqual(2, asked.count('c-member-3'))
+
+    def test_a_member_still_gone_is_not_asked_again(self):
+        (status, detail, _since), asked = self._look_with_a_member_back(
+            renewed=False)
+        self.assertEqual(ch.DEGRADED, status)
+        self.assertEqual(['c-member-3'], detail['out'])
+        self.assertEqual(1, asked.count('c-member-3'))
+
     def test_asked_once_when_every_member_answers(self):
         cluster, members = self._cluster()
         asked = []
