@@ -1,0 +1,11 @@
+---
+fixes:
+  - |
+    While a resize, a migration or a rebuild waits for the guest to report
+    its status, the taskmanager reads that status from Trove's database
+    every few seconds. A momentary failure to reach that database (its
+    address not resolved, the connection lost) ended the whole action as
+    failed: a resize was reverted, a rebuild restarted the guest, although
+    the guest was fine. The wait now logs the error and goes on; only its
+    timeout (``resize_time_out``) ends it. A failed rebuild or migration is
+    logged as such, not as a failed resize.

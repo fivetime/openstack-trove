@@ -18,6 +18,7 @@ import sys
 import time
 import traceback
 
+from oslo_db import exception as db_exception
 from oslo_log import log as logging
 from oslo_utils import timeutils as otimeutils
 from oslo_utils import units
@@ -2209,6 +2210,8 @@ class ResizeActionBase(object):
         self.instance = instance
         self.wait_status = ['VERIFY_RESIZE']
         self.ignore_stop_error = False
+        # What the action is called in its log lines.
+        self.action_name = 'resize'
 
     def _assert_guest_is_ok(self):
         # The guest will never set the status to PAUSED.
@@ -2252,14 +2255,29 @@ class ResizeActionBase(object):
         if self.instance.server_status_matches(["VERIFY_RESIZE"]):
             self.instance.server.confirm_resize()
 
+    def _refresh_datastore_status(self):
+        """Reads the datastore status, which the guest reports through
+        Trove's own database; polled every few seconds while the action
+        waits for the guest. A moment without that database (its address
+        not resolved, the connection lost) says nothing about the guest:
+        the poll goes on, and only its timeout ends the wait.
+        """
+        try:
+            self.instance._refresh_datastore_status()
+        except db_exception.DBConnectionError as e:
+            LOG.warning("Could not read the datastore status of instance "
+                        "%s, trying again: %s", self.instance.id, e)
+            return False
+        return True
+
     def _datastore_is_online(self):
-        self.instance._refresh_datastore_status()
-        return self.instance.is_datastore_running
+        return (self._refresh_datastore_status() and
+                self.instance.is_datastore_running)
 
     def _datastore_is_offline(self):
-        self.instance._refresh_datastore_status()
-        return (self.instance.datastore_status_matches(
-            srvstatus.ServiceStatuses.SHUTDOWN))
+        return (self._refresh_datastore_status() and
+                self.instance.datastore_status_matches(
+                    srvstatus.ServiceStatuses.SHUTDOWN))
 
     def _revert_nova_action(self):
         LOG.debug("Instance %s calling Compute revert resize...",
@@ -2289,14 +2307,14 @@ class ResizeActionBase(object):
                 self.instance.reset_task_status()
 
     def _guest_is_awake(self):
-        self.instance._refresh_datastore_status()
-        return not self.instance.datastore_status_matches(
-            srvstatus.ServiceStatuses.PAUSED)
+        return (self._refresh_datastore_status() and
+                not self.instance.datastore_status_matches(
+                    srvstatus.ServiceStatuses.PAUSED))
 
     def _guest_is_healthy(self):
-        self.instance._refresh_datastore_status()
-        return self.instance.datastore_status_matches(
-            srvstatus.ServiceStatuses.HEALTHY)
+        return (self._refresh_datastore_status() and
+                self.instance.datastore_status_matches(
+                    srvstatus.ServiceStatuses.HEALTHY))
 
     def wait_for_healthy(self):
         utils.poll_until(
@@ -2316,7 +2334,8 @@ class ResizeActionBase(object):
             self._assert_processes_are_ok()
             self._confirm_nova_action()
         except Exception:
-            LOG.exception(f"Failed to resize instance {self.instance.id}")
+            LOG.exception(f"Failed to {self.action_name} instance "
+                          f"{self.instance.id}")
             if need_to_revert:
                 LOG.error("Reverting action for instance %s",
                           self.instance.id)
@@ -2438,6 +2457,7 @@ class MigrateAction(ResizeActionBase):
         super(MigrateAction, self).__init__(instance)
         self.instance = instance
         self.host = host
+        self.action_name = 'migrate'
 
     def _assert_nova_action_was_successful(self):
         LOG.debug("Currently no assertions for a Migrate Action")
@@ -2472,6 +2492,7 @@ class RebuildAction(ResizeActionBase, VolumeUnmountActionBase):
         self.image_id = image_id
         self.ignore_stop_error = True
         self.wait_status = ['ACTIVE']
+        self.action_name = 'rebuild'
 
     def _initiate_nova_action(self):
         # Unmount the data volume before the Nova rebuild to reduce the risk

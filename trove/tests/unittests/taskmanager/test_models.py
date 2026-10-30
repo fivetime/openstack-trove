@@ -31,6 +31,7 @@ from cinderclient import exceptions as cinder_exceptions
 from cinderclient.v3 import volumes as cinderclient_volumes
 from novaclient import exceptions as nova_exceptions
 from oslo_config import cfg
+from oslo_db import exception as db_exception
 from oslo_utils import units
 from swiftclient.client import ClientException
 from testtools.matchers import Equals
@@ -1147,6 +1148,80 @@ class RebuildActionTest(trove_testtools.TestCase):
             action._assert_processes_are_ok()
         self.assertEqual({'sync_writes': True},
                          instance.guest.rebuild.call_args.kwargs['properties'])
+
+
+class ResizeActionWaitTest(trove_testtools.TestCase):
+    """The waits of a resize, migrate or rebuild for the guest's status."""
+
+    @staticmethod
+    def _poll(retriever, condition=lambda value: value, **kwargs):
+        # poll_until with no sleep: at most ten tries.
+        for _ in range(10):
+            value = retriever()
+            if condition(value):
+                return value
+        raise PollTimeOut()
+
+    def _action(self, statuses):
+        instance = Mock()
+        instance.id = 'inst-1'
+        # The status reads, in order: an exception is raised, a status is
+        # what datastore_status_matches then compares with.
+        reads = iter(statuses)
+        current = {}
+
+        def refresh():
+            current['status'] = next(reads)
+            if isinstance(current['status'], Exception):
+                raise current['status']
+        instance._refresh_datastore_status.side_effect = refresh
+        instance.datastore_status_matches.side_effect = (
+            lambda status: current['status'] == status)
+        return taskmanager_models.ResizeActionBase(instance)
+
+    @patch.object(taskmanager_models, 'LOG')
+    def test_a_moment_without_the_database_does_not_end_the_wait(
+            self, mock_log):
+        action = self._action([
+            db_exception.DBConnectionError('Lookup timed out'),
+            ServiceStatuses.RUNNING, ServiceStatuses.HEALTHY])
+        with patch.object(utils, 'poll_until', side_effect=self._poll):
+            action.wait_for_healthy()
+        self.assertEqual(3, action.instance._refresh_datastore_status
+                         .call_count)
+        self.assertIn('trying again', mock_log.warning.call_args[0][0])
+
+    def test_the_wait_still_ends_at_its_timeout(self):
+        action = self._action(
+            [db_exception.DBConnectionError('gone')] * 10)
+        with patch.object(utils, 'poll_until', side_effect=self._poll):
+            self.assertRaises(PollTimeOut, action.wait_for_healthy)
+
+    def test_the_awake_check_tolerates_the_database_too(self):
+        action = self._action([
+            db_exception.DBConnectionError('gone'), ServiceStatuses.PAUSED,
+            ServiceStatuses.RUNNING])
+        with patch.object(utils, 'poll_until', side_effect=self._poll):
+            action._assert_guest_is_ok()
+        self.assertEqual(3, action.instance._refresh_datastore_status
+                         .call_count)
+
+    @patch.object(taskmanager_models, 'LOG')
+    def test_a_failed_rebuild_is_logged_as_a_rebuild(self, mock_log):
+        instance = Mock()
+        instance.server_status_matches.return_value = False
+        action = taskmanager_models.RebuildAction(instance, 'image-id')
+        with patch.object(action, '_initiate_nova_action',
+                          side_effect=TroveError('no')):
+            self.assertRaises(TroveError, action._perform_nova_action)
+        self.assertIn('Failed to rebuild instance',
+                      mock_log.exception.call_args[0][0])
+        action = taskmanager_models.MigrateAction(instance)
+        with patch.object(action, '_initiate_nova_action',
+                          side_effect=TroveError('no')):
+            self.assertRaises(TroveError, action._perform_nova_action)
+        self.assertIn('Failed to migrate instance',
+                      mock_log.exception.call_args[0][0])
 
 
 class BuiltInstanceTasksTest(trove_testtools.TestCase):
