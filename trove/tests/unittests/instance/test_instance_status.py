@@ -46,6 +46,7 @@ class FakeDBInstance(object):
 class BaseInstanceStatusTestCase(trove_testtools.TestCase):
     @classmethod
     def setUpClass(cls):
+        util.init_db()
         cls.db_info = FakeDBInstance()
         cls.datastore = models.DBDatastore.create(
             id=str(uuid.uuid4()),
@@ -137,6 +138,27 @@ class InstanceStatusTest(BaseInstanceStatusTestCase):
         instance = SimpleInstance('dummy context', self.db_info,
                                   self.ds_status)
         self.assertEqual(InstanceStatus.RESIZE, instance.status)
+
+    def test_nova_server_migrating_reports_active(self):
+        self.db_info.server_status = "MIGRATING"
+        instance = SimpleInstance('dummy context', self.db_info,
+                                  self.ds_status)
+        self.assertEqual(InstanceStatus.ACTIVE, instance.status)
+
+    def test_operating_status_server_migrating(self):
+        self.db_info.task_status = InstanceTasks.NONE
+        self.db_info.server_status = "MIGRATING"
+        instance = SimpleInstance(mock.MagicMock(), self.db_info,
+                                  self.ds_status)
+        self.assertEqual(repr(ServiceStatuses.HEALTHY),
+                         instance.operating_status)
+
+    def test_operating_status_server_not_active(self):
+        self.db_info.task_status = InstanceTasks.NONE
+        self.db_info.server_status = "SHUTDOWN"
+        instance = SimpleInstance(mock.MagicMock(), self.db_info,
+                                  self.ds_status)
+        self.assertEqual("", instance.operating_status)
 
     def test_operating_status_healthy(self):
         self.db_info.task_status = InstanceTasks.NONE

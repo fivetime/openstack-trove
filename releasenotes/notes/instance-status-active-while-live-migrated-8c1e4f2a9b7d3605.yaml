@@ -1,0 +1,8 @@
+---
+fixes:
+  - |
+    An instance whose server is being live-migrated (Nova status
+    ``MIGRATING``) showed the status ``UNKNOWN`` and no operating status
+    for as long as the migration ran. The server keeps running through a
+    live migration, and so does the database: the instance now shows
+    ``ACTIVE`` and its operating status as usual.

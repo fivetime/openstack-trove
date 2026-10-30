@@ -350,7 +350,9 @@ class SimpleInstance(object):
         server_status = self.db_info.server_status
         ds_status = self.datastore_status.status
 
-        if (task_status != InstanceTasks.NONE or server_status != 'ACTIVE'):
+        # A server being live-migrated runs, and so does its database.
+        if (task_status != InstanceTasks.NONE
+                or server_status not in ('ACTIVE', 'MIGRATING')):
             return ""
 
         return repr(ds_status)
@@ -421,6 +423,12 @@ class SimpleInstance(object):
         # still appear as though they are in RESIZE.
         if server_status in ["VERIFY_RESIZE"]:
             return InstanceStatus.RESIZE
+
+        # A server being live-migrated keeps running (Nova shows MIGRATING
+        # from the start of the migration to its end, which may be long when
+        # it fails): the instance is active, not unknown.
+        if server_status == "MIGRATING":
+            return InstanceStatus.ACTIVE
 
         return "UNKNOWN"
 
