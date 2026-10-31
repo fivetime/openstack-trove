@@ -1223,6 +1223,23 @@ class ResizeActionWaitTest(trove_testtools.TestCase):
         self.assertIn('Failed to migrate instance',
                       mock_log.exception.call_args[0][0])
 
+    def test_migrate_calls_nova_as_the_client_of_today_expects(self):
+        # python-novaclient's Server.migrate takes host= (API 2.56 and
+        # later) and nothing before that; force_host= is long gone.
+        class FakeServer(object):
+            def __init__(self):
+                self.calls = []
+
+            def migrate(self, host=None):
+                self.calls.append(host)
+
+        instance = Mock()
+        instance.server = FakeServer()
+        taskmanager_models.MigrateAction(instance)._initiate_nova_action()
+        taskmanager_models.MigrateAction(
+            instance, 'host-2')._initiate_nova_action()
+        self.assertEqual([None, 'host-2'], instance.server.calls)
+
 
 class BuiltInstanceTasksTest(trove_testtools.TestCase):
 

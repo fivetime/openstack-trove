@@ -1,0 +1,8 @@
+---
+fixes:
+  - |
+    The management ``migrate`` action failed at once with ``Server.migrate()
+    got an unexpected keyword argument 'force_host'`` and restarted the
+    database: it still called python-novaclient with the ``force_host``
+    argument that the client dropped long ago. It now passes ``host`` (or
+    nothing when no host is given).

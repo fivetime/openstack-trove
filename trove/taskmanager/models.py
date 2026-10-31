@@ -2468,7 +2468,12 @@ class MigrateAction(ResizeActionBase):
                   {"instance": self.instance.id,
                    "host": self.host})
 
-        self.instance.server.migrate(force_host=self.host)
+        # python-novaclient's Server.migrate takes host= (API 2.56 and later;
+        # no argument before that), not the force_host= of old.
+        if self.host:
+            self.instance.server.migrate(host=self.host)
+        else:
+            self.instance.server.migrate()
 
     def _record_action_success(self):
         LOG.debug("Successfully finished Migration to "

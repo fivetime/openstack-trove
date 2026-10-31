@@ -182,8 +182,8 @@ class FakeServer(object):
         return [{"href": url, "rel": link_type}
                 for link_type in ['self', 'bookmark']]
 
-    def migrate(self, force_host=None):
-        self.resize(None, force_host)
+    def migrate(self, host=None):
+        self.resize(None, host)
 
     def resize(self, new_flavor_id=None, force_host=None):
         self._current_status = "RESIZE"
