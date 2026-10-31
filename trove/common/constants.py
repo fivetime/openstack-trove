@@ -20,6 +20,9 @@ ETH1_CONFIG_PATH = "/etc/trove/eth1.json"
 USER_PORT_SETTLED_PATH = "/run/trove/user-port-settled"
 DOCKER_NETWORK_NAME = "database-network"
 DOCKER_HOST_NIC_MODE = "docker-hostnic"
+# Docker's per-endpoint interface sysctls ("net.X.Y.IFNAME.Z=value", comma
+# separated), applied before the interface is brought up.
+DOCKER_ENDPOINT_SYSCTLS = "com.docker.network.endpoint.sysctls"
 DOCKER_BRIDGE_MODE = "bridge"
 MYSQL_HOST_SOCKET_PATH = "/var/lib/mysqld"
 POSTGRESQL_HOST_SOCKET_PATH = "/var/lib/postgresql-socket"

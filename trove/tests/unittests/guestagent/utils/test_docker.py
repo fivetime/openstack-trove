@@ -144,6 +144,37 @@ class TestDockerUtils(trove_testtools.TestCase):
             'busybox', tag=None, stream=True, decode=True)
         mock_client().create_container.assert_called_once()
         mock_client().start.assert_called_once()
+        # IPv4 only: no interface sysctls for docker to apply.
+        mock_client().create_endpoint_config.assert_called_once_with(
+            ipv4_address="10.111.0.8")
+
+    @mock.patch("docker.APIClient")
+    def test__create_container_with_low_level_api_ipv6_turns_off_ra(
+            self, mock_client):
+        # With an IPv6 address the endpoint carries docker's interface
+        # sysctls: the router's advertisement must not install a default
+        # route in the container before docker adds the gateway's.
+        eth1_data = json.dumps({
+            "mac_address": "fa:16:3e:7c:9c:57",
+            "ipv4_address": "10.111.0.8",
+            "ipv4_cidr": "10.111.0.0/26",
+            "ipv4_gateway": "10.111.0.1",
+            "ipv6_address": "2001:db8:1::8",
+            "ipv6_cidr": "2001:db8:1::/64",
+            "ipv6_gateway": "2001:db8:1::1"})
+        mo = mock.mock_open(read_data=eth1_data)
+        param = dict(name="test", restart_policy={"Name": "always"},
+                     privileged=False, detach=True, volumes={}, ports={},
+                     user="test_user", environment={}, command="sleep inf")
+        mock_client().inspect_image.return_value = {'Id': 'sha256:1'}
+        with mock.patch.object(docker_utils, 'open', mo):
+            docker_utils._create_container_with_low_level_api(
+                "busybox", param)
+        mock_client().create_endpoint_config.assert_called_once_with(
+            ipv4_address="10.111.0.8", ipv6_address="2001:db8:1::8",
+            driver_opt={"com.docker.network.endpoint.sysctls":
+                        "net.ipv6.conf.IFNAME.accept_ra=0"})
+        mock_client().start.assert_called_once()
 
     @mock.patch("docker.APIClient")
     def test__create_container_with_low_level_api_stop_timeout(

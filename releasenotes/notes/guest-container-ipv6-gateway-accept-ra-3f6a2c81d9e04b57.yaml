@@ -1,0 +1,10 @@
+---
+fixes:
+  - |
+    Starting the database container failed now and then with ``failed to
+    set IPv6 gateway (...): file exists`` on an instance with an IPv6
+    address: the router's advertisement reached the container's interface
+    before docker added the gateway's default route. The guest now has
+    docker turn router advertisements off on that interface before it
+    brings it up (``net.ipv6.conf.IFNAME.accept_ra=0``); the default
+    route is the gateway's, as docker configures it.
