@@ -1,0 +1,9 @@
+---
+fixes:
+  - |
+    A cluster is left alone while one of its members has a task of its
+    own (a resize, a migration, a restart), and nothing looked at it again
+    once the task ended: the writes that moved to another member
+    meanwhile stayed recorded on the old one for as long as the cluster
+    was healthy. The task manager's scan now also looks at a cluster with
+    a member whose record changed within the last two scans.

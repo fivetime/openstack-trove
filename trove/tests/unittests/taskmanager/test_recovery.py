@@ -245,21 +245,29 @@ class HubTest(trove_testtools.TestCase):
     @mock.patch.object(recovery, 'suspect_clusters')
     def test_the_scan_looks_at_the_suspects_it_covers(self, suspects):
         stale = timeutils.utcnow() - datetime.timedelta(seconds=200)
+        fresh = timeutils.utcnow()
         suspects.return_value = [
-            ('c1', ClusterTasks.NONE.code, 'v1', stale),
-            ('c2', ClusterTasks.RECOVERING_CLUSTER.code, 'v1', None),
-            ('elsewhere', ClusterTasks.NONE.code, 'v1', stale)]
+            ('c1', ClusterTasks.NONE.code, 'v1', stale, fresh),
+            ('c2', ClusterTasks.RECOVERING_CLUSTER.code, 'v1', None, None),
+            ('c3', ClusterTasks.NONE.code, 'v1', fresh, fresh),
+            ('elsewhere', ClusterTasks.NONE.code, 'v1', stale, None)]
         self.hub.scan()
         self.assertEqual(
             {'c1': (1000.0, 'scan: the oldest heartbeat %s' % stale),
-             'c2': (1000.0, 'scan: a recovery under way')},
+             'c2': (1000.0, 'scan: a recovery under way'),
+             'c3': (1000.0, 'scan: a member changed at %s' % fresh)},
             self.hub.pending)
-        self.assertLess(suspects.call_args.args[0], timeutils.utcnow())
+        stale_before, changed_since = suspects.call_args.args
+        self.assertLess(stale_before, timeutils.utcnow())
+        # Two scans back.
+        self.assertAlmostEqual(
+            2 * recovery.CONF.cluster_recovery_scan_interval,
+            (timeutils.utcnow() - changed_since).total_seconds(), delta=5)
         # The sweep: every cluster.
         self.hub.pending.clear()
         self.hub.sweep()
         suspects.assert_called_with(None)
-        self.assertEqual({'c1', 'c2'}, set(self.hub.pending))
+        self.assertEqual({'c1', 'c2', 'c3'}, set(self.hub.pending))
 
 
 class SuspectClustersTest(trove_testtools.TestCase):
@@ -341,6 +349,36 @@ class SuspectClustersTest(trove_testtools.TestCase):
         self.assertTrue({fresh, stale, recovering} <= every)
         self.assertNotIn(busy, every)
         self.assertNotIn(gone, every)
+
+    def test_a_member_that_changed_lately_is_a_suspect(self):
+        # A member whose row changed (its own task ended) within the
+        # window: looked at by the scan although the cluster is HEALTHY
+        # and its heartbeats fresh; not after the window.
+        now = timeutils.utcnow()
+        settled = self._cluster()
+        health.record(settled, cluster_health.view(cluster_health.HEALTHY))
+        self.made.append(DBClusterHealth.find_by(id=settled))
+        quiet = self._cluster()
+        health.record(quiet, cluster_health.view(cluster_health.HEALTHY))
+        self.made.append(DBClusterHealth.find_by(id=quiet))
+        for cluster_id, age in ((settled, 300), (quiet, 3600)):
+            with DBInstance.query() as query:
+                query.filter_by(cluster_id=cluster_id).update(
+                    {'updated': now - datetime.timedelta(seconds=age)})
+        stale_before = now - datetime.timedelta(seconds=90)
+        found = {row[0]: row for row in recovery.suspect_clusters(
+            stale_before, now - datetime.timedelta(seconds=600))}
+        self.assertIn(settled, found)
+        self.assertNotIn(quiet, found)
+        self.assertEqual(now - datetime.timedelta(seconds=300),
+                         found[settled][4])
+        found = {row[0] for row in recovery.suspect_clusters(
+            stale_before, now - datetime.timedelta(seconds=100))}
+        self.assertNotIn(settled, found)
+        # Without the window (as before): neither.
+        found = {row[0] for row in recovery.suspect_clusters(stale_before)}
+        self.assertNotIn(settled, found)
+        self.assertNotIn(quiet, found)
 
     def test_a_replacement_under_way_is_a_suspect(self):
         # Its grow running, every heartbeat fresh, the health recorded

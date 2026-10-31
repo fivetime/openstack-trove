@@ -85,23 +85,27 @@ def hub(context=None):
         return _hub
 
 
-def suspect_clusters(stale_before=None):
+def suspect_clusters(stale_before=None, changed_since=None):
     """The clusters that may need the task manager, from the database
     alone: (cluster id, task id, datastore version id, the oldest
-    heartbeat of their members) of every cluster that is not deleted
-    and has no task but a recovery, with a member whose heartbeat is
-    older than ``stale_before``, a recovery under way, or a health that
-    is not recorded yet or not healthy (a task manager started again
-    does not remember what it was watching), or a member replacement
-    under way (``common.replace``, kept in its properties); every such
-    cluster when ``stale_before`` is None.
+    heartbeat of their members, the last change of a member's row) of
+    every cluster that is not deleted and has no task but a recovery,
+    with a member whose heartbeat is older than ``stale_before``, a
+    recovery under way, or a health that is not recorded yet or not
+    healthy (a task manager started again does not remember what it was
+    watching), or a member replacement under way (``common.replace``,
+    kept in its properties), or a member whose row changed since
+    ``changed_since`` (a task of its own ended: the cluster was left
+    alone meanwhile, and the writes may have moved); every such cluster
+    when ``stale_before`` is None.
     """
     oldest = func.min(InstanceServiceStatus.updated_at)
+    changed = func.max(DBInstance.updated)
     replacing = DBCluster.properties.like('%%"%s"%%' % replace.STATE)
     with DBCluster.query() as query:
         rows = query.session.query(
             DBCluster.id, DBCluster.task_id, DBCluster.datastore_version_id,
-            oldest
+            oldest, changed
         ).select_from(DBCluster).join(
             DBInstance, DBInstance.cluster_id == DBCluster.id
         ).join(
@@ -121,13 +125,16 @@ def suspect_clusters(stale_before=None):
         ).group_by(DBCluster.id, DBCluster.task_id,
                    DBCluster.datastore_version_id)
         if stale_before is not None:
-            rows = rows.having(or_(
+            suspect = [
                 oldest < stale_before,
                 DBCluster.task_id == ClusterTasks.RECOVERING_CLUSTER.code,
                 func.count(DBClusterHealth.id) == 0,
                 func.max(DBClusterHealth.status) != cluster_health.HEALTHY,
                 func.max(DBCluster.properties).like(
-                    '%%"%s"%%' % replace.STATE)))
+                    '%%"%s"%%' % replace.STATE)]
+            if changed_since is not None:
+                suspect.append(changed >= changed_since)
+            rows = rows.having(or_(*suspect))
         return rows.all()
 
 
@@ -293,17 +300,23 @@ class RecoveryHub(object):
 
     def scan(self):
         """The clusters the database says may need a look: a member
-        whose heartbeat is stale, or a recovery under way.
+        whose heartbeat is stale, a recovery under way, or a member whose
+        row changed within the last two scans (its own task ended, and
+        the cluster was left alone while it ran).
         """
-        stale_before = timeutils.utcnow() - timeutils.datetime.timedelta(
+        now = timeutils.utcnow()
+        stale_before = now - timeutils.datetime.timedelta(
             seconds=CONF.agent_heartbeat_expiry)
-        self._look_at(suspect_clusters(stale_before), 'scan')
+        changed_since = now - timeutils.datetime.timedelta(
+            seconds=2 * CONF.cluster_recovery_scan_interval)
+        self._look_at(suspect_clusters(stale_before, changed_since), 'scan',
+                      stale_before)
 
     def sweep(self):
         """Every cluster this replica covers."""
         self._look_at(suspect_clusters(None), 'sweep')
 
-    def _look_at(self, rows, what):
+    def _look_at(self, rows, what, stale_before=None):
         by_id = {row[0]: row for row in rows}
         for cluster_id, row in by_id.items():
             self.managers.setdefault(row[2], None)
@@ -312,10 +325,14 @@ class RecoveryHub(object):
                   len(by_id), len(covered))
         for cluster_id in covered:
             row = by_id[cluster_id]
+            changed = row[4] if len(row) > 4 else None
             if row[1] == ClusterTasks.RECOVERING_CLUSTER.code:
                 reason = '%s: a recovery under way' % what
-            elif row[3] is not None:
+            elif row[3] is not None and (stale_before is None or
+                                         row[3] < stale_before):
                 reason = '%s: the oldest heartbeat %s' % (what, row[3])
+            elif changed is not None:
+                reason = '%s: a member changed at %s' % (what, changed)
             else:
                 reason = what
             self.request_look(cluster_id, reason)
