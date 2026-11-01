@@ -10,3 +10,9 @@ fixes:
     back when it ends: one task manager restarts the member, the other
     leaves it be. A database that is restarting is no longer taken as up
     again.
+  - |
+    While the repair's restart of a member runs, and right after it was
+    sent, the cluster is looked at again every 15 seconds, so that its
+    health is recorded as soon as the restart ends rather than at the next
+    scan: a member's task keeps its cluster from being looked at, and
+    nothing else asked for a look when the task ended.

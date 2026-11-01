@@ -173,6 +173,12 @@ class ClusterRepair(object):
             return None
         if not members or any(m.task_status not in health.SETTLED_TASKS
                               for m in members):
+            if any(self._restarting(m) for m in members):
+                # Our restart of a member runs: its end is looked at soon,
+                # not at the next scan (production, 2026-11-01: the member
+                # was up 25 s after the restart, its cluster recorded
+                # HEALTHY four minutes later).
+                return RESTART_FOLLOW
             return None
         stale = health.stale_members(m.id for m in members)
         heard = [m for m in members if m.id not in stale]
@@ -285,7 +291,7 @@ class ClusterRepair(object):
                     self._restart_database(context, db_cluster, member,
                                            manager, now - entry['since'])
                     entry['restarted'] = now
-                    left = wait
+                    left = RESTART_FOLLOW
                 again = _soonest(again, left)
                 continue
             left = wait - (now - restarted)
@@ -338,6 +344,11 @@ class ClusterRepair(object):
                    '%s; the restart failed: %s' % (reason, err))
             return
         notify(EVENT_START, db_cluster, member, 'restart', reason)
+
+    def _restarting(self, member):
+        entry = self.database_down.get(member.id)
+        return (member.task_status == InstanceTasks.REBOOTING and
+                entry is not None and entry.get('restarted') is not None)
 
     @staticmethod
     def _until_stale(db_cluster, members, stale):
@@ -404,6 +415,9 @@ RESTARTING_CODE = service_status.ServiceStatuses.RESTARTING._code
 # How long after its task last changed a member is not restarted: the
 # other task manager's restart may have ended just now.
 RESTART_SPACING = 60
+# How soon a cluster is looked at again while the repair's restart of a
+# member runs, and after it was sent.
+RESTART_FOLLOW = 15
 
 
 def _take_member(instance_id, task, taken=None):

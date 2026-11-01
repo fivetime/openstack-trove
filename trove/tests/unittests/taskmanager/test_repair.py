@@ -394,7 +394,8 @@ class TestDatabaseDown(RepairTestBase):
         self.assertEqual(600, self._check(0))
         self.assertEqual(300, self._check(300))
         self.assertEqual([], self._restarted())
-        self.assertEqual(600, self._check(300))
+        # Looked at again soon, to see the restart's end.
+        self.assertEqual(repair.RESTART_FOLLOW, self._check(300))
         # The task manager's restart of the instance, its task taken.
         self.assertEqual([self.members[0].id], self._restarted())
         self.assertEqual([InstanceTasks.REBOOTING.code],
@@ -410,6 +411,17 @@ class TestDatabaseDown(RepairTestBase):
         self._task_changed(seconds_ago=600)
         self._check(100)
         self.assertEqual([self.members[0].id], self._restarted())
+
+    def test_its_restart_is_followed_while_it_runs(self):
+        self._status(self.members[0], ServiceStatuses.SHUTDOWN)
+        self._check(0)
+        self._check(600)
+        self._task_changed(seconds_ago=1, task=InstanceTasks.REBOOTING)
+        self.assertEqual(repair.RESTART_FOLLOW, self._check(5))
+        # Another member's task (not our restart): the end of it is the
+        # scan's to see.
+        self._task_changed(seconds_ago=1, task=InstanceTasks.RESIZING)
+        self.assertIsNone(self._check(5))
 
     def test_the_other_task_manager_does_not_restart_it_too(self):
         # Two task managers look at every cluster (production,
