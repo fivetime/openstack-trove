@@ -16,6 +16,7 @@
 from unittest import mock
 import uuid
 
+from trove.common import exception
 from trove.datastore import models
 from trove.instance.models import InstanceServiceStatus
 from trove.instance.models import InstanceStatus
@@ -46,7 +47,12 @@ class FakeDBInstance(object):
 class BaseInstanceStatusTestCase(trove_testtools.TestCase):
     @classmethod
     def setUpClass(cls):
-        util.init_db()
+        try:
+            util.init_db()
+        except exception.BadRequest:
+            # Initialised already, by a module that ran before in this
+            # process.
+            pass
         cls.db_info = FakeDBInstance()
         cls.datastore = models.DBDatastore.create(
             id=str(uuid.uuid4()),
