@@ -1,0 +1,9 @@
+---
+other:
+  - |
+    When the database of an instance goes down (stopped or exited, its
+    health check failing, or its container restarting over and over), the
+    guest agent writes the last lines of the database container's output to
+    the guest log, once each time. Why a database does not start can then
+    be read with ``openstack database log set <instance> guest --publish``,
+    without logging in to the guest.

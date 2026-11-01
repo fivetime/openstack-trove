@@ -121,6 +121,61 @@ class TestHeartbeat(trove_testtools.TestCase):
             'update_status'])
 
 
+class TestDownContainerLog(trove_testtools.TestCase):
+    """The last lines of the database container go to the guest log once
+    each time the database goes down, so that why it did not start can be
+    read without logging in to the guest (a Kata guest cannot be).
+    """
+
+    def _beats(self, statuses, logs=None):
+        manager = base_manager.Manager('test')
+        manager._docker_client = mock.Mock()
+        manager.status = mock.Mock(is_installed=True)
+        manager.status.get_actual_db_status.side_effect = statuses
+        with mock.patch.object(base_manager.docker_util,
+                               'get_container_logs',
+                               side_effect=logs) as get_logs, \
+                mock.patch.object(base_manager, 'LOG') as log:
+            if logs is None:
+                get_logs.side_effect = None
+                get_logs.return_value = ['line 1', 'Bad file format']
+            for _ in statuses:
+                manager.update_status(None)
+        return manager, get_logs, log
+
+    def test_once_each_time_the_database_goes_down(self):
+        s = service_status.ServiceStatuses
+        statuses = [s.HEALTHY, s.CRASHED, s.CRASHED, s.UNKNOWN, s.HEALTHY,
+                    s.SHUTDOWN, s.FAILED]
+        manager, get_logs, log = self._beats(statuses)
+        # Down at the second pass and at the sixth; not again while down.
+        self.assertEqual(2, get_logs.call_count)
+        get_logs.assert_called_with(manager._docker_client,
+                                    tail=manager.DOWN_LOG_LINES)
+        warned = [c for c in log.warning.call_args_list
+                  if 'the last %d lines' in c[0][0]]
+        self.assertEqual(2, len(warned))
+        self.assertEqual('crashed', warned[0][0][1])
+        self.assertEqual('shutdown', warned[1][0][1])
+        self.assertIn('Bad file format', warned[0][0][3])
+        # Every status still goes out.
+        self.assertEqual(statuses, [c[0][0] for c in
+                                    manager.status.set_status.call_args_list])
+
+    def test_a_database_that_is_up_logs_nothing(self):
+        s = service_status.ServiceStatuses
+        _manager, get_logs, _log = self._beats(
+            [s.HEALTHY, s.RUNNING, s.HEALTHY])
+        get_logs.assert_not_called()
+
+    def test_a_log_that_cannot_be_read_does_not_stop_the_heartbeat(self):
+        s = service_status.ServiceStatuses
+        manager, get_logs, log = self._beats(
+            [s.CRASHED], logs=Exception('no container'))
+        manager.status.set_status.assert_called_once_with(s.CRASHED)
+        self.assertIn('cannot be read', log.warning.call_args[0][0])
+
+
 class TestFirstHeartbeat(trove_testtools.TestCase):
     """The agent's first heartbeat goes out when it starts serving, with
     the real status object and the conductor's cast mocked.

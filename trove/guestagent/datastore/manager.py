@@ -37,6 +37,7 @@ from trove.guestagent import guest_log
 from trove.guestagent.module import driver_manager
 from trove.guestagent.module import module_manager
 from trove.guestagent.strategies import replication as repl_strategy
+from trove.guestagent.utils import docker as docker_util
 from trove.guestagent import volume
 from trove.instance import service_status
 
@@ -215,7 +216,43 @@ class Manager(periodic_task.PeriodicTasks, SSLManager):
         LOG.debug("Starting to check database service status")
 
         status = self.get_service_status()
+        self._log_container_when_down(status)
         self.status.set_status(status)
+
+    # The statuses of a database that is not up: stopped or exited, its
+    # health check failing, never started, or its container without a
+    # health (restarting over and over).
+    DOWN_STATUSES = (service_status.ServiceStatuses.SHUTDOWN,
+                     service_status.ServiceStatuses.CRASHED,
+                     service_status.ServiceStatuses.FAILED,
+                     service_status.ServiceStatuses.UNKNOWN)
+    # The lines of the container's log the guest log gets.
+    DOWN_LOG_LINES = 60
+    _container_logged = False
+
+    def _log_container_when_down(self, status):
+        """The last lines of the database container in the guest log, once
+        each time the database goes down: the guest log is what can be read
+        of a guest without logging in to it (database log set guest
+        --publish), and why a database does not start is in its container's
+        output.
+        """
+        if status not in self.DOWN_STATUSES:
+            self._container_logged = False
+            return
+        if self._container_logged:
+            return
+        self._container_logged = True
+        try:
+            lines = docker_util.get_container_logs(
+                self.docker_client, tail=self.DOWN_LOG_LINES)
+        except Exception as e:
+            LOG.warning("The database is %s; its container's log cannot be "
+                        "read: %s", status.description, e)
+            return
+        LOG.warning("The database is %s; the last %d lines of its "
+                    "container:\n%s", status.description,
+                    self.DOWN_LOG_LINES, '\n'.join(lines))
 
     def get_service_status(self):
         return self.status.get_actual_db_status()
