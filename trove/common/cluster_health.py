@@ -133,6 +133,15 @@ def combine(answers, silent, known=None):
     if silent:
         reasons.insert(0, 'not answering: %s' % ', '.join(silent))
     status = worst
+    # Every member out and none taking the writes: down, whatever each
+    # member says of itself. The last members of a Group Replication
+    # group that lost its majority leave it, and each sees only itself
+    # out (production, 2026-11-01: 226 s of no writes recorded DEGRADED).
+    members = {name for name, _answer in answers} | set(silent)
+    if status != DOWN and members <= out and not any(
+            answer.get('writable') for _name, answer in answers):
+        status = DOWN
+        reasons.insert(0, 'every member is out')
     if status == HEALTHY and out:
         status = DEGRADED
     result = view(status, out, '; '.join(reasons) or None)

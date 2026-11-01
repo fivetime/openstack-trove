@@ -1,0 +1,8 @@
+---
+fixes:
+  - |
+    A cluster every member of which is out, and none of whose members takes
+    the writes, is now recorded DOWN ("every member is out"). The last
+    members of a Group Replication group that lost its majority leave it
+    and each reports only itself out, so such a group was recorded
+    DEGRADED while it took no writes.

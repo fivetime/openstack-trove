@@ -47,6 +47,38 @@ class TestCombine(trove_testtools.TestCase):
         self.assertEqual('not answering: m-3; failing: 10.0.0.3 (m-1, m-2)',
                          health['reason'])
 
+    def test_down_when_every_member_is_out(self):
+        # The last members of a Group Replication group that lost its
+        # majority leave it; each sees itself out (production,
+        # 2026-11-01: 226 s of no writes recorded DEGRADED).
+        health = ch.combine([
+            ('m-1', ch.view(ch.DEGRADED, ['10.0.0.1'], 'out of the group',
+                            '10.0.0.1')),
+            ('m-2', ch.view(ch.DEGRADED, ['10.0.0.2'], 'out of the group',
+                            '10.0.0.2'))], ['m-3'])
+        self.assertEqual(ch.DOWN, health['status'])
+        self.assertEqual(['m-1', 'm-2', 'm-3'], health['out'])
+        self.assertTrue(health['reason'].startswith('every member is out'))
+        self.assertEqual([], health['writers'])
+
+    def test_not_down_when_every_member_is_out_but_one_takes_writes(self):
+        health = ch.combine([
+            ('m-1', ch.view(ch.DEGRADED, ['10.0.0.2'], 'not ONLINE',
+                            '10.0.0.1', True)),
+            ('m-2', ch.view(ch.DEGRADED, ['10.0.0.2', '10.0.0.1'], 'out',
+                            '10.0.0.2'))], [])
+        self.assertEqual(ch.DEGRADED, health['status'])
+        self.assertEqual(['m-1'], health['writers'])
+
+    def test_not_down_while_a_member_is_in(self):
+        health = ch.combine([
+            ('m-1', ch.view(ch.DEGRADED, ['10.0.0.2'], 'not ONLINE',
+                            '10.0.0.1')),
+            ('m-2', ch.view(ch.DEGRADED, ['10.0.0.2'], 'out of the group',
+                            '10.0.0.2'))], ['m-3'])
+        self.assertEqual(ch.DEGRADED, health['status'])
+        self.assertEqual(['m-2', 'm-3'], health['out'])
+
     def test_the_worst_a_member_says(self):
         health = ch.combine([
             ('cfg-1', ch.view(ch.DEGRADED, ['c:27019'], 'set cfg: c out')),
