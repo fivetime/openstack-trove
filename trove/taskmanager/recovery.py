@@ -138,6 +138,36 @@ def suspect_clusters(stale_before=None, changed_since=None):
         return rows.all()
 
 
+def stale_healthy_clusters(stale_before):
+    """The clusters recorded HEALTHY, with no task, that have a member
+    whose heartbeat is older than ``stale_before``: (cluster id, task id,
+    datastore version id, the oldest heartbeat of their members). What the
+    stale scan looks at often and cheaply: a cluster whose every member
+    went down at once has none left to report it, and would be shown
+    HEALTHY until the next scan, after it may be back.
+    """
+    oldest = func.min(InstanceServiceStatus.updated_at)
+    with DBCluster.query() as query:
+        return query.session.query(
+            DBCluster.id, DBCluster.task_id, DBCluster.datastore_version_id,
+            oldest
+        ).select_from(DBCluster).join(
+            DBInstance, DBInstance.cluster_id == DBCluster.id
+        ).join(
+            InstanceServiceStatus,
+            InstanceServiceStatus.instance_id == DBInstance.id
+        ).join(
+            DBClusterHealth, DBClusterHealth.id == DBCluster.id
+        ).filter(
+            DBCluster.deleted == expression.false(),
+            DBInstance.deleted == expression.false(),
+            DBCluster.task_id == ClusterTasks.NONE.code,
+            DBClusterHealth.status == cluster_health.HEALTHY
+        ).group_by(
+            DBCluster.id, DBCluster.task_id, DBCluster.datastore_version_id
+        ).having(oldest < stale_before).all()
+
+
 class RecoveryHub(object):
 
     def __init__(self, coordinator=None):
@@ -310,6 +340,15 @@ class RecoveryHub(object):
         changed_since = now - timeutils.datetime.timedelta(
             seconds=2 * CONF.cluster_recovery_scan_interval)
         self._look_at(suspect_clusters(stale_before, changed_since), 'scan',
+                      stale_before)
+
+    def scan_stale(self):
+        """The clusters recorded HEALTHY that have a member whose
+        heartbeat is stale: often, from the database alone.
+        """
+        stale_before = timeutils.utcnow() - timeutils.datetime.timedelta(
+            seconds=CONF.agent_heartbeat_expiry)
+        self._look_at(stale_healthy_clusters(stale_before), 'stale scan',
                       stale_before)
 
     def sweep(self):

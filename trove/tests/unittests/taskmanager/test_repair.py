@@ -333,6 +333,122 @@ class TestClusterRepair(RepairTestBase):
         self.assertEqual({}, self.repair.started)
 
 
+class TestDatabaseDown(RepairTestBase):
+    """A member whose guest agent is heard but whose database stays down
+    (a Vertica node that aborts its start, a Redis whose container dies
+    over and over): its database is restarted once, and the member is lost
+    if it is still down as long again after that. A clock of our own.
+    """
+
+    def setUp(self):
+        super(TestDatabaseDown, self).setUp()
+        self.patch_conf_property('cluster_repair_database_down', 600)
+        self.clock = [1000.0]
+        mock.patch.object(repair.time, 'monotonic',
+                          side_effect=lambda: self.clock[0]).start()
+        self.guest = mock.patch.object(
+            repair.clients, 'create_guest_client').start()
+        self.cluster, self.members = self._cluster(3)
+
+    def _status(self, member, status):
+        with InstanceServiceStatus.query() as query:
+            query.filter_by(instance_id=member.id).update(
+                {'status_id': status._code})
+
+    def _check(self, after, manager='mysql'):
+        self.clock[0] += after
+        return self.repair.check_now(mock.Mock(), self.cluster,
+                                     manager=manager)
+
+    def test_it_is_restarted_once_after_the_wait(self):
+        self._status(self.members[0], ServiceStatuses.CRASHED)
+        self.assertEqual(600, self._check(0))
+        self.assertEqual(300, self._check(300))
+        self.guest.assert_not_called()
+        self.assertEqual(600, self._check(300))
+        self.guest.assert_called_once_with(mock.ANY, self.members[0].id,
+                                           'mysql')
+        self.guest.return_value.restart_soon.assert_called_once_with()
+        self.assertEqual([repair.EVENT_START], self._events())
+        payload = self.notifier.info.call_args.args[2]
+        self.assertEqual('restart', payload['action'])
+        # Not again while it is down after it.
+        self._check(100)
+        self.guest.return_value.restart_soon.assert_called_once_with()
+
+    def test_its_end_is_told_when_it_is_up_again(self):
+        self._status(self.members[0], ServiceStatuses.SHUTDOWN)
+        self._check(0)
+        self._check(600)
+        self._status(self.members[0], ServiceStatuses.HEALTHY)
+        self.assertIsNone(self._check(60))
+        self.assertEqual([repair.EVENT_START, repair.EVENT_END],
+                         self._events())
+        self.assertEqual({}, self.repair.database_down)
+
+    def test_still_down_after_the_restart_it_is_lost(self):
+        self.patch_conf_property('cluster_repair_replace', True)
+        begin = mock.patch.object(self.repair.replacement, 'begin',
+                                  return_value=30).start()
+        self._status(self.members[1], ServiceStatuses.UNKNOWN)
+        self._check(0)
+        self._check(600)
+        begin.assert_not_called()
+        self.assertEqual(30, self._check(600))
+        begin.assert_called_once()
+        lost, reason = begin.call_args.args[4], begin.call_args.args[5]
+        self.assertEqual(self.members[1].id, lost.id)
+        self.assertIn('database has stayed down for 1200 s', reason)
+        self.assertIn('a restart 600 s ago did not bring it up', reason)
+        # Once.
+        self._check(600)
+        begin.assert_called_once()
+
+    def test_not_lost_when_the_operator_does_not_let_it_be_replaced(self):
+        begin = mock.patch.object(self.repair.replacement, 'begin').start()
+        self._status(self.members[1], ServiceStatuses.FAILED)
+        for after in (0, 600, 600, 600):
+            self._check(after)
+        begin.assert_not_called()
+
+    def test_a_cluster_with_no_healthy_member_is_left_alone(self):
+        # Every database down: the datastore's recovery, not one
+        # member's repair.
+        for member in self.members:
+            self._status(member, ServiceStatuses.CRASHED)
+        for after in (0, 600, 600):
+            self.assertIsNone(self._check(after))
+        self.guest.assert_not_called()
+
+    def test_a_running_database_is_not_down(self):
+        self._status(self.members[0], ServiceStatuses.RUNNING)
+        for after in (0, 600, 600):
+            self.assertIsNone(self._check(after))
+        self.guest.assert_not_called()
+
+    def test_off(self):
+        self.patch_conf_property('cluster_repair_database_down', 0)
+        self._status(self.members[0], ServiceStatuses.CRASHED)
+        for after in (0, 600, 600):
+            self.assertIsNone(self._check(after))
+        self.guest.assert_not_called()
+
+    def test_a_quiet_member_is_the_start_s_not_the_restart_s(self):
+        # Its heartbeat stale: the start of its server is the step; the
+        # wait for its database is forgotten.
+        self._status(self.members[0], ServiceStatuses.CRASHED)
+        self._check(0)
+        with InstanceServiceStatus.query() as query:
+            query.filter_by(instance_id=self.members[0].id).update(
+                {'updated_at': timeutils.utcnow() -
+                 datetime.timedelta(seconds=600)})
+        self.members[0].compute_instance_id = SERVER
+        self.members[0].save()
+        self._check(600)
+        self.guest.assert_not_called()
+        self.assertEqual({}, self.repair.database_down)
+
+
 class TestTheHubRepairs(RepairTestBase):
     """The recovery hub runs the repair on every look, also at a cluster
     whose datastore has no recovery, and looks again when it asks.

@@ -283,6 +283,19 @@ def stale_members(member_ids):
     return set(member_ids) - fresh
 
 
+def service_statuses(member_ids):
+    """The service status code of each of the given members that has one
+    recorded: what its guest agent last said of its database.
+    """
+    member_ids = list(member_ids)
+    if not member_ids:
+        return {}
+    with InstanceServiceStatus.query() as query:
+        return {status.instance_id: status.status_id for status in
+                query.filter(
+                    InstanceServiceStatus.instance_id.in_(member_ids)).all()}
+
+
 def heartbeats_since(member_ids, since):
     """Of the given members, those whose heartbeat is from ``since`` or
     later.

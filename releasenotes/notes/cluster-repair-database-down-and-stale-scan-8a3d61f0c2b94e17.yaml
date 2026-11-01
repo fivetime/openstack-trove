@@ -1,0 +1,20 @@
+---
+features:
+  - |
+    The repair of a cluster now also looks after a member whose guest
+    agent is heard but whose database stays down (stopped, crashed, failed
+    to start, or unknown) while another member is healthy: after
+    ``cluster_repair_database_down`` seconds (600 by default, 0 turns it
+    off) it restarts the member's database, once; still down as long again
+    after that, the member is lost and replaced as
+    ``cluster_repair_replace`` lets. A cluster none of whose members is
+    healthy is left to the datastore's own recovery.
+fixes:
+  - |
+    A cluster whose every member went down at once (all of them on one
+    host that was reset) was shown HEALTHY: no member was left to report
+    it, and the scan every ``cluster_recovery_scan_interval`` seconds could
+    come after the members were back. A cheap scan of the database every
+    ``cluster_stale_scan_interval`` seconds (30 by default, 0 turns it
+    off) now picks the clusters recorded healthy that have a member whose
+    heartbeat is stale, and looks at them.

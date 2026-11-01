@@ -345,6 +345,14 @@ common_opts = [
                     'whose heartbeat is older than agent_heartbeat_expiry, '
                     'or a recovery under way. The scan asks no member; the '
                     'clusters it finds are looked at. 0 turns it off.'),
+    cfg.IntOpt('cluster_stale_scan_interval', default=30, min=0,
+               help='Seconds between two scans of the database for the '
+                    'clusters recorded healthy that have a member whose '
+                    'heartbeat is older than agent_heartbeat_expiry: a '
+                    'cluster whose every member went down at once has none '
+                    'left to report it, and the full scan '
+                    '(cluster_recovery_scan_interval) may come after it is '
+                    'back. The scan asks no member. 0 turns it off.'),
     cfg.BoolOpt('cluster_repair_start', default=True,
                 help='Start the server of a cluster member that Nova shut '
                      'off by itself (its domain went away: powered off, '
@@ -358,6 +366,13 @@ common_opts = [
     cfg.IntOpt('cluster_repair_start_interval', default=300, min=30,
                help='Seconds after a start of a member\'s server before it '
                     'is started again if it is still off.'),
+    cfg.IntOpt('cluster_repair_database_down', default=600, min=0,
+               help='Seconds a cluster member\'s database may stay down '
+                    '(stopped, crashed, failed or unknown) while its guest '
+                    'agent is heard and another member is healthy, before '
+                    'the repair restarts it; as long again after the '
+                    'restart, it is lost and replaced as cluster_repair_'
+                    'replace lets. 0 turns it off.'),
     cfg.BoolOpt('cluster_repair_replace', default=False,
                 help='Replace a cluster member that is lost for good: its '
                      'server gone, in ERROR, or off and given up on, on a '

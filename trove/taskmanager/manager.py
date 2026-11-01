@@ -598,6 +598,17 @@ class Manager(periodic_task.PeriodicTasks):
             """
             recovery.hub(self.admin_context).scan()
 
+    if CONF.cluster_stale_scan_interval:
+        @periodic_task.periodic_task(
+            spacing=CONF.cluster_stale_scan_interval)
+        def scan_stale_clusters(self, context):
+            """The clusters recorded healthy that have a member whose
+            heartbeat is stale: a cluster whose every member went down at
+            once has none left to tell, and would be shown healthy until
+            the next scan.
+            """
+            recovery.hub(self.admin_context).scan_stale()
+
     if CONF.instance_repair_scan_interval:
         @periodic_task.periodic_task(
             spacing=CONF.instance_repair_scan_interval)

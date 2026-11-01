@@ -242,6 +242,21 @@ class HubTest(trove_testtools.TestCase):
             mock.call('v-pxc')))
         self.assertEqual(2, load_strategy.call_count)
 
+    @mock.patch.object(recovery, 'stale_healthy_clusters')
+    def test_the_stale_scan_looks_at_what_it_finds(self, stale):
+        old = timeutils.utcnow() - datetime.timedelta(seconds=200)
+        stale.return_value = [('c1', ClusterTasks.NONE.code, 'v1', old),
+                              ('elsewhere', ClusterTasks.NONE.code, 'v1',
+                               old)]
+        self.hub.scan_stale()
+        self.assertEqual(
+            {'c1': (1000.0, 'stale scan: the oldest heartbeat %s' % old)},
+            self.hub.pending)
+        self.assertAlmostEqual(
+            recovery.CONF.agent_heartbeat_expiry,
+            (timeutils.utcnow() - stale.call_args.args[0]).total_seconds(),
+            delta=5)
+
     @mock.patch.object(recovery, 'suspect_clusters')
     def test_the_scan_looks_at_the_suspects_it_covers(self, suspects):
         stale = timeutils.utcnow() - datetime.timedelta(seconds=200)
@@ -379,6 +394,33 @@ class SuspectClustersTest(trove_testtools.TestCase):
         found = {row[0] for row in recovery.suspect_clusters(stale_before)}
         self.assertNotIn(settled, found)
         self.assertNotIn(quiet, found)
+
+    def test_the_stale_scan_finds_healthy_clusters_with_a_stale_member(self):
+        # Every member of a cluster gone at once: none reports, and the
+        # record says HEALTHY until someone looks.
+        def recorded(cluster_id, status):
+            health.record(cluster_id, cluster_health.view(status))
+            self.made.append(DBClusterHealth.find_by(id=cluster_id))
+        all_gone = self._cluster(heartbeats=(200, 200, 200))
+        recorded(all_gone, cluster_health.HEALTHY)
+        one_gone = self._cluster(heartbeats=(0, 200, 0))
+        recorded(one_gone, cluster_health.HEALTHY)
+        fresh = self._cluster()
+        recorded(fresh, cluster_health.HEALTHY)
+        degraded = self._cluster(heartbeats=(0, 200, 0))
+        recorded(degraded, cluster_health.DEGRADED)
+        unseen = self._cluster(heartbeats=(200, 200, 200))
+        busy = self._cluster(task=ClusterTasks.GROWING_CLUSTER,
+                             heartbeats=(200, 200, 200))
+        recorded(busy, cluster_health.HEALTHY)
+        stale_before = timeutils.utcnow() - datetime.timedelta(seconds=90)
+        found = {row[0]: row for row in
+                 recovery.stale_healthy_clusters(stale_before)}
+        self.assertEqual({all_gone, one_gone},
+                         set(found) & {all_gone, one_gone, fresh, degraded,
+                                       unseen, busy})
+        self.assertLess(found[all_gone][3], stale_before)
+        self.assertEqual('v1', found[all_gone][2])
 
     def test_a_replacement_under_way_is_a_suspect(self):
         # Its grow running, every heartbeat fresh, the health recorded

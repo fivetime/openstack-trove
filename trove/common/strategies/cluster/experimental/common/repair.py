@@ -31,8 +31,15 @@ again after ``cluster_repair_start_interval`` seconds, at most
 counted from the server's actions in Nova, so every task manager counts
 the same and a task manager that starts again forgets nothing.
 
-A member that is lost for good (its server gone, in ERROR, or off and
-given up on) is replaced, when the operator lets it
+A member whose guest agent is heard but whose database stays down (its
+status stopped, crashed, failed or unknown) for
+``cluster_repair_database_down`` seconds while another member is healthy
+has its database restarted, once; down as long again after that, it is
+lost. A cluster none of whose members is healthy is not the repair's:
+that is the datastore's recovery.
+
+A member that is lost for good (its server gone, in ERROR, off and given
+up on, or its database not coming up) is replaced, when the operator lets it
 (``cluster_repair_replace``) and its datastore has a plugin:
 ``common.replace``.
 
@@ -55,6 +62,7 @@ from trove.common import cluster_health as ch
 from trove.common import context as trove_context
 from trove.common.strategies.cluster.experimental.common import health
 from trove.common.strategies.cluster.experimental.common import replace
+from trove.instance import service_status
 from trove import rpc
 
 LOG = logging.getLogger(__name__)
@@ -136,6 +144,9 @@ class ClusterRepair(object):
         # The members this task manager started, and when: the end of the
         # repair is told when one is heard from again.
         self.started = {}
+        # The members whose database this task manager sees down while
+        # their agent is heard: since when, and when it restarted it.
+        self.database_down = {}
         self.replacement = replace.MemberReplacement(notify, now=self._now)
 
     def check_now(self, context, db_cluster, members=None, manager=None):
@@ -160,11 +171,18 @@ class ClusterRepair(object):
                               for m in members):
             return None
         stale = health.stale_members(m.id for m in members)
-        self._ended(db_cluster, [m for m in members if m.id not in stale])
+        heard = [m for m in members if m.id not in stale]
+        self._ended(db_cluster, heard)
+        down_in = self._database_down(context, db_cluster, members, heard,
+                                      manager)
+        if db_cluster.get_properties().get(replace.STATE):
+            # The database-down step began a replacement.
+            return down_in
         quiet = [m for m in members
                  if m.id in stale and m.compute_instance_id]
         if not quiet:
-            return self._until_stale(db_cluster, members, stale)
+            return _soonest(self._until_stale(db_cluster, members, stale),
+                            down_in)
         nova = self.nova_factory(context)
         computes = {}
 
@@ -213,7 +231,88 @@ class ClusterRepair(object):
                                            members, member, reason)
             if later is not None:
                 again = later if again is None else min(again, later)
+        return _soonest(again, down_in)
+
+    def _database_down(self, context, db_cluster, members, heard, manager):
+        """The members whose agent is heard and whose database is down:
+        restarted once after cluster_repair_database_down seconds, lost as
+        long again after that. Returns the seconds until the next step is
+        due, or None.
+        """
+        wait = CONF.cluster_repair_database_down
+        heard_ids = {m.id for m in heard}
+        statuses = health.service_statuses(heard_ids) if wait else {}
+        down = [m for m in heard if statuses.get(m.id) in DATABASE_DOWN]
+        down_ids = {m.id for m in down}
+        for member in heard:
+            entry = self.database_down.get(member.id)
+            if entry and member.id not in down_ids:
+                del self.database_down[member.id]
+                if entry.get('restarted') is not None:
+                    LOG.info("Cluster %s: the database of member %s is up "
+                             "again.", db_cluster.id, member.name)
+                    notify(EVENT_END, db_cluster, member, 'restart',
+                           'its database is up again')
+        for member_id in list(self.database_down):
+            if member_id not in heard_ids:
+                # Quiet now: the start of its server is the repair's step.
+                del self.database_down[member_id]
+        if not down or not allows_start(db_cluster):
+            return None
+        healthy = [m for m in heard if m.id not in down_ids and
+                   statuses.get(m.id) == HEALTHY_CODE]
+        if not healthy:
+            # No member is healthy: the cluster's own recovery, not one
+            # member's.
+            return None
+        now = time.monotonic()
+        again = None
+        for member in down:
+            entry = self.database_down.setdefault(member.id, {'since': now})
+            restarted = entry.get('restarted')
+            if restarted is None:
+                left = wait - (now - entry['since'])
+                if left <= 0:
+                    self._restart_database(context, db_cluster, member,
+                                           manager, now - entry['since'])
+                    entry['restarted'] = now
+                    left = wait
+                again = _soonest(again, left)
+                continue
+            left = wait - (now - restarted)
+            if left > 0:
+                again = _soonest(again, left)
+                continue
+            if entry.get('lost') or not allows_replace(db_cluster) or \
+                    not manager:
+                continue
+            entry['lost'] = True
+            reason = ('its database has stayed down for %d s while its '
+                      'guest agent is heard; a restart %d s ago did not '
+                      'bring it up' % (now - entry['since'], now - restarted))
+            LOG.warning("Cluster %s: member %s is lost: %s.", db_cluster.id,
+                        member.name, reason)
+            later = self.replacement.begin(context, db_cluster, manager,
+                                           members, member, reason)
+            again = _soonest(again, later)
         return again
+
+    def _restart_database(self, context, db_cluster, member, manager,
+                          down_for):
+        reason = ('its database has stayed down for %d s while its guest '
+                  'agent is heard' % down_for)
+        LOG.info("Cluster %s: restarting the database of member %s (%s): "
+                 "%s.", db_cluster.id, member.name, member.id, reason)
+        try:
+            clients.create_guest_client(context, member.id,
+                                        manager).restart_soon()
+        except Exception as err:
+            LOG.warning("Cluster %s: the database of member %s was not "
+                        "restarted: %s", db_cluster.id, member.id, err)
+            notify(EVENT_ERROR, db_cluster, member, 'restart',
+                   '%s; the restart failed: %s' % (reason, err))
+            return
+        notify(EVENT_START, db_cluster, member, 'restart', reason)
 
     @staticmethod
     def _until_stale(db_cluster, members, stale):
@@ -266,6 +365,21 @@ class ClusterRepair(object):
             notify(EVENT_END, db_cluster, member, 'start',
                    'heard from again %d s after its start' %
                    (time.monotonic() - since))
+
+
+# The statuses of a database that is down while its agent is heard.
+DATABASE_DOWN = frozenset(status._code for status in (
+    service_status.ServiceStatuses.SHUTDOWN,
+    service_status.ServiceStatuses.CRASHED,
+    service_status.ServiceStatuses.FAILED,
+    service_status.ServiceStatuses.UNKNOWN))
+HEALTHY_CODE = service_status.ServiceStatuses.HEALTHY._code
+
+
+def _soonest(*seconds):
+    """The smallest of the given delays that are set, or None."""
+    given = [s for s in seconds if s is not None]
+    return min(given) if given else None
 
 
 def decide_start(nova, member, computes=None, now=None):
