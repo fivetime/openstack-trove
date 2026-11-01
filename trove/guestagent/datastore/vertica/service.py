@@ -98,6 +98,8 @@ DB_NAME = 'db_srvr'
 ADMIN_USER = 'dbadmin'
 PORT = 5433
 NMA_PORT = 5554
+# The port of spread, which carries the messages of the nodes of a cluster.
+SPREAD_PORT = 4803
 # The admin logs in without a password over the socket of the server,
 # which only the processes of the container reach. The guest agent needs
 # nothing else, and a restored database takes the password of the
@@ -144,6 +146,31 @@ NMA=$!
 # starts.
 running() {
     ps -eo args | grep '^/opt/vertica/bin/vertica ' | grep -qv -- ' -Ebatch'
+}
+VERTICA=/opt/vertica/bin/vertica
+# The catalog directory of this node; the name of the node is in it.
+catalog() {
+    ls -d %(data)s/%(db)s/v_%(db)s_node*_catalog 2>/dev/null | head -n 1
+}
+# The last start of the server aborted as the files of the node do not
+# match its catalog: the host lost power before they reached the disk.
+inconsistent() {
+    local cat
+    cat=$(catalog)
+    [ -n "$cat" ] && tail -n 40 "$cat/startup.log" 2>/dev/null | \\
+        grep -q 'Data consistency problems found'
+}
+# The server with --force: it deletes the files that do not match the
+# catalog and recovers the node from the other nodes. Only for a node of
+# a database that runs on the other nodes.
+force_start() {
+    local cat family=ipv4
+    cat=$(catalog)
+    case $HOST in *:*) family=ipv6;; esac
+    echo "The files of this node do not match its catalog: starting it" \\
+        "with --force, to recover it from the other nodes."
+    "$VERTICA" -D "$cat" -C %(db)s -n "$(basename "$cat" _catalog)" \\
+        -h "$HOST" -p %(port)s -P %(spread_port)s -Y $family --force &
 }
 stop() {
     STOPPING=1
@@ -198,6 +225,7 @@ if [ "$NODES" -gt 1 ]; then
     # cluster that restarts as a whole tries to start it at once: one
     # wins, the others join or try again.
     (
+        forced=0
         for try in $(seq 1 30); do
             running && exit 0
             out=$(vcluster start_db --db-name %(db)s \\
@@ -206,6 +234,13 @@ if [ "$NODES" -gt 1 ]; then
             if echo "$out" | grep -q 'still running'; then
                 vcluster start_node --start-hosts "$HOST" \\
                     --password-file $CONF/%(secret)s $TLS --config "$CFG"
+                # The database runs on the other nodes and this one did
+                # not start: once, with --force, when its files did not
+                # match its catalog (no start without it ever would).
+                if [ $forced = 0 ] && ! running && inconsistent; then
+                    forced=1
+                    force_start
+                fi
             fi
             # The node starts after vcluster returns.
             for i in $(seq 1 60); do running && exit 0; sleep 2; done
@@ -388,6 +423,8 @@ class VerticaApp(service.BaseDbApp):
                 'nma_port': NMA_PORT,
                 'host_file': HOST_FILE,
                 'db': DB_NAME,
+                'port': PORT,
+                'spread_port': SPREAD_PORT,
                 'data': CONTAINER_DATA_DIR,
                 'secret': ADMIN_SECRET,
                 'stopped': SERVER_STOPPED_FILE,

@@ -1,0 +1,11 @@
+---
+fixes:
+  - |
+    A node of a Vertica cluster whose host lost power did not come back:
+    the server aborted its start with "Data consistency problems found",
+    the files on its disk not matching its catalog, and the start script
+    tried the same start again and again. While the database runs on the
+    other nodes, the start script now starts such a node once with
+    ``--force``, which deletes the files that do not match the catalog and
+    recovers the node from the other nodes. A single-node database is not
+    started with ``--force``: it has no other node to recover from.

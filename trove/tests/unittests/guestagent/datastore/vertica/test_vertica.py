@@ -1037,6 +1037,90 @@ class TestVerticaServerWatch(VerticaGuestTestCase):
             '/etc/vertica-trove/server_stopped', force=True, as_root=True)
 
 
+class TestVerticaForcedStart(VerticaGuestTestCase):
+    """A node of a cluster whose files do not match its catalog after the
+    host lost power: the server aborts the start ("Data consistency
+    problems found") and the start script starts it again with --force,
+    which recovers it from the other nodes. The real shell text, a catalog
+    directory with the start log the server leaves, and a server that says
+    how it was started.
+    """
+
+    def _run(self, log, host='192.168.1.36'):
+        data = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, data)
+        catalog = os.path.join(data, 'db_srvr', 'v_db_srvr_node0002_catalog')
+        os.makedirs(catalog)
+        with open(os.path.join(catalog, 'startup.log'), 'w') as f:
+            f.write(log)
+        bindir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, bindir)
+        server = os.path.join(bindir, 'vertica')
+        args = os.path.join(bindir, 'args')
+        with open(server, 'w') as f:
+            f.write('#!/bin/sh\necho "$@" > %s\n' % args)
+        os.chmod(server, 0o755)
+        text = vertica_service.START_SCRIPT_CONTENT % collections.defaultdict(
+            str, nma_port=0, watch_interval=0, data=data,
+            db=vertica_service.DB_NAME, port=vertica_service.PORT,
+            spread_port=vertica_service.SPREAD_PORT)
+        functions = ''
+        for name in ('catalog', 'inconsistent', 'force_start'):
+            start = text.index(name + '() {')
+            functions += text[start:text.index('\n}\n', start) + 3]
+        script = (functions + 'VERTICA=%s\nHOST=%s\n'
+                  'if inconsistent; then force_start; wait; fi\n'
+                  % (server, host))
+        r = subprocess.run(['/bin/bash', '-c', script], capture_output=True,
+                           text=True, timeout=30)
+        started = open(args).read().split() if os.path.exists(args) else []
+        return r.stdout, started, catalog
+
+    def test_a_node_whose_files_do_not_match_starts_with_force(self):
+        out, started, catalog = self._run(
+            '{"stage" : "Check Storage", "text" : "@v_db_srvr_node0002: '
+            'VX001/2973: Data consistency problems found; startup '
+            'aborted"}\n')
+        self.assertIn('--force', out)
+        self.assertEqual(['-D', catalog, '-C', 'db_srvr',
+                          '-n', 'v_db_srvr_node0002', '-h', '192.168.1.36',
+                          '-p', '5433', '-P', '4803', '-Y', 'ipv4',
+                          '--force'], started)
+
+    def test_an_ipv6_node(self):
+        _out, started, _catalog = self._run(
+            'Data consistency problems found; startup aborted\n',
+            host='2001:db8::5')
+        self.assertEqual(['2001:db8::5', 'ipv6'],
+                         [started[started.index('-h') + 1],
+                          started[started.index('-Y') + 1]])
+
+    def test_a_node_that_failed_otherwise_is_not_forced(self):
+        # --force deletes files: never for a start that failed for
+        # another reason, nor for one that went through.
+        for log in ('{"stage" : "Startup Complete"}\n',
+                    '{"text" : "Spread is not running"}\n', ''):
+            out, started, _catalog = self._run(log)
+            self.assertEqual([], started)
+            self.assertNotIn('--force', out)
+
+    def test_only_a_node_of_a_database_running_elsewhere(self):
+        # The forced start sits in the branch of a cluster whose database
+        # still runs on the other nodes, after start_node: not for a
+        # single node, which has no other node to recover from.
+        script = vertica_service.START_SCRIPT_CONTENT
+        still = script.index("grep -q 'still running'")
+        single = script.index('elif [ -f "$CFG" ]; then')
+        node = script.index('vcluster start_node --start-hosts')
+        calls = [i for i in range(len(script))
+                 if script.startswith('force_start', i)][1:]
+        self.assertEqual(1, len(calls))
+        for at in calls:
+            self.assertLess(still, at)
+            self.assertLess(node, at)
+            self.assertLess(at, single)
+
+
 class TestVerticaClusterHealth(VerticaGuestTestCase):
     """What a node sees of the database, through vsql as the admin runs
     it (the fields of a row separated by 0x1f).
