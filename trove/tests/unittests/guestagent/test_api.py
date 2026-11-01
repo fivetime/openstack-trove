@@ -55,21 +55,6 @@ class GuestAPIDeleteQueueTest(trove_testtools.TestCase):
         get_client.assert_called_once_with(guest.target, mock.ANY)
 
 
-class GuestAPIRestartSoonTest(trove_testtools.TestCase):
-    """The repair's restart of a member's database: cast, so that a look
-    at a cluster does not wait the minutes a restart may take.
-    """
-
-    @mock.patch.object(api.API, '_call')
-    @mock.patch.object(api.API, '_cast')
-    @mock.patch.object(api.API, 'get_client')
-    def test_it_is_cast(self, get_client, cast, call):
-        guest = api.API(mock.Mock(), 'instance-id')
-        guest.restart_soon()
-        cast.assert_called_once_with('restart', guest.API_BASE_VERSION)
-        call.assert_not_called()
-
-
 class GuestAPIPrepareTest(trove_testtools.TestCase):
     def setUp(self):
         super(GuestAPIPrepareTest, self).setUp()

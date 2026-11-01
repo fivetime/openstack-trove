@@ -481,15 +481,6 @@ class API(object):
 
         self._call("restart", self.agent_high_timeout, version=version)
 
-    def restart_soon(self):
-        """Restart the database server, not waiting for it: for the repair
-        of a cluster, which follows the member's status rather than wait on
-        a restart that may take minutes.
-        """
-        LOG.debug("Casting the restart of the database process to the "
-                  "Guest.")
-        self._cast("restart", self.API_BASE_VERSION)
-
     def start_db_with_conf_changes(self, config_contents, ds_version):
         """Start the database with given configuration.
 

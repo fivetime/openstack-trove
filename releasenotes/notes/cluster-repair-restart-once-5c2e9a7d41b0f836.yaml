@@ -1,0 +1,12 @@
+---
+fixes:
+  - |
+    The repair's restart of a member whose database stays down was sent
+    by both task managers that look at the cluster, and the second
+    restart could put a member that was just back in its group out of it
+    again. The restart now takes the member's task (``REBOOTING``) first,
+    only when the task is none and has not changed for a minute, and runs
+    as the task manager's restart of the instance, which gives the task
+    back when it ends: one task manager restarts the member, the other
+    leaves it be. A database that is restarting is no longer taken as up
+    again.

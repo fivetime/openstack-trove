@@ -60,9 +60,13 @@ from trove.common import cfg
 from trove.common import clients
 from trove.common import cluster_health as ch
 from trove.common import context as trove_context
+from trove.common import notification
 from trove.common.strategies.cluster.experimental.common import health
 from trove.common.strategies.cluster.experimental.common import replace
+from trove.instance import models as inst_models
 from trove.instance import service_status
+from trove.instance.tasks import InstanceTasks
+from trove.taskmanager import api as task_api
 from trove import rpc
 
 LOG = logging.getLogger(__name__)
@@ -244,9 +248,14 @@ class ClusterRepair(object):
         statuses = health.service_statuses(heard_ids) if wait else {}
         down = [m for m in heard if statuses.get(m.id) in DATABASE_DOWN]
         down_ids = {m.id for m in down}
+        # A database the restart is bringing up is not up yet: the
+        # member keeps its place, neither up again nor down from now.
+        restarting = {m.id for m in heard
+                      if statuses.get(m.id) == RESTARTING_CODE}
         for member in heard:
             entry = self.database_down.get(member.id)
-            if entry and member.id not in down_ids:
+            if entry and member.id not in down_ids and \
+                    member.id not in restarting:
                 del self.database_down[member.id]
                 if entry.get('restarted') is not None:
                     LOG.info("Cluster %s: the database of member %s is up "
@@ -301,12 +310,28 @@ class ClusterRepair(object):
                           down_for):
         reason = ('its database has stayed down for %d s while its guest '
                   'agent is heard' % down_for)
+        # Two task managers look at every cluster: the one that takes the
+        # member's task restarts it, the other leaves it be. Restarted
+        # twice, a member back in its group after the first was put out
+        # of it again by the second (production, 2026-11-01: a Group
+        # Replication member DEGRADED "out of the group" three minutes
+        # after it was back). A member whose task changed a short while
+        # ago was just restarted by the other, or is busy.
+        if not _take_member(member.id, InstanceTasks.REBOOTING):
+            LOG.info("Cluster %s: member %s is not restarted here: its "
+                     "task is taken or was changed less than %d s ago.",
+                     db_cluster.id, member.name, RESTART_SPACING)
+            return
         LOG.info("Cluster %s: restarting the database of member %s (%s): "
                  "%s.", db_cluster.id, member.name, member.id, reason)
         try:
-            clients.create_guest_client(context, member.id,
-                                        manager).restart_soon()
+            # The task manager's restart of an instance, as the API's
+            # would be: the guest's restart, then the task back to none.
+            task_api.API(_restart_context(db_cluster, member)).restart(
+                member.id)
         except Exception as err:
+            _take_member(member.id, InstanceTasks.NONE,
+                         taken=InstanceTasks.REBOOTING)
             LOG.warning("Cluster %s: the database of member %s was not "
                         "restarted: %s", db_cluster.id, member.id, err)
             notify(EVENT_ERROR, db_cluster, member, 'restart',
@@ -374,6 +399,43 @@ DATABASE_DOWN = frozenset(status._code for status in (
     service_status.ServiceStatuses.FAILED,
     service_status.ServiceStatuses.UNKNOWN))
 HEALTHY_CODE = service_status.ServiceStatuses.HEALTHY._code
+RESTARTING_CODE = service_status.ServiceStatuses.RESTARTING._code
+
+# How long after its task last changed a member is not restarted: the
+# other task manager's restart may have ended just now.
+RESTART_SPACING = 60
+
+
+def _take_member(instance_id, task, taken=None):
+    """Sets the task of a member that has ``taken`` (none by default) and
+    has not changed for RESTART_SPACING seconds; a member's task is
+    given back at once. Whether it was set: only one task manager sets
+    it.
+    """
+    now = timeutils.utcnow()
+    with inst_models.DBInstance.query() as query:
+        query = query.filter_by(id=instance_id, deleted=False,
+                                task_id=(taken or InstanceTasks.NONE).code)
+        if taken is None:
+            query = query.filter(
+                inst_models.DBInstance.updated <
+                now - datetime.timedelta(seconds=RESTART_SPACING))
+        done = query.update({'task_id': task.code,
+                             'task_description': task.db_text,
+                             'updated': now}, synchronize_session=False)
+    return bool(done)
+
+
+def _restart_context(db_cluster, member):
+    """The task manager acting on the member, with the end of an
+    instance restart to notify, as the API's start of one leaves it.
+    """
+    context = replace.tenant_context(db_cluster)
+    context.notification = notification.DBaaSInstanceRestart(
+        context, request_id=context.request_id, server_type='taskmanager',
+        tenant_id=db_cluster.tenant_id, client_ip=CONF.host,
+        server_ip=CONF.host, instance_id=member.id)
+    return context
 
 
 def _soonest(*seconds):

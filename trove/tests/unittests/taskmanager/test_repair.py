@@ -346,9 +346,38 @@ class TestDatabaseDown(RepairTestBase):
         self.clock = [1000.0]
         mock.patch.object(repair.time, 'monotonic',
                           side_effect=lambda: self.clock[0]).start()
-        self.guest = mock.patch.object(
-            repair.clients, 'create_guest_client').start()
+        self.task_api = mock.patch.object(repair.task_api, 'API').start()
+        # The restart task ends as the task manager's does: the member's
+        # task back to none. The task it found is kept.
+        self.tasks_at_restart = []
+        self.task_api.return_value.restart.side_effect = self._restart
         self.cluster, self.members = self._cluster(3)
+        # Their tasks last changed a while ago.
+        self._task_changed(seconds_ago=600)
+
+    def _task_changed(self, seconds_ago, task=None):
+        values = {'updated': timeutils.utcnow() -
+                  datetime.timedelta(seconds=seconds_ago)}
+        if task is not None:
+            values['task_id'] = task.code
+        with DBInstance.query() as query:
+            query.filter_by(cluster_id=self.cluster.id).update(
+                values, synchronize_session=False)
+
+    def _restart(self, instance_id):
+        self.tasks_at_restart.append(
+            DBInstance.find_by(id=instance_id).task_id)
+        with DBInstance.query() as query:
+            query.filter_by(id=instance_id).update(
+                {'task_id': InstanceTasks.NONE.code,
+                 'updated': timeutils.utcnow()}, synchronize_session=False)
+
+    def _task_of(self, member):
+        return DBInstance.find_by(id=member.id).task_id
+
+    def _restarted(self):
+        return [c.args[0] for c in
+                self.task_api.return_value.restart.call_args_list]
 
     def _status(self, member, status):
         with InstanceServiceStatus.query() as query:
@@ -364,17 +393,78 @@ class TestDatabaseDown(RepairTestBase):
         self._status(self.members[0], ServiceStatuses.CRASHED)
         self.assertEqual(600, self._check(0))
         self.assertEqual(300, self._check(300))
-        self.guest.assert_not_called()
+        self.assertEqual([], self._restarted())
         self.assertEqual(600, self._check(300))
-        self.guest.assert_called_once_with(mock.ANY, self.members[0].id,
-                                           'mysql')
-        self.guest.return_value.restart_soon.assert_called_once_with()
+        # The task manager's restart of the instance, its task taken.
+        self.assertEqual([self.members[0].id], self._restarted())
+        self.assertEqual([InstanceTasks.REBOOTING.code],
+                         self.tasks_at_restart)
+        context = self.task_api.call_args.args[0]
+        self.assertEqual('t', context.project_id)
+        self.assertEqual(self.members[0].id,
+                         context.notification.payload['instance_id'])
         self.assertEqual([repair.EVENT_START], self._events())
         payload = self.notifier.info.call_args.args[2]
         self.assertEqual('restart', payload['action'])
         # Not again while it is down after it.
+        self._task_changed(seconds_ago=600)
         self._check(100)
-        self.guest.return_value.restart_soon.assert_called_once_with()
+        self.assertEqual([self.members[0].id], self._restarted())
+
+    def test_the_other_task_manager_does_not_restart_it_too(self):
+        # Two task managers look at every cluster (production,
+        # 2026-11-01: both restarted a Group Replication member, and the
+        # second restart put it out of its group again).
+        other = repair.ClusterRepair(nova_factory=mock.Mock())
+        self._status(self.members[0], ServiceStatuses.SHUTDOWN)
+        self._check(0)
+        other.check_now(mock.Mock(), self.cluster, manager='mysql')
+        self._check(600)
+        self.assertEqual([self.members[0].id], self._restarted())
+        # While the restart runs.
+        self._task_changed(seconds_ago=1, task=InstanceTasks.REBOOTING)
+        other.check_now(mock.Mock(), self.cluster, manager='mysql')
+        self.assertEqual([self.members[0].id], self._restarted())
+        # And just after it ended, its task back to none.
+        self._task_changed(seconds_ago=1, task=InstanceTasks.NONE)
+        other.check_now(mock.Mock(), self.cluster, manager='mysql')
+        self.assertEqual([self.members[0].id], self._restarted())
+        self.assertEqual([repair.EVENT_START], self._events())
+        # Its wait counts from then: it does not take the member as lost
+        # sooner than the one that restarted it.
+        self.assertIsNotNone(other.database_down[self.members[0].id].get(
+            'restarted'))
+
+    def test_a_member_with_a_task_is_not_restarted(self):
+        self._task_changed(seconds_ago=600, task=InstanceTasks.RESIZING)
+        self._status(self.members[0], ServiceStatuses.CRASHED)
+        self._check(0)
+        self._check(600)
+        self.assertEqual([], self._restarted())
+        self.assertEqual(InstanceTasks.RESIZING.code,
+                         self._task_of(self.members[0]))
+
+    def test_a_failed_cast_gives_the_task_back(self):
+        self.task_api.return_value.restart.side_effect = RuntimeError('mq')
+        self._status(self.members[0], ServiceStatuses.CRASHED)
+        self._check(0)
+        self._check(600)
+        self.assertEqual(InstanceTasks.NONE.code,
+                         self._task_of(self.members[0]))
+        self.assertEqual([repair.EVENT_ERROR], self._events())
+
+    def test_a_restarting_database_is_not_up_again(self):
+        self._status(self.members[0], ServiceStatuses.SHUTDOWN)
+        self._check(0)
+        self._check(600)
+        self._status(self.members[0], ServiceStatuses.RESTARTING)
+        self._check(60)
+        self.assertEqual([repair.EVENT_START], self._events())
+        self.assertIn(self.members[0].id, self.repair.database_down)
+        self._status(self.members[0], ServiceStatuses.HEALTHY)
+        self._check(60)
+        self.assertEqual([repair.EVENT_START, repair.EVENT_END],
+                         self._events())
 
     def test_its_end_is_told_when_it_is_up_again(self):
         self._status(self.members[0], ServiceStatuses.SHUTDOWN)
@@ -418,20 +508,20 @@ class TestDatabaseDown(RepairTestBase):
             self._status(member, ServiceStatuses.CRASHED)
         for after in (0, 600, 600):
             self.assertIsNone(self._check(after))
-        self.guest.assert_not_called()
+        self.assertEqual([], self._restarted())
 
     def test_a_running_database_is_not_down(self):
         self._status(self.members[0], ServiceStatuses.RUNNING)
         for after in (0, 600, 600):
             self.assertIsNone(self._check(after))
-        self.guest.assert_not_called()
+        self.assertEqual([], self._restarted())
 
     def test_off(self):
         self.patch_conf_property('cluster_repair_database_down', 0)
         self._status(self.members[0], ServiceStatuses.CRASHED)
         for after in (0, 600, 600):
             self.assertIsNone(self._check(after))
-        self.guest.assert_not_called()
+        self.assertEqual([], self._restarted())
 
     def test_a_quiet_member_is_the_start_s_not_the_restart_s(self):
         # Its heartbeat stale: the start of its server is the step; the
@@ -445,7 +535,7 @@ class TestDatabaseDown(RepairTestBase):
         self.members[0].compute_instance_id = SERVER
         self.members[0].save()
         self._check(600)
-        self.guest.assert_not_called()
+        self.assertEqual([], self._restarted())
         self.assertEqual({}, self.repair.database_down)
 
 
