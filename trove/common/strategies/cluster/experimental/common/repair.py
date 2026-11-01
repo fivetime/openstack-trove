@@ -66,8 +66,8 @@ from trove.common.strategies.cluster.experimental.common import replace
 from trove.instance import models as inst_models
 from trove.instance import service_status
 from trove.instance.tasks import InstanceTasks
-from trove.taskmanager import api as task_api
 from trove import rpc
+from trove.taskmanager import api as task_api
 
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
