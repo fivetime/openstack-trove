@@ -1,0 +1,6 @@
+---
+fixes:
+  - |
+    An instance whose server Nova rebuilds by itself (an evacuation, or a
+    rebuild asked of Nova directly) is shown ``BUILD``, as when Trove
+    rebuilds it, instead of ``UNKNOWN``.

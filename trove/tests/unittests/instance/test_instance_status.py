@@ -151,6 +151,19 @@ class InstanceStatusTest(BaseInstanceStatusTestCase):
                                   self.ds_status)
         self.assertEqual(InstanceStatus.ACTIVE, instance.status)
 
+    def test_nova_server_rebuild_reports_build(self):
+        self.db_info.server_status = "REBUILD"
+        instance = SimpleInstance('dummy context', self.db_info,
+                                  self.ds_status)
+        self.assertEqual(InstanceStatus.BUILD, instance.status)
+
+    def test_nova_server_rebuild_has_no_operating_status(self):
+        self.db_info.task_status = InstanceTasks.NONE
+        self.db_info.server_status = "REBUILD"
+        instance = SimpleInstance(mock.MagicMock(), self.db_info,
+                                  self.ds_status)
+        self.assertEqual("", instance.operating_status)
+
     def test_operating_status_server_migrating(self):
         self.db_info.task_status = InstanceTasks.NONE
         self.db_info.server_status = "MIGRATING"

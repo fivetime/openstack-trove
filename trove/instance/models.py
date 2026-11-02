@@ -430,6 +430,12 @@ class SimpleInstance(object):
         if server_status == "MIGRATING":
             return InstanceStatus.ACTIVE
 
+        # A server Nova rebuilds by itself (an evacuation, or a rebuild
+        # asked of Nova directly) is being built again, as when Trove
+        # rebuilds it (BUILDING): not unknown.
+        if server_status == "REBUILD":
+            return InstanceStatus.BUILD
+
         return "UNKNOWN"
 
     @property
