@@ -25,6 +25,7 @@ from trove.common import server_group as srv_grp
 from trove.common.strategies.cluster import base
 from trove.common.strategies.cluster.experimental.common import (
     api as common_api)
+from trove.common.strategies.cluster.experimental.common import placement
 from trove.common.strategies.cluster.experimental.common import topology
 from trove.common.strategies.cluster.experimental.redis import (
     sentinel_api)
@@ -84,6 +85,10 @@ def replica_groups(num_instances, replicas_per_master, existing_masters=0):
 
 
 class RedisCluster(models.Cluster):
+
+    # A master and its replicas keep off each other's host
+    # (cluster_placement_per_shard).
+    SHARD_PLACEMENT = True
 
     @staticmethod
     def _create_instances(context, db_info, datastore, datastore_version,
@@ -159,7 +164,9 @@ class RedisCluster(models.Cluster):
                                             volume_type=instance.get(
                                                 'volume_type', None),
                                             modules=instance.get('modules'),
-                                            locality=locality,
+                                            locality=placement.locality_for(
+                                                context, db_info, config,
+                                                locality),
                                             region_name=instance.get(
                                                 'region_name')
                                             )
@@ -174,7 +181,7 @@ class RedisCluster(models.Cluster):
         if configuration:
             raise exception.ConfigurationNotSupported()
 
-        replicas, _masters = replica_groups(
+        replicas, masters = replica_groups(
             len(instances),
             (extended_properties or {}).get('replicas_per_master'))
 
@@ -184,6 +191,9 @@ class RedisCluster(models.Cluster):
             name=name, tenant_id=context.project_id,
             datastore_version_id=datastore_version.id,
             task_status=ClusterTasks.BUILDING_INITIAL)
+        # A server group for each master with its replicas, when placed
+        # by group.
+        locality = placement.start(context, db_info, locality, masters)
 
         cls._create_instances(context, db_info, datastore, datastore_version,
                               instances, extended_properties, locality,
@@ -214,9 +224,12 @@ class RedisCluster(models.Cluster):
         members = inst_models.DBInstance.find_all(
             cluster_id=db_info.id, deleted=False).all()
         masters = len([m for m in members if m.type != 'replica'])
-        replicas, _new = replica_groups(
+        replicas, new_masters = replica_groups(
             len(instances), (len(members) - masters) // max(masters, 1),
             existing_masters=masters)
+        if placement.placed(db_info):
+            # A group for each new master with its replicas.
+            placement.check_quota(context, new_masters)
 
         db_info.update(task_status=ClusterTasks.GROWING_CLUSTER)
 

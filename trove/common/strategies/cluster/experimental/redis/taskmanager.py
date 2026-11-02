@@ -93,6 +93,29 @@ class RedisClusterTasks(task_models.ClusterTasks):
                     if db_instance.type == 'replica']
         return list(masters.values()), replicas
 
+    def _master_of_group(self, db_instances, new, instance_id, masters):
+        """The node id of the master, among ``masters`` (the node ids of
+        the masters that hold slots), that is a member of the new node's
+        group (its shard_id), or None.
+        """
+        shard_id = getattr(new.db_info, 'shard_id', None)
+        if not shard_id:
+            return None
+        for db_instance in db_instances:
+            if db_instance.id == instance_id or \
+                    db_instance.shard_id != shard_id:
+                continue
+            try:
+                node_id = self.get_guest(
+                    Instance.load(new.context, db_instance.id)).get_node_id()
+            except Exception as err:
+                LOG.debug("Member %(member)s does not tell its node: "
+                          "%(err)s", {'member': db_instance.id, 'err': err})
+                continue
+            if node_id in masters:
+                return node_id
+        return None
+
     def _replicate(self, replicas):
         for replica, master in replicas:
             self.get_guest(replica).cluster_replicate(
@@ -249,10 +272,15 @@ class RedisClusterTasks(task_models.ClusterTasks):
 
     def add_node(self, context, cluster_id, instance_id):
         """The repair: the node in place of a lost one joins the cluster
-        and follows the master with the fewest replicas (the lost one's
-        slots went to its replica with the failover: the cluster is short
-        of a replica, whichever the lost one was). Its kind and group in
-        the books are the lost one's, which a grow counts the masters by.
+        and follows the master of its own group (the lost one's slots went
+        to its replica with the failover: the group is short of a replica,
+        whichever the lost one was), else, with no master of its group,
+        the master with the fewest replicas. Its kind and group in the
+        books are the lost one's, which a grow counts the masters by, and
+        which the server group it was placed in is
+        (cluster_placement_per_shard): following another group's master
+        would put a master and its replica in groups that do not keep
+        them apart.
         """
         LOG.debug("Begin add_node %(instance)s to cluster %(cluster)s.",
                   {'instance': instance_id, 'cluster': cluster_id})
@@ -277,7 +305,15 @@ class RedisClusterTasks(task_models.ClusterTasks):
             for n in nodes:
                 if n['master_id'] in replicas:
                     replicas[n['master_id']] += 1
-            guest.cluster_replicate(min(replicas, key=replicas.get))
+            target = self._master_of_group(
+                db_instances, new, instance_id, replicas)
+            if target is None:
+                target = min(replicas, key=replicas.get)
+                LOG.warning("Cluster %(cluster)s: no master of the group "
+                            "of %(instance)s; it follows %(target)s.",
+                            {'cluster': cluster_id, 'instance': instance_id,
+                             'target': target})
+            guest.cluster_replicate(target)
             guest.cluster_complete()
 
         timeout = Timeout(CONF.cluster_usage_timeout)

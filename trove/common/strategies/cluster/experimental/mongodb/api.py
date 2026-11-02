@@ -30,6 +30,7 @@ from trove.common import server_group as srv_grp
 from trove.common.strategies.cluster import base
 from trove.common.strategies.cluster.experimental.common import (
     api as common_api)
+from trove.common.strategies.cluster.experimental.common import placement
 from trove.common import utils
 from trove.datastore import models as datastore_models
 from trove.extensions.mgmt.clusters.views import MgmtClusterView
@@ -58,6 +59,10 @@ class MongoDbAPIStrategy(base.BaseAPIStrategy):
 
 
 class MongoDbCluster(models.Cluster):
+
+    # Each replica set, the config servers and the query routers keep off
+    # a host they have a member on (cluster_placement_per_shard).
+    SHARD_PLACEMENT = True
 
     @classmethod
     def create(cls, context, name, datastore, datastore_version,
@@ -128,6 +133,11 @@ class MongoDbCluster(models.Cluster):
             name=name, tenant_id=context.project_id,
             datastore_version_id=datastore_version.id,
             task_status=ClusterTasks.BUILDING_INITIAL)
+        # A server group for the replica set, the config servers and the
+        # query routers each, when placed by group.
+        locality = placement.start(
+            context, db_info, locality,
+            1 + bool(num_configsvr) + bool(num_mongos))
 
         # The datastore version names its image by tags since Victoria;
         # the caller resolved them to an image.
@@ -166,7 +176,9 @@ class MongoDbCluster(models.Cluster):
                                         cluster_config=member_config,
                                         volume_type=volume_type,
                                         modules=instances[i].get('modules'),
-                                        locality=locality,
+                                        locality=placement.locality_for(
+                                            context, db_info, member_config,
+                                            locality),
                                         region_name=regions[i])
 
         for i in range(1, num_configsvr + 1):
@@ -182,7 +194,9 @@ class MongoDbCluster(models.Cluster):
                                         configuration_id=None,
                                         cluster_config=configsvr_config,
                                         volume_type=configsvr_vtype,
-                                        locality=locality,
+                                        locality=placement.locality_for(
+                                            context, db_info,
+                                            configsvr_config, locality),
                                         region_name=regions[i % num_instances]
                                         )
 
@@ -199,7 +213,9 @@ class MongoDbCluster(models.Cluster):
                                         configuration_id=None,
                                         cluster_config=mongos_config,
                                         volume_type=mongos_vtype,
-                                        locality=locality,
+                                        locality=placement.locality_for(
+                                            context, db_info, mongos_config,
+                                            locality),
                                         region_name=regions[i % num_instances]
                                         )
 
@@ -320,7 +336,12 @@ class MongoDbCluster(models.Cluster):
                          "instance_type": "member",
                          "replica_set_name": new_replica_set_name,
                          "key": key}
-        locality = srv_grp.ServerGroup.convert_to_hint(self.server_group)
+        if placement.placed(self.db_info):
+            # A group for the new replica set.
+            placement.check_quota(self.context, 1)
+        locality = placement.locality_for(
+            self.context, self.db_info, member_config,
+            srv_grp.ServerGroup.convert_to_hint(self.server_group))
         for i in range(1, num_members_per_shard + 1):
             instance_name = "%s-%s-%s" % (self.name, new_replica_set_name,
                                           str(i))
@@ -361,6 +382,13 @@ class MongoDbCluster(models.Cluster):
         if query_routers:
             self._check_instances(self.context, query_routers,
                                   self.datastore_version)
+        if placement.placed(self.db_info):
+            # A group for each new replica set, and the query routers'
+            # if they have none yet.
+            placement.check_quota(self.context, len(shards) + int(
+                bool(query_routers) and 'query_router' not in (
+                    self.db_info.get_properties().get(placement.GROUPS)
+                    or {})))
         # all checks are done before any instances are created
         locality = srv_grp.ServerGroup.convert_to_hint(self.server_group)
         instance_ids = []
@@ -479,7 +507,8 @@ class MongoDbCluster(models.Cluster):
                 availability_zone=instance.get('availability_zone', None),
                 nics=instance.get('nics', None),
                 cluster_config=cluster_config,
-                locality=locality
+                locality=placement.locality_for(
+                    self.context, self.db_info, cluster_config, locality)
             )
             instance_ids.append(new_instance.id)
         return instance_ids

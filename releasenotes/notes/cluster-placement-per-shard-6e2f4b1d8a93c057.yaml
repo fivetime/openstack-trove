@@ -1,0 +1,25 @@
+---
+features:
+  - |
+    A cluster created with a locality can have a server group for each set
+    of its members that must not share a host, instead of one for the
+    whole cluster: with ``cluster_placement_per_shard`` (off by default), a
+    Redis family cluster of the topology ``cluster`` gets one for each
+    master with its replicas, a MongoDB cluster one for each replica set,
+    one for the config servers and one for the query routers. Such
+    clusters often have more members than there are hosts, so they are
+    created ``soft-anti-affinity``, and one soft group of the whole cluster
+    keeps a master and its replica apart no better than any other two
+    members. ``cluster_placement_shard_policy`` says what the groups are:
+    ``follow`` (the default) the locality the cluster was created with,
+    ``strict`` always ``anti-affinity``. The groups are made as the members
+    are, by a grow, a new shard and the replacement of a lost member too,
+    and are deleted with the cluster. A cluster that would need more server
+    groups than its project has left is refused. Clusters created before
+    keep their one group.
+fixes:
+  - |
+    The member a Redis Cluster's repair adds in place of a lost one now
+    follows the master of its own group (its ``shard_id``, the lost one's)
+    rather than the master with the fewest replicas, so that the books and
+    the replication agree.

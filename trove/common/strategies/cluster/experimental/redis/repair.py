@@ -33,6 +33,7 @@ served), and each holds the lost member out and no other
 import time
 
 from trove.common import clients
+from trove.common.strategies.cluster.experimental.common import placement
 from trove.common.strategies.cluster.experimental.common import replace
 from trove.common.strategies.cluster.experimental.common import topology
 from trove.quota.quota import check_quotas
@@ -75,16 +76,20 @@ class RedisReplace(replace.PeersHoldItOut):
         if spec.get('volume_size'):
             deltas['volumes'] = spec['volume_size']
         check_quotas(context.project_id, deltas)
-        locality = srv_grp.ServerGroup.convert_to_hint(cluster.server_group)
+        cluster_config = {'id': cluster.id, 'instance_type': state['type'],
+                          'shard_id': state['shard_id']}
+        # The group of the lost member's master and replicas, when the
+        # cluster is placed by group; else the cluster's one group.
+        locality = placement.locality_for(
+            context, cluster.db_info, cluster_config,
+            srv_grp.ServerGroup.convert_to_hint(cluster.server_group))
         instance = inst_models.Instance.create(
             context, '%s-node-%d' % (cluster.name, int(time.time())),
             spec['flavor_id'], image_id, [], [], cluster.ds,
             cluster.ds_version, spec.get('volume_size'), None,
             spec.get('availability_zone'), spec.get('nics'),
             configuration_id=None,
-            cluster_config={'id': cluster.id,
-                            'instance_type': state['type'],
-                            'shard_id': state['shard_id']},
+            cluster_config=cluster_config,
             volume_type=spec.get('volume_type'), locality=locality)
         task_api.load(context, self.manager).add_node(
             self.manager, db_cluster.id, instance.id)

@@ -40,6 +40,7 @@ from trove.common.notification import DBaaSInstanceDetachConfiguration
 from trove.common.notification import EndNotification
 from trove.common.notification import StartNotification
 from trove.common import server_group as srv_grp
+from trove.common.strategies.cluster.experimental.common import placement
 from trove.common.strategies.cluster import strategy
 from trove.common import utils
 from trove.configuration import models as config_models
@@ -289,6 +290,10 @@ class Cluster(object):
     @property
     def locality(self):
         if not self._locality:
+            # Placed by group: the locality asked for, not the policy of
+            # whichever group a member is in.
+            self._locality = placement.locality(self.db_info)
+        if not self._locality:
             if self.server_group:
                 self._locality = srv_grp.ServerGroup.get_locality(
                     self._server_group)
@@ -305,9 +310,15 @@ class Cluster(object):
     def create(cls, context, name, datastore, datastore_version,
                instances, extended_properties, locality, configuration,
                image_id=None):
-        locality = srv_grp.ServerGroup.build_scheduler_hint(
-            context, locality, name)
         api_strategy = strategy.load_api_strategy(datastore_version.manager)
+        if locality and placement.wanted(api_strategy.cluster_class,
+                                         extended_properties):
+            # Each group of members that must not share a host gets a
+            # server group of its own, made as its members are.
+            locality = placement.ShardPlacement(locality)
+        else:
+            locality = srv_grp.ServerGroup.build_scheduler_hint(
+                context, locality, name)
         return api_strategy.cluster_class.create(context, name, datastore,
                                                  datastore_version, instances,
                                                  extended_properties,
@@ -339,6 +350,7 @@ class Cluster(object):
         # take a while to be removed they might not all be gone even if we
         # do it after the delete.
         srv_grp.ServerGroup.delete(self.context, self.server_group, force=True)
+        placement.delete(self.context, self.db_info)
         for db_inst in db_insts:
             instance = inst_models.load_any_instance(self.context, db_inst.id)
             instance.delete()

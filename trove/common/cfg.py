@@ -382,6 +382,28 @@ common_opts = [
                      'Only for a datastore with a plugin in the namespace '
                      'trove.cluster.repair. A cluster keeps it off with the '
                      'extended property auto_repair=off or start.'),
+    cfg.BoolOpt('cluster_placement_per_shard', default=False,
+                help='Give each group of the members of a cluster that must '
+                     'not share a host a server group of its own, instead '
+                     'of one for the whole cluster: of a Redis family '
+                     'cluster of the topology cluster, a master with its '
+                     'replicas; of a MongoDB cluster, each replica set, the '
+                     'config servers and the query routers. Such clusters '
+                     'have more members than hosts often, so their '
+                     'locality is soft-anti-affinity, which keeps a master '
+                     'and its replicas apart no better than any other two '
+                     'members. Only for a cluster created with a locality; '
+                     'a cluster created before keeps its one group.'),
+    cfg.StrOpt('cluster_placement_shard_policy', default='follow',
+               choices=[('follow', 'The policy of each group is the '
+                                   'locality the cluster was created with.'),
+                        ('strict', 'Each group is anti-affinity, whatever '
+                                   'the locality: a group is small enough '
+                                   'for one host each, and a placement '
+                                   'that cannot keep it apart fails rather '
+                                   'than put two of its members together.')],
+               help='The policy of the server groups that '
+                    'cluster_placement_per_shard makes.'),
     cfg.BoolOpt('instance_repair_start', default=True,
                 help='Start the server of a standalone instance that Nova '
                      'shut off by itself (its domain went away: powered '
