@@ -1848,3 +1848,84 @@ class TestSpreadMasters(RepairTestBase):
             id=self.cluster.id).task_status)
         self.assertIsNone(self._check())
         self.assertEqual(1, guest.cluster_failover.call_count)
+
+
+def _hypervisor(host, kind='lxd', state='up', status='enabled'):
+    return mock.Mock(service={'host': host}, hypervisor_type=kind,
+                     state=state, status=status)
+
+
+class TestSpreadMovesAReplica(TestSpreadMasters):
+    """Every replica on a host with a master (Incus placement round,
+    2026-11-02: the six members on two hosts after an evacuation, Nova
+    picking at random among the hosts its groups allow): a replica is
+    moved to a host without a master first, the failover follows.
+    """
+
+    # m1, m2, r3 on host-1; m3, r1, r2 on host-2.
+    HOSTS = {'m1': 'host-1', 'm2': 'host-1', 'r3': 'host-1',
+             'm3': 'host-2', 'r1': 'host-2', 'r2': 'host-2'}
+
+    def setUp(self):
+        super(TestSpreadMovesAReplica, self).setUp()
+        self.nova.hypervisors.list.return_value = [
+            _hypervisor('host-1'), _hypervisor('host-2'),
+            _hypervisor('host-3'), _hypervisor('host-4', status='disabled'),
+            _hypervisor('host-5'), _hypervisor('kvm-1', kind='QEMU')]
+        # Their tasks last changed a while ago.
+        with DBInstance.query() as query:
+            query.filter_by(cluster_id=self.cluster.id).update(
+                {'updated': timeutils.utcnow() -
+                 datetime.timedelta(seconds=600)},
+                synchronize_session=False)
+        self.task_api = mock.patch.object(repair.task_api, 'API').start()
+
+    def test_a_replica_moves_to_a_host_without_a_master(self):
+        self.assertEqual(repair.RESTART_FOLLOW, self._check())
+        # m1's replica r1 moves: host-3 (up, an Incus host, no master, no
+        # member of its shard); host-4 is disabled, kvm-1 another kind.
+        self.task_api.return_value.migrate.assert_called_once_with(
+            self.members['r1'].id, 'host-3')
+        context = self.task_api.call_args.args[0]
+        self.assertEqual('host-3', context.notification.payload['host'])
+        self.assertEqual(InstanceTasks.MIGRATING.code, DBInstance.find_by(
+            id=self.members['r1'].id).task_id)
+        for guest in self.guests.values():
+            guest.cluster_failover.assert_not_called()
+        self.assertEqual([repair.EVENT_START], self._events())
+        # While it moves the cluster is followed.
+        self.assertEqual(repair.RESTART_FOLLOW, self.repair.check_now(
+            mock.Mock(), DBCluster.find_by(id=self.cluster.id),
+            manager='redis'))
+
+    def test_nothing_without_a_host_to_move_to(self):
+        self.nova.hypervisors.list.return_value = [
+            _hypervisor('host-1'), _hypervisor('host-2')]
+        self.assertIsNone(self._check())
+        self.task_api.return_value.migrate.assert_not_called()
+        self.assertEqual([], self._events())
+
+    def test_a_failed_cast_gives_the_task_back(self):
+        self.task_api.return_value.migrate.side_effect = RuntimeError('mq')
+        self.assertIsNone(self._check())
+        self.assertEqual(InstanceTasks.NONE.code, DBInstance.find_by(
+            id=self.members['r1'].id).task_id)
+        self.assertEqual([repair.EVENT_START, repair.EVENT_ERROR],
+                         self._events())
+
+    def test_not_while_the_cluster_has_a_task(self):
+        # The move takes the member's task: the other task manager took
+        # it first.
+        with mock.patch.object(repair, '_take_member', return_value=False):
+            self.assertIsNone(self._check())
+        self.task_api.return_value.migrate.assert_not_called()
+
+    # The base class's cases do not hold for this placement.
+    def test_a_replica_on_a_host_without_a_master_takes_over(self):
+        pass
+
+    def test_a_failed_failover_is_not_tried_again_soon(self):
+        pass
+
+    def test_nothing_when_each_host_has_one_master(self):
+        pass

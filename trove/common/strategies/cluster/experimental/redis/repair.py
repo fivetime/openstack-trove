@@ -101,11 +101,21 @@ class RedisReplace(replace.PeersHoldItOut):
     # The flags of a node that is not to be counted on.
     FAILING = frozenset(['fail', 'fail?', 'noaddr', 'handshake'])
 
-    def spread(self, context, db_cluster, members, host_of):
+    def spread(self, context, db_cluster, members, host_of, candidates=None):
         """cluster_redis_spread_masters: of a cluster of the topology
         cluster whose host has more than one master, the replica that is
         to take one of their places: a replica of that master on a host
         without a master. Returns (member, reason), or None.
+
+        With no such replica (every replica on a host with a master: on
+        the Incus placement round, 2026-11-02, the six members of a
+        cluster were on two hosts after an evacuation, Nova picking at
+        random among the hosts its groups allow), a replica to move first:
+        (member, reason, host), the host one ``candidates(member)`` gives
+        (hosts that can take the member) without a master and without a
+        member of the replica's shard, a host without any member first.
+        The move is a cold migration; the failover follows on a later
+        look.
 
         A failover needs most masters to vote, so a host with most of them
         takes the whole cluster down with it (Incus migration matrix,
@@ -153,7 +163,10 @@ class RedisReplace(replace.PeersHoldItOut):
             # A master whose host is not known: no move.
             return None
         master_hosts = set(by_host)
-        for crowded in sorted(h for h, ns in by_host.items() if len(ns) > 1):
+        crowded_hosts = sorted(h for h, ns in by_host.items() if len(ns) > 1)
+        if not crowded_hosts:
+            return None
+        for crowded in crowded_hosts:
             for master in sorted(by_host[crowded], key=lambda n: n['id']):
                 for node in sorted(nodes, key=lambda n: n['id']):
                     if (node['role'] != 'replica' or
@@ -169,6 +182,36 @@ class RedisReplace(replace.PeersHoldItOut):
                         'place of %s' % (
                             len(by_host[crowded]), crowded, replica.name,
                             where, member_of[master['id']].name))
+        occupied = {host(n['id']) for n in nodes}
+        for crowded in crowded_hosts:
+            for master in sorted(by_host[crowded], key=lambda n: n['id']):
+                shard = [master] + [n for n in nodes
+                                    if n['master_id'] == master['id']]
+                shard_hosts = {host(n['id']) for n in shard}
+                for node in sorted(shard[1:], key=lambda n: n['id']):
+                    if node['role'] != 'replica' or \
+                            self.FAILING & set(node['flags']):
+                        continue
+                    replica = member_of[node['id']]
+                    options = [h for h in (candidates(replica)
+                                           if candidates else ())
+                               if h not in master_hosts and
+                               h not in shard_hosts]
+                    if not options:
+                        continue
+                    target = sorted(options,
+                                    key=lambda h: (h in occupied, h))[0]
+                    return replica, (
+                        '%d masters on %s and no replica of theirs on a host '
+                        'without a master; the replica %s moves from %s to '
+                        '%s first' % (len(by_host[crowded]), crowded,
+                                      replica.name, host(node['id']),
+                                      target)), target
+        LOG.warning("Cluster %(cluster)s: more than one master on "
+                    "%(hosts)s, and no replica of theirs that can take one's "
+                    "place or move to a host without a master.",
+                    {'cluster': db_cluster.id,
+                     'hosts': ', '.join(crowded_hosts)})
         return None
 
     def failover(self, context, member):

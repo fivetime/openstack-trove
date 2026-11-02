@@ -1,0 +1,14 @@
+---
+features:
+  - |
+    When ``cluster_redis_spread_masters`` finds more than one master of a
+    Redis Cluster on a host and no replica of theirs on a host without a
+    master (every replica on a host with a master: Nova picks at random
+    among the hosts a cluster's server groups allow, and an evacuation put
+    all six members of a cluster on two hosts), the repair now first moves
+    one of their replicas, by the task manager's migrate of the instance
+    under the member's task, to a compute host of the same kind, up and
+    enabled, without a master and without a member of the replica's shard
+    (a host without any member of the cluster first); the failover follows
+    once it is back. When there is no such host either, the repair logs a
+    warning.

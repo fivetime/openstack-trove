@@ -153,6 +153,9 @@ class ClusterRepair(object):
         self.database_down = {}
         # The clusters whose last spread failover failed, and when.
         self.spread_failed = {}
+        # The members this task manager is moving for a spread: their
+        # cluster is followed until they are back.
+        self.spread_moving = {}
         self.replacement = replace.MemberReplacement(notify, now=self._now)
 
     def check_now(self, context, db_cluster, members=None, manager=None):
@@ -175,13 +178,17 @@ class ClusterRepair(object):
             return None
         if not members or any(m.task_status not in health.SETTLED_TASKS
                               for m in members):
-            if any(self._restarting(m) for m in members):
+            if any(self._restarting(m) or self._spread_moving(m)
+                   for m in members):
                 # Our restart of a member runs: its end is looked at soon,
                 # not at the next scan (production, 2026-11-01: the member
                 # was up 25 s after the restart, its cluster recorded
                 # HEALTHY four minutes later).
                 return RESTART_FOLLOW
             return None
+        for member in members:
+            # Its move ended (no member has a task here).
+            self.spread_moving.pop(member.id, None)
         stale = health.stale_members(m.id for m in members)
         heard = [m for m in members if m.id not in stale]
         self._ended(db_cluster, heard)
@@ -348,6 +355,10 @@ class ClusterRepair(object):
             return
         notify(EVENT_START, db_cluster, member, 'restart', reason)
 
+    def _spread_moving(self, member):
+        return (member.task_status == InstanceTasks.MIGRATING and
+                member.id in self.spread_moving)
+
     def _restarting(self, member):
         entry = self.database_down.get(member.id)
         return (member.task_status == InstanceTasks.REBOOTING and
@@ -382,14 +393,30 @@ class ClusterRepair(object):
                 return None
             return getattr(server, 'OS-EXT-SRV-ATTR:host', None)
 
+        hosts = []
+
+        def candidates(member):
+            # The hosts that can take the member: compute hosts up and
+            # enabled, of its own host's kind (an Incus member to an Incus
+            # host); Nova's filters, the member's group among them, have
+            # the last word on the move.
+            if not hosts:
+                hosts.append(self._compute_hosts(nova))
+            mine = host_of(member)
+            kind = hosts[0].get(mine)
+            return sorted(h for h, t in hosts[0].items()
+                          if kind is not None and t == kind and h != mine)
+
         try:
-            move = spread(context, db_cluster, members, host_of)
+            move = spread(context, db_cluster, members, host_of, candidates)
         except Exception:
             LOG.exception("Cluster %s: the spread was not worked out.",
                           db_cluster.id)
             return None
         if not move:
             return None
+        if len(move) == 3:
+            return self._spread_migrate(context, db_cluster, *move)
         member, reason = move
         if not replace.MemberReplacement._take(
                 db_cluster, ClusterTasks.UPDATING_CLUSTER):
@@ -416,6 +443,49 @@ class ClusterRepair(object):
         notify(EVENT_END, db_cluster, member, 'spread',
                'it took its master\'s place')
         return SPREAD_FOLLOW
+
+    def _spread_migrate(self, context, db_cluster, member, reason, host):
+        """A replica moved to a host without a master first, by the task
+        manager's migrate of the instance under its task: one task manager
+        moves it; the failover follows once it is back.
+        """
+        if not _take_member(member.id, InstanceTasks.MIGRATING):
+            return None
+        LOG.info("Cluster %s: %s.", db_cluster.id, reason)
+        notify(EVENT_START, db_cluster, member, 'spread', reason)
+        try:
+            task_api.API(_migrate_context(db_cluster, member, host)).migrate(
+                member.id, host)
+        except Exception as err:
+            _take_member(member.id, InstanceTasks.NONE,
+                         taken=InstanceTasks.MIGRATING)
+            self.spread_failed[db_cluster.id] = time.monotonic()
+            LOG.warning("Cluster %(cluster)s: member %(member)s was not "
+                        "moved to %(host)s: %(err)s",
+                        {'cluster': db_cluster.id, 'member': member.name,
+                         'host': host, 'err': err})
+            notify(EVENT_ERROR, db_cluster, member, 'spread',
+                   '%s; the move failed: %s' % (reason, err))
+            return None
+        self.spread_moving[member.id] = db_cluster.id
+        return RESTART_FOLLOW
+
+    @staticmethod
+    def _compute_hosts(nova):
+        """{host: hypervisor type} of the compute hosts up and enabled."""
+        hosts = {}
+        try:
+            for hypervisor in nova.hypervisors.list():
+                service = getattr(hypervisor, 'service', None) or {}
+                host = service.get('host') if isinstance(service,
+                                                         dict) else None
+                if (host and getattr(hypervisor, 'state', None) == 'up' and
+                        getattr(hypervisor, 'status', None) == 'enabled'):
+                    hosts[host] = getattr(hypervisor, 'hypervisor_type',
+                                          None)
+        except Exception as err:
+            LOG.debug("The compute hosts were not read: %s", err)
+        return hosts
 
     @staticmethod
     def _until_stale(db_cluster, members, stale):
@@ -511,6 +581,19 @@ def _take_member(instance_id, task, taken=None):
                              'task_description': task.db_text,
                              'updated': now}, synchronize_session=False)
     return bool(done)
+
+
+def _migrate_context(db_cluster, member, host):
+    """The task manager acting on the member, with the end of an
+    instance migrate to notify, as the management API's start of one
+    leaves it.
+    """
+    context = replace.tenant_context(db_cluster)
+    context.notification = notification.DBaaSInstanceMigrate(
+        context, request_id=context.request_id, server_type='taskmanager',
+        tenant_id=db_cluster.tenant_id, client_ip=CONF.host,
+        server_ip=CONF.host, instance_id=member.id, host=host)
+    return context
 
 
 def _restart_context(db_cluster, member):
