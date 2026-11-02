@@ -918,9 +918,9 @@ class VerticaApp(service.BaseDbApp):
             folder = node.get(key)
             if folder and folder.startswith(CONTAINER_DATA_DIR + '/'):
                 folder = self.mount_point + folder[len(CONTAINER_DATA_DIR):]
-                for path in (os.path.dirname(folder), folder):
-                    if path != self.mount_point and path not in folders:
-                        folders.append(path)
+                for made in (os.path.dirname(folder), folder):
+                    if made != self.mount_point and made not in folders:
+                        folders.append(made)
         for folder in folders:
             operating_system.ensure_directory(
                 folder, user=self.database_service_uid,

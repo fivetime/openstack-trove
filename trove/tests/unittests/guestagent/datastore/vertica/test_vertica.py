@@ -1150,6 +1150,11 @@ class TestVerticaTakeOverNode(VerticaGuestTestCase):
         config = json.loads(json.dumps(config or self.CONFIG))
 
         def read_file(path, codec=None, as_root=False):
+            # The configuration only: vcluster writes it, the guest reads
+            # it back to edit it and to hand it to the others.
+            if path != '/var/lib/vertica/vertica_cluster.yaml':
+                raise exception.UnprocessableEntity(
+                    'File does not exist: %s' % path)
             if codec is not None:
                 return config
             return 'the configuration'
