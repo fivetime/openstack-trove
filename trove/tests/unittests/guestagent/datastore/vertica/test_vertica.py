@@ -355,6 +355,30 @@ class TestVerticaApp(VerticaGuestTestCase):
         # the container started.
         self.assertIn('if [ "$(nodes)" -gt 1 ]', stop)
 
+    def _nodes_counted(self, config):
+        # The nodes function of the start script, on a configuration.
+        text = vertica_service.START_SCRIPT_CONTENT % collections.defaultdict(
+            str, nma_port=0, watch_interval=0)
+        start = text.index('nodes() {')
+        function = text[start:text.index('\n}\n', start) + 3]
+        with tempfile.NamedTemporaryFile('w', suffix='.yaml') as f:
+            f.write(config)
+            f.flush()
+            return subprocess.run(
+                ['/bin/bash', '-c', 'CFG=%s\n%snodes' % (f.name, function)],
+                capture_output=True, text=True).stdout.strip()
+
+    def test_the_nodes_of_a_configuration(self):
+        # As vcluster writes it, and as a YAML dump of it writes it
+        # (production, 2026-11-02: a replacement wrote that, a node
+        # counted none, and its restart shut the whole database down).
+        self.assertEqual('3', self._nodes_counted(
+            TestVerticaTakeOverNode.TEXT))
+        self.assertEqual('3', self._nodes_counted(
+            stream_codecs.YamlCodec().serialize(
+                TestVerticaTakeOverNode.CONFIG)))
+        self.assertEqual('0', self._nodes_counted('dbName: db_srvr\n'))
+
     def test_cluster_secrets_are_the_certificates_and_the_password(self):
         self.assertEqual(set(vertica_service.generate_certificates()),
                          set(vertica_service.CERT_FILES))
@@ -1140,27 +1164,43 @@ class TestVerticaTakeOverNode(VerticaGuestTestCase):
                                (3, '10.0.0.3'))],
         'eonMode': False, 'communalStorageLocation': '', 'ipv6': False,
         'firstStartAfterRevive': False}
+    # The same, as vcluster writes it.
+    NODE = ('    - name: v_db_srvr_node%(i)04d\n'
+            '      address: %(address)s\n'
+            '      subcluster: ""\n'
+            '      catalogPath: /data/db_srvr/v_db_srvr_node%(i)04d_catalog\n'
+            '      dataPath: /data/db_srvr/v_db_srvr_node%(i)04d_data\n'
+            '      depotPath: ""\n'
+            '      sandbox: ""\n')
+    TEXT = ('configFileVersion: "1.0"\ndbName: db_srvr\nnodes:\n' +
+            NODE % {'i': 1, 'address': '10.0.0.1'} +
+            NODE % {'i': 2, 'address': '10.0.0.2'} +
+            NODE % {'i': 3, 'address': '10.0.0.3'} +
+            'eonMode: false\ncommunalStorageLocation: ""\nipv6: false\n'
+            'firstStartAfterRevive: false\n')
 
-    def _take_over(self, lost='10.0.0.3', address='10.0.0.4',
-                   config=None):
+    PATH = '/var/lib/vertica/vertica_cluster.yaml'
+
+    def _take_over(self, lost='10.0.0.3', address='10.0.0.4', text=None):
         app = self._app()
         app.mount_point = '/var/lib/vertica'
         calls = []
         written = {}
-        config = json.loads(json.dumps(config or self.CONFIG))
+        # The configuration only: vcluster writes it, the guest reads it
+        # back to edit it and to hand it to the others.
+        files = {self.PATH: text or self.TEXT}
 
         def read_file(path, codec=None, as_root=False):
-            # The configuration only: vcluster writes it, the guest reads
-            # it back to edit it and to hand it to the others.
-            if path != '/var/lib/vertica/vertica_cluster.yaml':
+            if path not in files:
                 raise exception.UnprocessableEntity(
                     'File does not exist: %s' % path)
             if codec is not None:
-                return config
-            return 'the configuration'
+                return codec.deserialize(files[path])
+            return files[path]
 
         def write_file(path, data, codec=None, as_root=False):
-            written[path] = json.loads(json.dumps(data))
+            files[path] = codec.serialize(data) if codec else data
+            written[path] = files[path]
         self.ops = mock.patch.multiple(
             vertica_service.operating_system, read_file=read_file,
             write_file=write_file, chown=mock.DEFAULT,
@@ -1194,9 +1234,11 @@ class TestVerticaTakeOverNode(VerticaGuestTestCase):
         value = (lambda args, flag: args[args.index(flag) + 1])
         self.assertEqual('10.0.0.1,10.0.0.2', value(recover, '--hosts'))
         self.assertEqual('/data', value(recover, '--catalog-path'))
-        config = written['/var/lib/vertica/vertica_cluster.yaml']
-        self.assertEqual(['10.0.0.1', '10.0.0.2', '10.0.0.4'],
-                         [n['address'] for n in config['nodes']])
+        # The line of the lost node's address only: the file stays as
+        # vcluster wrote it.
+        self.assertEqual(self.TEXT.replace('address: 10.0.0.3',
+                                           'address: 10.0.0.4'),
+                         written[self.PATH])
         # The database's directory too, made before them: the server
         # writes its log there.
         self.assertEqual(
@@ -1211,18 +1253,17 @@ class TestVerticaTakeOverNode(VerticaGuestTestCase):
         self.assertEqual('start_node', start[0])
         self.assertEqual('v_db_srvr_node0003=10.0.0.4',
                          value(start, '--start'))
-        self.assertEqual('the configuration', result)
+        self.assertEqual(written[self.PATH], result)
 
     def test_a_node_moved_here_by_a_start_that_failed(self):
         # start_node changed the node's address in the catalog and failed
         # after (production, 2026-11-02: the database's directory was
         # root's): tried again, the node is at this member's address.
-        config = json.loads(json.dumps(self.CONFIG))
-        config['nodes'][2]['address'] = '10.0.0.4'
-        _result, calls, written = self._take_over(config=config)
-        nodes = written['/var/lib/vertica/vertica_cluster.yaml']['nodes']
-        self.assertEqual(['10.0.0.1', '10.0.0.2', '10.0.0.4'],
-                         [n['address'] for n in nodes])
+        moved = self.TEXT.replace('address: 10.0.0.3', 'address: 10.0.0.4')
+        result, calls, written = self._take_over(text=moved)
+        # Nothing to edit: the configuration is handed on as it is.
+        self.assertNotIn(self.PATH, written)
+        self.assertEqual(moved, result)
         self.assertEqual('v_db_srvr_node0003=10.0.0.4',
                          calls[1][calls[1].index('--start') + 1])
 

@@ -134,7 +134,7 @@ HOST=$(cat $CONF/%(host_file)s)
 # A node of a cluster: its configuration names more than one host. Asked
 # again when stopping: a member gets the configuration after it started.
 nodes() {
-    if [ -f "$CFG" ]; then grep -c '^ *address:' "$CFG"; else echo 0; fi
+    if [ -f "$CFG" ]; then grep -cE '^[ -]*address:' "$CFG"; else echo 0; fi
 }
 NODES=$(nodes)
 # Left by a guest agent that stopped the server and did not start it
@@ -248,7 +248,7 @@ if [ "$NODES" -gt 1 ]; then
         done
     ) &
 elif [ -f "$CFG" ]; then
-    OLD=$(sed -n 's/^ *address: *//p' "$CFG" | head -1)
+    OLD=$(sed -nE 's/^[ -]*address: *//p' "$CFG" | head -1)
     if [ -n "$OLD" ] && [ "$OLD" != "$HOST" ]; then
         # The data comes from a node with another address.
         printf '[{"from_address": "%%s", "to_address": "%%s"}]' \\
@@ -906,11 +906,23 @@ class VerticaApp(service.BaseDbApp):
         if node is None:
             raise exception.TroveError(
                 _('No node of the database is at %s.') % lost_address)
-        node['address'] = self.address
-        operating_system.write_file(path, config, codec=codec, as_root=True)
-        operating_system.chown(
-            path, self.database_service_uid, self.database_service_gid,
-            as_root=True)
+        if node.get('address') != self.address:
+            # The line of the node's address only: the file stays as
+            # vcluster wrote it, which the start script reads (a node is
+            # a line "address: ..." there).
+            text = operating_system.read_file(path, as_root=True)
+            line = re.compile(r'^(\s*-?\s*address:\s*)%s\s*$'
+                              % re.escape(node['address']), re.MULTILINE)
+            text, count = line.subn(lambda m: m.group(1) + self.address,
+                                    text)
+            if count != 1:
+                raise exception.TroveError(
+                    _('The address %s is not once in the configuration.')
+                    % node['address'])
+            operating_system.write_file(path, text, as_root=True)
+            operating_system.chown(
+                path, self.database_service_uid,
+                self.database_service_gid, as_root=True)
         # The database's directory first: the server writes there too
         # (dbLog), and a directory made for its child would be root's.
         folders = []
