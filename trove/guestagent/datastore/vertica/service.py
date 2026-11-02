@@ -890,29 +890,41 @@ class VerticaApp(service.BaseDbApp):
         path = f'{self.mount_point}/vertica_cluster.yaml'
         codec = stream_codecs.YamlCodec()
         config = operating_system.read_file(path, codec=codec, as_root=True)
-        node = next((n for n in config.get('nodes') or []
+        nodes = config.get('nodes') or []
+        node = next((n for n in nodes
                      if n.get('address') == lost_address), None)
+        mine = next((n for n in nodes
+                     if n.get('address') == self.address), None)
         if node is None:
-            raise exception.TroveError(
-                _('No node of the database is at %s.') % lost_address)
-        if any(n.get('address') == self.address
-               for n in config['nodes'] if n is not node):
+            # Tried before: start_node moved the node here in the catalog
+            # and failed after; the node is this member's to start.
+            node = mine
+        elif mine is not None:
             raise exception.TroveError(
                 _('A node of the database is at %s already.')
                 % self.address)
+        if node is None:
+            raise exception.TroveError(
+                _('No node of the database is at %s.') % lost_address)
         node['address'] = self.address
         operating_system.write_file(path, config, codec=codec, as_root=True)
         operating_system.chown(
             path, self.database_service_uid, self.database_service_gid,
             as_root=True)
+        # The database's directory first: the server writes there too
+        # (dbLog), and a directory made for its child would be root's.
+        folders = []
         for key in ('catalogPath', 'dataPath'):
             folder = node.get(key)
             if folder and folder.startswith(CONTAINER_DATA_DIR + '/'):
-                operating_system.ensure_directory(
-                    self.mount_point + folder[len(CONTAINER_DATA_DIR):],
-                    user=self.database_service_uid,
-                    group=self.database_service_gid, force=True,
-                    as_root=True)
+                folder = self.mount_point + folder[len(CONTAINER_DATA_DIR):]
+                for path in (os.path.dirname(folder), folder):
+                    if path != self.mount_point and path not in folders:
+                        folders.append(path)
+        for folder in folders:
+            operating_system.ensure_directory(
+                folder, user=self.database_service_uid,
+                group=self.database_service_gid, force=True, as_root=True)
         LOG.info('Starting node %(node)s at %(address)s in place of the one '
                  'at %(lost)s.', {'node': node['name'],
                                   'address': self.address,

@@ -1192,17 +1192,34 @@ class TestVerticaTakeOverNode(VerticaGuestTestCase):
         config = written['/var/lib/vertica/vertica_cluster.yaml']
         self.assertEqual(['10.0.0.1', '10.0.0.2', '10.0.0.4'],
                          [n['address'] for n in config['nodes']])
+        # The database's directory too, made before them: the server
+        # writes its log there.
         self.assertEqual(
-            [mock.call('/var/lib/vertica/db_srvr/v_db_srvr_node0003_catalog',
-                       user='997', group='995', force=True, as_root=True),
-             mock.call('/var/lib/vertica/db_srvr/v_db_srvr_node0003_data',
-                       user='997', group='995', force=True, as_root=True)],
+            [mock.call(path, user='997', group='995', force=True,
+                       as_root=True)
+             for path in ('/var/lib/vertica/db_srvr',
+                          '/var/lib/vertica/db_srvr/'
+                          'v_db_srvr_node0003_catalog',
+                          '/var/lib/vertica/db_srvr/v_db_srvr_node0003_data')],
             self.ops['ensure_directory'].call_args_list)
         start = list(calls[1])
         self.assertEqual('start_node', start[0])
         self.assertEqual('v_db_srvr_node0003=10.0.0.4',
                          value(start, '--start'))
         self.assertEqual('the configuration', result)
+
+    def test_a_node_moved_here_by_a_start_that_failed(self):
+        # start_node changed the node's address in the catalog and failed
+        # after (production, 2026-11-02: the database's directory was
+        # root's): tried again, the node is at this member's address.
+        config = json.loads(json.dumps(self.CONFIG))
+        config['nodes'][2]['address'] = '10.0.0.4'
+        _result, calls, written = self._take_over(config=config)
+        nodes = written['/var/lib/vertica/vertica_cluster.yaml']['nodes']
+        self.assertEqual(['10.0.0.1', '10.0.0.2', '10.0.0.4'],
+                         [n['address'] for n in nodes])
+        self.assertEqual('v_db_srvr_node0003=10.0.0.4',
+                         calls[1][calls[1].index('--start') + 1])
 
     def test_no_node_at_the_lost_address(self):
         self.assertRaises(exception.TroveError, self._take_over,
