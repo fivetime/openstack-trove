@@ -868,6 +868,63 @@ class VerticaApp(service.BaseDbApp):
             path, self.database_service_uid, self.database_service_gid,
             as_root=True)
 
+    def take_over_node(self, lost_address, peers):
+        """Take the place of the cluster's node at ``lost_address``, lost
+        for good, on this member: a new one, with the cluster's secrets
+        and no database of its own. The configuration comes from the
+        catalog of the nodes that run (``peers``), with the lost node at
+        this member's address; the node starts here with directories of
+        its own, empty, and recovers from the others (start_node changes
+        its address in the catalog). Returns the configuration, which the
+        others need to start and stop their node.
+        """
+        utils.poll_until(self.agent_is_up, sleep_time=2,
+                         time_out=CONF.state_change_wait_time)
+        secret = '%s/%s' % (CONTAINER_CONF_DIR, ADMIN_SECRET)
+        LOG.info('Recovering the cluster configuration from %s.', peers)
+        self.vcluster('manage_config', 'recover', '--overwrite',
+                      '--db-name', DB_NAME,
+                      '--hosts', ','.join(peers),
+                      '--catalog-path', CONTAINER_DATA_DIR,
+                      '--password-file', secret)
+        path = f'{self.mount_point}/vertica_cluster.yaml'
+        codec = stream_codecs.YamlCodec()
+        config = operating_system.read_file(path, codec=codec, as_root=True)
+        node = next((n for n in config.get('nodes') or []
+                     if n.get('address') == lost_address), None)
+        if node is None:
+            raise exception.TroveError(
+                _('No node of the database is at %s.') % lost_address)
+        if any(n.get('address') == self.address
+               for n in config['nodes'] if n is not node):
+            raise exception.TroveError(
+                _('A node of the database is at %s already.')
+                % self.address)
+        node['address'] = self.address
+        operating_system.write_file(path, config, codec=codec, as_root=True)
+        operating_system.chown(
+            path, self.database_service_uid, self.database_service_gid,
+            as_root=True)
+        for key in ('catalogPath', 'dataPath'):
+            folder = node.get(key)
+            if folder and folder.startswith(CONTAINER_DATA_DIR + '/'):
+                operating_system.ensure_directory(
+                    self.mount_point + folder[len(CONTAINER_DATA_DIR):],
+                    user=self.database_service_uid,
+                    group=self.database_service_gid, force=True,
+                    as_root=True)
+        LOG.info('Starting node %(node)s at %(address)s in place of the one '
+                 'at %(lost)s.', {'node': node['name'],
+                                  'address': self.address,
+                                  'lost': lost_address})
+        self.vcluster('start_node', '--start',
+                      '%s=%s' % (node['name'], self.address),
+                      '--password-file', secret)
+        utils.poll_until(
+            lambda: dict(self._nodes()).get(self.address) == 'UP',
+            sleep_time=5, time_out=CONF.cluster_usage_timeout)
+        return operating_system.read_file(path, as_root=True)
+
     def reset_admin_password(self):
         """Give the admin of a restored database the password of this
         instance, and keep it again where the backup put the old one.

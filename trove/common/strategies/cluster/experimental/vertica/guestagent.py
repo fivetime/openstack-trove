@@ -78,6 +78,15 @@ class VerticaGuestAgentAPI(guest_api.API):
                           version=guest_api.API.API_BASE_VERSION,
                           config=config)
 
+    def take_over_node(self, lost_address, peers):
+        """The new member takes the place of the lost node: it starts and
+        recovers from the others, which takes as long as its data.
+        """
+        LOG.debug("Taking the place of the node at %s.", lost_address)
+        return self._call("take_over_node", CONF.cluster_usage_timeout,
+                          version=guest_api.API.API_BASE_VERSION,
+                          lost_address=lost_address, peers=peers)
+
     def cluster_complete(self):
         LOG.debug("Notifying cluster install completion.")
         return self._call("cluster_complete", self.agent_high_timeout,

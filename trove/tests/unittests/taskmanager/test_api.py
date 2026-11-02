@@ -25,6 +25,8 @@ from trove.common.strategies.cluster.experimental.mongodb.taskmanager import (
     MongoDbTaskManagerAPI)
 from trove.common.strategies.cluster.experimental.redis.taskmanager import (
     RedisTaskManagerAPI)
+from trove.common.strategies.cluster.experimental.vertica.taskmanager import (
+    VerticaTaskManagerAPI)
 from trove.guestagent import models as agent_models
 from trove.taskmanager import api as task_api
 from trove.taskmanager.manager import Manager
@@ -212,6 +214,34 @@ class RedisApiTest(ApiTest):
                               instance_id='i2')
             method = self.call_context.cast.call_args[0][1]
             self.assertTrue(callable(getattr(Manager(), method)), method)
+
+
+class VerticaApiTest(ApiTest):
+    """The repair's two steps of a Vertica cluster: casts the task
+    manager answers.
+    """
+
+    @patch.object(task_api.API, 'get_client')
+    def setUp(self, *args):
+        super(VerticaApiTest, self).setUp()
+        self.api = VerticaTaskManagerAPI(self.context)
+        self._mock_rpc_client()
+
+    def _verify_the_manager_answers(self):
+        method = self.call_context.cast.call_args[0][1]
+        self.assertTrue(callable(getattr(Manager(), method)), method)
+
+    def test_remove_member(self):
+        self.api.vertica_remove_member('c1', 'i1')
+        self._verify_cast('vertica_remove_member', cluster_id='c1',
+                          instance_id='i1')
+        self._verify_the_manager_answers()
+
+    def test_take_over_node(self):
+        self.api.vertica_take_over_node('c1', 'i2', '10.0.0.5')
+        self._verify_cast('vertica_take_over_node', cluster_id='c1',
+                          instance_id='i2', lost_address='10.0.0.5')
+        self._verify_the_manager_answers()
 
 
 class TestAPI(trove_testtools.TestCase):

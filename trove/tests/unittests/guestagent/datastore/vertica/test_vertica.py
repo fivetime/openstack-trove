@@ -1121,6 +1121,98 @@ class TestVerticaForcedStart(VerticaGuestTestCase):
             self.assertLess(at, single)
 
 
+class TestVerticaTakeOverNode(VerticaGuestTestCase):
+    """A new member takes the place of a lost node at its own address:
+    the configuration from the catalog of the nodes that run (vcluster
+    25.4, as recovered on a cluster of three), the lost node moved to this
+    member, its directories made, and the node started there.
+    """
+
+    CONFIG = {
+        'configFileVersion': '1.0', 'dbName': 'db_srvr',
+        'nodes': [
+            {'name': 'v_db_srvr_node%04d' % i, 'address': address,
+             'subcluster': '',
+             'catalogPath': '/data/db_srvr/v_db_srvr_node%04d_catalog' % i,
+             'dataPath': '/data/db_srvr/v_db_srvr_node%04d_data' % i,
+             'depotPath': '', 'sandbox': ''}
+            for i, address in ((1, '10.0.0.1'), (2, '10.0.0.2'),
+                               (3, '10.0.0.3'))],
+        'eonMode': False, 'communalStorageLocation': '', 'ipv6': False,
+        'firstStartAfterRevive': False}
+
+    def _take_over(self, lost='10.0.0.3', address='10.0.0.4',
+                   config=None):
+        app = self._app()
+        app.mount_point = '/var/lib/vertica'
+        calls = []
+        written = {}
+        config = json.loads(json.dumps(config or self.CONFIG))
+
+        def read_file(path, codec=None, as_root=False):
+            if codec is not None:
+                return config
+            return 'the configuration'
+
+        def write_file(path, data, codec=None, as_root=False):
+            written[path] = json.loads(json.dumps(data))
+        self.ops = mock.patch.multiple(
+            vertica_service.operating_system, read_file=read_file,
+            write_file=write_file, chown=mock.DEFAULT,
+            ensure_directory=mock.DEFAULT).start()
+        mock.patch.object(vertica_service.VerticaApp, 'vcluster',
+                          side_effect=lambda *a: calls.append(a)).start()
+        mock.patch.object(vertica_service.VerticaApp, 'agent_is_up',
+                          return_value=True).start()
+        mock.patch.object(vertica_service.VerticaApp, '_nodes',
+                          return_value=[(address, 'UP')]).start()
+        mock.patch.object(vertica_service.VerticaApp, 'address',
+                          new_callable=mock.PropertyMock,
+                          return_value=address).start()
+        mock.patch.object(vertica_service.VerticaApp,
+                          'database_service_uid',
+                          new_callable=mock.PropertyMock,
+                          return_value='997').start()
+        mock.patch.object(vertica_service.VerticaApp,
+                          'database_service_gid',
+                          new_callable=mock.PropertyMock,
+                          return_value='995').start()
+        self.addCleanup(mock.patch.stopall)
+        result = app.take_over_node(lost, ['10.0.0.1', '10.0.0.2'])
+        return result, calls, written
+
+    def test_the_lost_node_starts_here(self):
+        result, calls, written = self._take_over()
+        recover = list(calls[0])
+        self.assertEqual(['manage_config', 'recover', '--overwrite'],
+                         recover[:3])
+        value = (lambda args, flag: args[args.index(flag) + 1])
+        self.assertEqual('10.0.0.1,10.0.0.2', value(recover, '--hosts'))
+        self.assertEqual('/data', value(recover, '--catalog-path'))
+        config = written['/var/lib/vertica/vertica_cluster.yaml']
+        self.assertEqual(['10.0.0.1', '10.0.0.2', '10.0.0.4'],
+                         [n['address'] for n in config['nodes']])
+        self.assertEqual(
+            [mock.call('/var/lib/vertica/db_srvr/v_db_srvr_node0003_catalog',
+                       user='997', group='995', force=True, as_root=True),
+             mock.call('/var/lib/vertica/db_srvr/v_db_srvr_node0003_data',
+                       user='997', group='995', force=True, as_root=True)],
+            self.ops['ensure_directory'].call_args_list)
+        start = list(calls[1])
+        self.assertEqual('start_node', start[0])
+        self.assertEqual('v_db_srvr_node0003=10.0.0.4',
+                         value(start, '--start'))
+        self.assertEqual('the configuration', result)
+
+    def test_no_node_at_the_lost_address(self):
+        self.assertRaises(exception.TroveError, self._take_over,
+                          lost='10.0.0.9')
+
+    def test_not_when_a_node_is_here_already(self):
+        self.assertRaises(exception.TroveError, self._take_over,
+                          address='10.0.0.2')
+
+
 class TestVerticaClusterHealth(VerticaGuestTestCase):
     """What a node sees of the database, through vsql as the admin runs
     it (the fields of a row separated by 0x1f).

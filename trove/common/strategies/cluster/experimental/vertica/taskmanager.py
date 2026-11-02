@@ -23,8 +23,11 @@ from trove.common.strategies.cluster import base
 from trove.common.strategies.cluster.experimental.vertica import (
     api as vertica_api)
 from trove.common.strategies.cluster.experimental.vertica import communal
+from trove.common import utils
 from trove.instance.models import DBInstance
 from trove.instance.models import Instance
+from trove.instance.models import load_any_instance
+from trove.instance import tasks as inst_tasks
 from trove.taskmanager import api as task_api
 import trove.taskmanager.models as task_models
 
@@ -46,6 +49,23 @@ class VerticaTaskManagerStrategy(base.BaseTaskManagerStrategy):
     @property
     def task_manager_cluster_tasks_class(self):
         return VerticaClusterTasks
+
+    @property
+    def task_manager_manager_actions(self):
+        return {'remove_member': self._manager_remove_member,
+                'take_over_node': self._manager_take_over_node}
+
+    def _manager_remove_member(self, context, cluster_id, instance_id):
+        cluster_tasks = task_models.ClusterTasks.load(
+            context, cluster_id, VerticaClusterTasks)
+        cluster_tasks.remove_member(context, cluster_id, instance_id)
+
+    def _manager_take_over_node(self, context, cluster_id, instance_id,
+                                lost_address):
+        cluster_tasks = task_models.ClusterTasks.load(
+            context, cluster_id, VerticaClusterTasks)
+        cluster_tasks.take_over_node(context, cluster_id, instance_id,
+                                     lost_address)
 
 
 class VerticaClusterTasks(task_models.ClusterTasks):
@@ -339,6 +359,98 @@ class VerticaClusterTasks(task_models.ClusterTasks):
                           "%(project)s or the EC2 credential %(access)s of "
                           "user %(user)s of cluster %(cluster)s.", what)
 
+    # The repair's replacement of a lost member (vertica/repair.py): the
+    # database keeps the lost node, DOWN, while its member is deleted; a
+    # new member takes its place at its own address, so the cluster keeps
+    # its three nodes (the Community Edition allows no more).
+
+    def remove_member(self, context, cluster_id, instance_id):
+        """A member lost for good is deleted. Its node stays in the
+        catalog, DOWN, for the member that takes its place.
+        """
+        LOG.debug("begin remove_member %(instance)s of Vertica cluster "
+                  "%(cluster)s", {'instance': instance_id,
+                                  'cluster': cluster_id})
+
+        def _remove_member():
+            Instance.delete(load_any_instance(context, instance_id))
+
+            def marked_deleted():
+                return instance_id not in [
+                    db_instance.id for db_instance in DBInstance.find_all(
+                        cluster_id=cluster_id, deleted=False).all()]
+            utils.poll_until(marked_deleted, sleep_time=2,
+                             time_out=CONF.cluster_delete_time_out)
+
+        timeout = Timeout(CONF.cluster_usage_timeout)
+        try:
+            _remove_member()
+            self.reset_task()
+        except Timeout as t:
+            if t is not timeout:
+                raise  # not my timeout
+            LOG.exception("timeout removing member %s.", instance_id)
+            self.update_statuses_on_failure(
+                cluster_id, status=inst_tasks.InstanceTasks.SHRINKING_ERROR,
+                instance_ids=[instance_id])
+        except Exception:
+            LOG.exception("error removing member %s.", instance_id)
+            self.update_statuses_on_failure(
+                cluster_id, status=inst_tasks.InstanceTasks.SHRINKING_ERROR,
+                instance_ids=[instance_id])
+        finally:
+            timeout.cancel()
+
+    def take_over_node(self, context, cluster_id, instance_id, lost_address):
+        """The new member takes the place of the lost node: once it is
+        ready it gets the cluster's secrets from a member that stays, its
+        node starts and recovers from the others, and they get the
+        configuration with its address.
+        """
+        LOG.debug("begin take_over_node %(instance)s of Vertica cluster "
+                  "%(cluster)s for %(lost)s", {'instance': instance_id,
+                                               'cluster': cluster_id,
+                                               'lost': lost_address})
+
+        def _take_over_node():
+            if not self._all_instances_ready([instance_id], cluster_id):
+                raise TroveError(_("The new member %s is not ready.")
+                                 % instance_id)
+            instance = Instance.load(context, instance_id)
+            others = [Instance.load(context, db_instance.id)
+                      for db_instance in DBInstance.find_all(
+                          cluster_id=cluster_id, deleted=False).all()
+                      if db_instance.id != instance_id]
+            if not others:
+                raise TroveError(_("No member stays."))
+            guest = self.get_guest(instance)
+            guest.install_cluster_secrets(
+                self.get_guest(others[0]).get_cluster_secrets())
+            config = guest.take_over_node(
+                lost_address, [self.get_ip(other) for other in others])
+            for other in others:
+                self.get_guest(other).set_cluster_config(config)
+            guest.cluster_complete()
+
+        timeout = Timeout(CONF.cluster_usage_timeout)
+        try:
+            _take_over_node()
+            self.reset_task()
+        except Timeout as t:
+            if t is not timeout:
+                raise  # not my timeout
+            LOG.exception("timeout taking over node %s.", lost_address)
+            self.update_statuses_on_failure(
+                cluster_id, status=inst_tasks.InstanceTasks.GROWING_ERROR,
+                instance_ids=[instance_id])
+        except Exception:
+            LOG.exception("error taking over node %s.", lost_address)
+            self.update_statuses_on_failure(
+                cluster_id, status=inst_tasks.InstanceTasks.GROWING_ERROR,
+                instance_ids=[instance_id])
+        finally:
+            timeout.cancel()
+
     # Growing and shrinking went through adminTools over SSH, which the
     # image has neither of. The API refuses both until they are done with
     # vcluster (add_node, remove_node) and tried with a license: the
@@ -357,3 +469,14 @@ class VerticaTaskManagerAPI(task_api.API):
         LOG.debug("Casting %s", method_name)
         cctxt = self.client.prepare(version=version)
         cctxt.cast(self.context, method_name, **kwargs)
+
+    def vertica_remove_member(self, cluster_id, instance_id):
+        """The repair: a member lost for good is deleted."""
+        self._cast("vertica_remove_member", self.API_BASE_VERSION,
+                   cluster_id=cluster_id, instance_id=instance_id)
+
+    def vertica_take_over_node(self, cluster_id, instance_id, lost_address):
+        """The repair: a new member takes the place of a lost node."""
+        self._cast("vertica_take_over_node", self.API_BASE_VERSION,
+                   cluster_id=cluster_id, instance_id=instance_id,
+                   lost_address=lost_address)

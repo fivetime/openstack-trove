@@ -37,9 +37,11 @@ from trove import rpc
 from trove.tests.unittests import trove_testtools
 
 
-class VerticaClusterTasksTest(trove_testtools.TestCase):
+class VerticaTasksBase(trove_testtools.TestCase):
+    """A cluster of three members and its tasks."""
+
     def setUp(self):
-        super(VerticaClusterTasksTest, self).setUp()
+        super(VerticaTasksBase, self).setUp()
         self.cluster_id = "1232"
         self.cluster_name = "Cluster-1234"
         self.tenant_id = "6789"
@@ -84,6 +86,9 @@ class VerticaClusterTasksTest(trove_testtools.TestCase):
                                          self.db_cluster,
                                          datastore=mock_ds1,
                                          datastore_version=mock_dv1)
+
+
+class VerticaClusterTasksTest(VerticaTasksBase):
 
     @patch.object(ClusterTasks, 'update_statuses_on_failure')
     @patch.object(DBInstance, 'find_by')
@@ -200,6 +205,83 @@ class VerticaClusterTasksTest(trove_testtools.TestCase):
             self.clustertasks.create_cluster(Mock(), self.cluster_id)
             mock_update_status.assert_called_with('1232')
             mock_reset_task.assert_called_with()
+
+
+class VerticaReplacementTasksTest(VerticaTasksBase):
+    """The repair's steps: the lost member deleted, the new one taking
+    its node's place.
+    """
+
+    TM = 'trove.common.strategies.cluster.experimental.vertica.taskmanager'
+
+    def setUp(self):
+        super(VerticaReplacementTasksTest, self).setUp()
+        self.dbnew = DBInstance(InstanceTasks.NONE, id="4", name="member4",
+                                compute_instance_id="compute-4",
+                                task_id=InstanceTasks.NONE._code,
+                                task_description=InstanceTasks.NONE._db_text,
+                                datastore_version_id="1",
+                                cluster_id=self.cluster_id, type="master")
+        patch.object(DBInstance, 'find_all').start().return_value.all.\
+            return_value = [self.dbinst2, self.dbinst3, self.dbnew]
+        patch.object(Instance, 'load', side_effect=lambda c, i: Mock(
+            id=i)).start()
+        self.guests = {i: Mock(name='guest-%s' % i) for i in '234'}
+        patch.object(ClusterTasks, 'get_guest',
+                     side_effect=lambda inst: self.guests[inst.id]).start()
+        patch.object(ClusterTasks, 'get_ip',
+                     side_effect=lambda inst: '10.0.0.%s' % inst.id).start()
+        self.ready = patch.object(ClusterTasks, '_all_instances_ready',
+                                  return_value=True).start()
+        self.reset = patch.object(ClusterTasks, 'reset_task').start()
+        self.failed = patch.object(ClusterTasks,
+                                   'update_statuses_on_failure').start()
+        self.addCleanup(patch.stopall)
+
+    def test_the_new_member_takes_the_node(self):
+        new = self.guests['4']
+        self.guests['2'].get_cluster_secrets.return_value = 'secrets'
+        new.take_over_node.return_value = 'the configuration'
+        self.clustertasks.take_over_node(Mock(), self.cluster_id, '4',
+                                         '10.0.0.1')
+        new.install_cluster_secrets.assert_called_once_with('secrets')
+        new.take_over_node.assert_called_once_with(
+            '10.0.0.1', ['10.0.0.2', '10.0.0.3'])
+        for i in '23':
+            self.guests[i].set_cluster_config.assert_called_once_with(
+                'the configuration')
+        new.cluster_complete.assert_called_once_with()
+        self.reset.assert_called_once_with()
+        self.failed.assert_not_called()
+
+    def test_a_node_not_taken_over_fails_the_new_member(self):
+        self.guests['4'].take_over_node.side_effect = GuestError("no")
+        with patch(self.TM + '.LOG'):
+            self.clustertasks.take_over_node(Mock(), self.cluster_id, '4',
+                                             '10.0.0.1')
+        for i in '23':
+            self.guests[i].set_cluster_config.assert_not_called()
+        self.failed.assert_called_once_with(
+            self.cluster_id, status=InstanceTasks.GROWING_ERROR,
+            instance_ids=['4'])
+
+    def test_a_new_member_not_ready_fails(self):
+        self.ready.return_value = False
+        with patch(self.TM + '.LOG'):
+            self.clustertasks.take_over_node(Mock(), self.cluster_id, '4',
+                                             '10.0.0.1')
+        self.guests['4'].install_cluster_secrets.assert_not_called()
+        self.failed.assert_called_once_with(
+            self.cluster_id, status=InstanceTasks.GROWING_ERROR,
+            instance_ids=['4'])
+
+    def test_the_lost_member_is_deleted(self):
+        with patch(self.TM + '.load_any_instance') as load, \
+                patch.object(Instance, 'delete') as delete:
+            self.clustertasks.remove_member(Mock(), self.cluster_id, '1')
+        delete.assert_called_once_with(load.return_value)
+        self.reset.assert_called_once_with()
+        self.failed.assert_not_called()
 
 
 class VerticaTaskManagerAPITest(trove_testtools.TestCase):

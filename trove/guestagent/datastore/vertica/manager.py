@@ -162,6 +162,11 @@ class Manager(cluster_member.ClusterWatchMixin, manager.Manager):
     def set_cluster_config(self, context, config):
         self.app.set_cluster_config(config)
 
+    def take_over_node(self, context, lost_address, peers):
+        LOG.info("Taking the place of the node at %(lost)s of the cluster "
+                 "of %(peers)s.", {'lost': lost_address, 'peers': peers})
+        return self.app.take_over_node(lost_address, peers)
+
     def set_communal_credential(self, context, access, secret):
         self.app.set_communal_credential(access, secret)
 

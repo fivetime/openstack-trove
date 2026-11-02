@@ -1,0 +1,14 @@
+---
+features:
+  - |
+    The cluster repair replaces a lost member of a Vertica cluster in
+    Enterprise Mode (``cluster_repair_replace``): when every other member
+    holds the lost node out, its member is deleted and its node stays in
+    the catalog, DOWN; a new member of the lost one's kind is made, gets
+    the cluster's secrets, and takes the node's place at its own address
+    (``vcluster start_node`` with the new address, the node recovering
+    its catalog and data from the others); the others get the new
+    configuration. The cluster keeps its three nodes throughout, which
+    the Community Edition allows. The new member needs a guest agent with
+    the new call ``take_over_node``; the members that stay need none.
+    A member of an Eon Mode cluster is not replaced.

@@ -300,6 +300,41 @@ class VerticaCluster(models.Cluster):
         else:
             return 2
 
+    def create_replacement(self, spec, instance_type, locality):
+        """The repair: a member in place of a lost one (vertica/repair.py),
+        of its kind and with the cluster's member settings, named after
+        every member the cluster had. Returns its id.
+        """
+        from trove.common import clients
+        from trove.common import glance as common_glance
+        image_id = self.ds_version.image_id
+        if not image_id:
+            image_id = common_glance.get_image_id(
+                clients.create_glance_client(self.context), None,
+                self.ds_version.image_tags)
+        check_quotas(self.context.project_id,
+                     {'instances': 1,
+                      'volumes': spec.get('volume_size') or 0})
+        numbers = [0]
+        with inst_models.DBInstance.query() as query:
+            names = [row.name for row in query.filter_by(cluster_id=self.id)]
+        for name in names:
+            match = re.match(r'^%s-member-(\d+)$' % re.escape(self.name),
+                             name or '')
+            if match:
+                numbers.append(int(match.group(1)))
+        member_config = {"id": self.id, "instance_type": instance_type}
+        member_config.update(member_settings(self.db_info.get_properties()))
+        nics = spec.get('nics')
+        instance = inst_models.Instance.create(
+            self.context, "%s-member-%d" % (self.name, max(numbers) + 1),
+            spec['flavor_id'], image_id, [], [], self.ds, self.ds_version,
+            spec.get('volume_size'), None, nics=nics,
+            availability_zone=spec.get('availability_zone'),
+            configuration_id=None, cluster_config=member_config,
+            volume_type=spec.get('volume_type'), locality=locality)
+        return instance.id
+
     # Not yet with vcluster; see the taskmanager strategy.
     def grow(self, instances, image_id=None):
         raise exception.BadRequest(_(

@@ -50,6 +50,10 @@ from trove.common.strategies.cluster.experimental.redis import (
     api as redis_api)
 from trove.common.strategies.cluster.experimental.redis import (
     repair as redis_repair)
+from trove.common.strategies.cluster.experimental.vertica import (
+    api as vertica_api)
+from trove.common.strategies.cluster.experimental.vertica import (
+    repair as vertica_repair)
 from trove.common import utils
 from trove.instance import models as inst_models
 from trove.instance.models import DBInstance
@@ -1304,6 +1308,104 @@ class TestCassandraReplace(_PeerViews):
         api.grow_cluster.assert_called_once_with(self.cluster.id, ['new'])
 
 
+class TestVerticaReplace(_PeerViews):
+    """Vertica's word on a lost member: what each node sees of the nodes
+    table (cluster_health of the guest): the lost one's address not UP.
+    The database neither grows nor shrinks; the lost member is deleted
+    and a new one takes its node's place.
+    """
+
+    manager = 'vertica'
+    ips = ('10.0.0.31', '10.0.0.32', '10.0.0.33')
+
+    def _down(self):
+        for i in (1, 2):
+            self._tell(i, ch.view(ch.DEGRADED, ['10.0.0.31'],
+                                  'not up: 10.0.0.31 DOWN; fault tolerance '
+                                  '0 of 1', self.ips[i]))
+
+    def test_down_on_every_other_node(self):
+        self._down()
+        self.assertEqual((True, 'every other member holds 10.0.0.31 out'),
+                         self._ask())
+
+    def test_not_while_another_node_is_down(self):
+        self._down()
+        # Two of three nodes down: the database shuts down, and the one
+        # node that still answers sees both out.
+        self._tell(2, ch.view(ch.DEGRADED, ['10.0.0.31', '10.0.0.33'],
+                              'not up: 10.0.0.31 DOWN, 10.0.0.33 DOWN',
+                              '10.0.0.32'))
+        self.assertFalse(self._ask()[0])
+
+    def test_not_a_member_of_an_eon_mode_cluster(self):
+        self._down()
+        self.cluster.save_properties({'storage_mode': 'eon'})
+        self.assertEqual(
+            (False, 'a member of an Eon Mode cluster is not replaced'),
+            self._ask())
+
+    def test_what_the_steps_need(self):
+        plugin = replace.plugin_for(self.manager)
+        plugin.guest_factory = lambda c, i, m: self.guests[i]
+        self._down()
+        self.members[0].type = 'master'
+        self.assertEqual({'address': '10.0.0.31', 'type': 'master'},
+                         plugin.remember(mock.Mock(), self.cluster,
+                                         self.members[0], self.members[1:]))
+        # The members do not agree on the node that is out.
+        self._tell(2, ch.view(ch.DEGRADED, ['10.0.0.32'], 'not up',
+                              '10.0.0.33'))
+        self.assertRaises(exception.TroveError, plugin.remember,
+                          mock.Mock(), self.cluster, self.members[0],
+                          self.members[1:])
+
+    def test_the_steps(self):
+        plugin = replace.plugin_for(self.manager)
+        api = mock.patch.object(task_api, 'load').start().return_value
+        state = {'lost': self.members[0].id, 'address': '10.0.0.31',
+                 'type': 'master',
+                 'spec': {'flavor_id': 'f1', 'volume_size': 8,
+                          'volume_type': 'nvme', 'nics': [
+                              {'network_id': 'net-1'}]}}
+        plugin.remove('ctx', self.cluster, state)
+        api.vertica_remove_member.assert_called_once_with(
+            self.cluster.id, self.members[0].id)
+        # The real cluster, as the API loads it: the new member is of the
+        # lost one's kind, with the cluster's member settings, named after
+        # every member the cluster had (the lost one's row is there yet).
+        self.cluster.save_properties({'sync_writes': True})
+        datastore_version = mock.Mock(manager='vertica', image_id='img-1')
+        cluster = vertica_api.VerticaCluster(
+            mock.Mock(project_id='t'), self.cluster, mock.Mock(),
+            datastore_version)
+        cluster._server_group_loaded = True
+        cluster._server_group = None
+        mock.patch.object(cluster_models.Cluster, 'load',
+                          return_value=cluster).start()
+        quotas = mock.patch.object(vertica_api, 'check_quotas').start()
+        create = mock.patch.object(inst_models.Instance, 'create').start()
+        create.return_value.id = 'new'
+        plugin.add('ctx', self.cluster, state)
+        quotas.assert_called_once_with('t', {'instances': 1, 'volumes': 8})
+        name, flavor, image = create.call_args.args[1:4]
+        self.assertEqual(('c-member-4', 'f1', 'img-1'), (name, flavor, image))
+        self.assertEqual(8, create.call_args.args[8])
+        self.assertEqual({'id': self.cluster.id, 'instance_type': 'master',
+                          'sync_writes': True},
+                         create.call_args.kwargs['cluster_config'])
+        self.assertEqual([{'network_id': 'net-1'}],
+                         create.call_args.kwargs['nics'])
+        self.assertEqual('nvme', create.call_args.kwargs['volume_type'])
+        api.vertica_take_over_node.assert_called_once_with(
+            self.cluster.id, 'new', '10.0.0.31')
+
+    def test_the_plugin_is_found_by_its_entry_point(self):
+        replace._plugins.clear()
+        self.assertIsInstance(replace.plugin_for('vertica'),
+                              vertica_repair.VerticaReplace)
+
+
 class TestPostgresqlReplace(_PeerViews):
     """PostgreSQL's word on a lost member: only the primary sees the
     others (PostgreSQL 18; the views the guest's tests pin).
@@ -1662,7 +1764,7 @@ class TestSentinelReplace(test_health.HealthTestBase):
             self.assertIsInstance(plugin, redis_repair.RedisReplace)
             self.assertEqual(manager, plugin.manager)
         # A datastore without one: its lost members are only told.
-        self.assertIsNone(replace.plugin_for('vertica'))
+        self.assertIsNone(replace.plugin_for('db2'))
 
 
 class TestRedisClusterReplace(_PeerViews):
