@@ -415,6 +415,14 @@ common_opts = [
                      'failovers move the masters about, which no server '
                      'group follows. Once at a time, by the cluster '
                      'repair, while the cluster is healthy.'),
+    cfg.IntOpt('cluster_redis_spread_interval', default=600, min=0,
+               help='Seconds between two looks at every healthy Redis '
+                    'family cluster for cluster_redis_spread_masters: a '
+                    'healthy cluster is looked at only when something '
+                    'happens to it, and the masters can be crowded on a '
+                    'host after an evacuation, which Trove hears nothing '
+                    'of. The scan asks the database alone. 0 turns it '
+                    'off.'),
     cfg.BoolOpt('instance_repair_start', default=True,
                 help='Start the server of a standalone instance that Nova '
                      'shut off by itself (its domain went away: powered '

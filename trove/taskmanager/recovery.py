@@ -168,6 +168,33 @@ def stale_healthy_clusters(stale_before):
         ).having(oldest < stale_before).all()
 
 
+# The managers of the Redis family: the clusters cluster_redis_spread_masters
+# looks at.
+REDIS_FAMILY = ('redis', 'valkey', 'keydb')
+
+
+def healthy_clusters_of(managers):
+    """The clusters recorded HEALTHY, with no task, of a datastore version
+    of one of ``managers``: (cluster id, task id, datastore version id,
+    None), what a look is asked for by the spread scan.
+    """
+    version = datastore_models.DBDatastoreVersion
+    with DBCluster.query() as query:
+        rows = query.session.query(
+            DBCluster.id, DBCluster.task_id, DBCluster.datastore_version_id
+        ).select_from(DBCluster).join(
+            DBClusterHealth, DBClusterHealth.id == DBCluster.id
+        ).join(
+            version, version.id == DBCluster.datastore_version_id
+        ).filter(
+            DBCluster.deleted == expression.false(),
+            DBCluster.task_id == ClusterTasks.NONE.code,
+            DBClusterHealth.status == cluster_health.HEALTHY,
+            version.manager.in_(managers)
+        ).all()
+    return [(row[0], row[1], row[2], None) for row in rows]
+
+
 class RecoveryHub(object):
 
     def __init__(self, coordinator=None):
@@ -350,6 +377,14 @@ class RecoveryHub(object):
             seconds=CONF.agent_heartbeat_expiry)
         self._look_at(stale_healthy_clusters(stale_before), 'stale scan',
                       stale_before)
+
+    def scan_spread(self):
+        """The healthy Redis family clusters, for the spread of their
+        masters (cluster_redis_spread_masters): a healthy cluster is looked
+        at only when something happens to it, and an evacuation that
+        crowds its masters on a host is nothing Trove hears of.
+        """
+        self._look_at(healthy_clusters_of(REDIS_FAMILY), 'spread scan')
 
     def sweep(self):
         """Every cluster this replica covers."""

@@ -609,6 +609,17 @@ class Manager(periodic_task.PeriodicTasks):
             """
             recovery.hub(self.admin_context).scan_stale()
 
+    if CONF.cluster_redis_spread_masters and \
+            CONF.cluster_redis_spread_interval:
+        @periodic_task.periodic_task(
+            spacing=CONF.cluster_redis_spread_interval)
+        def scan_spread_clusters(self, context):
+            """The healthy Redis family clusters, for the spread of their
+            masters: nothing else looks at a healthy cluster an evacuation
+            crowded the masters of.
+            """
+            recovery.hub(self.admin_context).scan_spread()
+
     if CONF.instance_repair_scan_interval:
         @periodic_task.periodic_task(
             spacing=CONF.instance_repair_scan_interval)

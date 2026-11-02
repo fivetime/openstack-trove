@@ -26,6 +26,7 @@ from trove.common import cluster_health
 from trove.common import exception
 from trove.common.strategies.cluster.experimental.common import health
 from trove.common import utils
+from trove.datastore import models as datastore_models
 from trove.instance.models import DBInstance
 from trove.instance.models import InstanceServiceStatus
 from trove.instance.service_status import ServiceStatuses
@@ -242,6 +243,15 @@ class HubTest(trove_testtools.TestCase):
             mock.call('v-pxc')))
         self.assertEqual(2, load_strategy.call_count)
 
+    @mock.patch.object(recovery, 'healthy_clusters_of')
+    def test_the_spread_scan_looks_at_what_it_finds(self, healthy):
+        healthy.return_value = [('c1', ClusterTasks.NONE.code, 'v1', None),
+                                ('elsewhere', ClusterTasks.NONE.code, 'v1',
+                                 None)]
+        self.hub.scan_spread()
+        self.assertEqual({'c1': (1000.0, 'spread scan')}, self.hub.pending)
+        healthy.assert_called_once_with(recovery.REDIS_FAMILY)
+
     @mock.patch.object(recovery, 'stale_healthy_clusters')
     def test_the_stale_scan_looks_at_what_it_finds(self, stale):
         old = timeutils.utcnow() - datetime.timedelta(seconds=200)
@@ -421,6 +431,44 @@ class SuspectClustersTest(trove_testtools.TestCase):
                                        unseen, busy})
         self.assertLess(found[all_gone][3], stale_before)
         self.assertEqual('v1', found[all_gone][2])
+
+    def _version(self, manager):
+        version_id = utils.generate_uuid()
+        self.made.append(datastore_models.DBDatastoreVersion.create(
+            id=version_id, datastore_id=utils.generate_uuid(),
+            name='v-' + version_id, manager=manager,
+            image_id=utils.generate_uuid(), registry_ext='x',
+            repl_strategy='x', active=1, packages=''))
+        return version_id
+
+    def test_the_spread_scan_finds_healthy_redis_family_clusters(self):
+        # A healthy cluster is looked at only when something happens to
+        # it: the spread of its masters needs a look now and then
+        # (Incus placement round, 2026-11-02: an evacuation crowded the
+        # masters, and nothing looked at the cluster for 20 minutes).
+        valkey, mysql = self._version('valkey'), self._version('mysql')
+
+        def made(version, status=cluster_health.HEALTHY,
+                 task=ClusterTasks.NONE):
+            cluster_id = self._cluster(task=task)
+            with DBCluster.query() as query:
+                query.filter_by(id=cluster_id).update(
+                    {'datastore_version_id': version})
+            if status:
+                health.record(cluster_id, cluster_health.view(status))
+                self.made.append(DBClusterHealth.find_by(id=cluster_id))
+            return cluster_id
+        healthy = made(valkey)
+        degraded = made(valkey, cluster_health.DEGRADED)
+        busy = made(valkey, task=ClusterTasks.GROWING_CLUSTER)
+        unrecorded = made(valkey, None)
+        other = made(mysql)
+        found = {row[0]: row for row in
+                 recovery.healthy_clusters_of(recovery.REDIS_FAMILY)}
+        self.assertEqual({healthy}, set(found) & {
+            healthy, degraded, busy, unrecorded, other})
+        self.assertEqual((healthy, ClusterTasks.NONE.code, valkey, None),
+                         tuple(found[healthy]))
 
     def test_a_replacement_under_way_is_a_suspect(self):
         # Its grow running, every heartbeat fresh, the health recorded

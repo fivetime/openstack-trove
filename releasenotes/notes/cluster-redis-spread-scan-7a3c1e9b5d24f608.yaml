@@ -1,0 +1,10 @@
+---
+features:
+  - |
+    With ``cluster_redis_spread_masters`` on, the task manager now looks at
+    every healthy Redis family cluster every
+    ``cluster_redis_spread_interval`` seconds (600 by default, 0 turns it
+    off), from the database alone. A healthy cluster is looked at only when
+    something happens to it, so the spread of its masters had no look to
+    run in when an evacuation, which Trove hears nothing of, crowded them on
+    a host.
