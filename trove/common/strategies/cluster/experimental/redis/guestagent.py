@@ -84,6 +84,11 @@ class RedisGuestAgentAPI(guest_api.API):
                           version=guest_api.API.API_BASE_VERSION,
                           master_id=master_id)
 
+    def cluster_failover(self):
+        LOG.debug("Replica taking its master's place.")
+        return self._call("cluster_failover", self.agent_high_timeout,
+                          version=guest_api.API.API_BASE_VERSION)
+
     def get_cluster_nodes(self):
         LOG.debug("Retrieve the nodes of the cluster.")
         return self._call("get_cluster_nodes", self.agent_high_timeout,

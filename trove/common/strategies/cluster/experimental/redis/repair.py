@@ -32,11 +32,15 @@ served), and each holds the lost member out and no other
 
 import time
 
+from oslo_log import log as logging
+
 from trove.common import clients
 from trove.common.strategies.cluster.experimental.common import placement
 from trove.common.strategies.cluster.experimental.common import replace
 from trove.common.strategies.cluster.experimental.common import topology
 from trove.quota.quota import check_quotas
+
+LOG = logging.getLogger(__name__)
 
 CLUSTER = 'cluster'
 SENTINEL = 'sentinel'
@@ -93,3 +97,80 @@ class RedisReplace(replace.PeersHoldItOut):
             volume_type=spec.get('volume_type'), locality=locality)
         task_api.load(context, self.manager).add_node(
             self.manager, db_cluster.id, instance.id)
+
+    # The flags of a node that is not to be counted on.
+    FAILING = frozenset(['fail', 'fail?', 'noaddr', 'handshake'])
+
+    def spread(self, context, db_cluster, members, host_of):
+        """cluster_redis_spread_masters: of a cluster of the topology
+        cluster whose host has more than one master, the replica that is
+        to take one of their places: a replica of that master on a host
+        without a master. Returns (member, reason), or None.
+
+        A failover needs most masters to vote, so a host with most of them
+        takes the whole cluster down with it (Incus migration matrix,
+        2026-11-01: 2 of 3 masters on one host after a failover); the
+        failovers move the masters about, which no server group follows.
+        ``host_of`` gives a member's host.
+        """
+        if self._topology(db_cluster) != CLUSTER:
+            return None
+        guests = {m.id: self.guest_factory(context, m.id, self.manager)
+                  for m in members if m.compute_instance_id}
+        nodes = None
+        member_of = {}
+        for member in members:
+            guest = guests.get(member.id)
+            if guest is None:
+                continue
+            try:
+                member_of[guest.get_node_id()] = member
+                if nodes is None:
+                    nodes = guest.get_cluster_nodes()
+            except Exception as err:
+                # A member that does not tell: no move on a partial view.
+                LOG.debug("Member %(member)s does not tell its node: "
+                          "%(err)s", {'member': member.id, 'err': err})
+                return None
+        if not nodes:
+            return None
+        hosts = {}
+
+        def host(node_id):
+            member = member_of.get(node_id)
+            if member is None:
+                return None
+            if member.id not in hosts:
+                hosts[member.id] = host_of(member)
+            return hosts[member.id]
+
+        masters = [n for n in nodes if n['role'] == 'master' and
+                   n['has_slots'] and not self.FAILING & set(n['flags'])]
+        by_host = {}
+        for node in masters:
+            by_host.setdefault(host(node['id']), []).append(node)
+        if None in by_host:
+            # A master whose host is not known: no move.
+            return None
+        master_hosts = set(by_host)
+        for crowded in sorted(h for h, ns in by_host.items() if len(ns) > 1):
+            for master in sorted(by_host[crowded], key=lambda n: n['id']):
+                for node in sorted(nodes, key=lambda n: n['id']):
+                    if (node['role'] != 'replica' or
+                            node['master_id'] != master['id'] or
+                            self.FAILING & set(node['flags'])):
+                        continue
+                    where = host(node['id'])
+                    if where is None or where in master_hosts:
+                        continue
+                    replica = member_of[node['id']]
+                    return replica, (
+                        '%d masters on %s; the replica %s on %s takes the '
+                        'place of %s' % (
+                            len(by_host[crowded]), crowded, replica.name,
+                            where, member_of[master['id']].name))
+        return None
+
+    def failover(self, context, member):
+        """The member, a replica, takes its master's place."""
+        self.guest_factory(context, member.id, self.manager).cluster_failover()

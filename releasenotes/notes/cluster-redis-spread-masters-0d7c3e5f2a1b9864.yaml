@@ -1,0 +1,15 @@
+---
+features:
+  - |
+    With ``cluster_redis_spread_masters`` (off by default) the cluster
+    repair keeps the masters of a Redis family cluster of the topology
+    ``cluster`` on hosts of their own: when a healthy cluster has more than
+    one master on a host, a replica of one of them on a host without a
+    master takes its place (``CLUSTER FAILOVER``, which has the replica
+    catch up with every acknowledged write first), one at a time and by
+    one task manager, under the cluster's task. A failover needs most
+    masters to vote, so a host with most of them takes the whole cluster
+    down when it goes, and the failovers move the masters about, which no
+    server group follows. The guest agent has a new call,
+    ``cluster_failover``; a member whose guest agent does not have it is
+    not tried again for an hour.

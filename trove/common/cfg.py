@@ -404,6 +404,17 @@ common_opts = [
                                    'than put two of its members together.')],
                help='The policy of the server groups that '
                     'cluster_placement_per_shard makes.'),
+    cfg.BoolOpt('cluster_redis_spread_masters', default=False,
+                help='Keep the masters of a Redis family cluster of the '
+                     'topology cluster on hosts of their own: when a host '
+                     'has more than one, a replica of one of them on a '
+                     'host without a master takes its place (CLUSTER '
+                     'FAILOVER, which loses no acknowledged write). A '
+                     'failover needs most masters to vote, so a host with '
+                     'most of them takes the whole cluster down; '
+                     'failovers move the masters about, which no server '
+                     'group follows. Once at a time, by the cluster '
+                     'repair, while the cluster is healthy.'),
     cfg.BoolOpt('instance_repair_start', default=True,
                 help='Start the server of a standalone instance that Nova '
                      'shut off by itself (its domain went away: powered '

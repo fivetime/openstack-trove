@@ -1739,3 +1739,112 @@ class TestRedisClusterReplace(_PeerViews):
                           'shard_id': 'g-1'},
                          create.call_args.kwargs['cluster_config'])
         api.add_node.assert_called_once_with('valkey', self.cluster.id, 'new')
+
+
+def _node(node_id, role, master_id='-', flags=()):
+    return {'id': node_id, 'role': role, 'master_id': master_id,
+            'has_slots': role == 'master', 'flags': list(flags),
+            'address': node_id}
+
+
+class TestSpreadMasters(RepairTestBase):
+    """cluster_redis_spread_masters: a host with more than one master of a
+    Redis Cluster has one of them handed to a replica on a host without a
+    master (Incus migration matrix, 2026-11-01: 2 of 3 masters on one
+    host, the cluster DOWN 111 s when it went).
+    """
+
+    NODES = [_node('m1', 'master'), _node('m2', 'master'),
+             _node('m3', 'master'), _node('r1', 'replica', 'm1'),
+             _node('r2', 'replica', 'm2'), _node('r3', 'replica', 'm3')]
+    # m1, m2 on host-1; m3, r1 on host-2; r2 on host-3; r3 on host-4.
+    HOSTS = {'m1': 'host-1', 'm2': 'host-1', 'm3': 'host-2', 'r1': 'host-2',
+             'r2': 'host-3', 'r3': 'host-4'}
+
+    def setUp(self):
+        super(TestSpreadMasters, self).setUp()
+        self.patch_conf_property('cluster_redis_spread_masters', True)
+        from trove.common.strategies.cluster.experimental.redis import (
+            repair as redis_repair)
+        self.guests = {}
+        self.plugin = redis_repair.RedisReplace(
+            'redis', guest_factory=lambda ctx, i, m: self.guests[i])
+        self.plugin._topology = lambda db_cluster: 'cluster'
+        mock.patch.object(repair.replace, 'plugin_for',
+                          return_value=self.plugin).start()
+        self.cluster, members = self._cluster(6)
+        self.members = {}
+        for member, node in zip(members, [n['id'] for n in self.NODES]):
+            member.compute_instance_id = 'server-' + node
+            member.save()
+            self.members[node] = member
+            self.guests[member.id] = mock.Mock(**{
+                'get_node_id.return_value': node,
+                'get_cluster_nodes.return_value': list(self.NODES)})
+        self.nova.servers.get.side_effect = lambda server_id: mock.Mock(**{
+            'OS-EXT-SRV-ATTR:host': self.HOSTS[server_id[len('server-'):]]})
+        common_health.record(self.cluster.id, ch.combine(
+            [(m.name, ch.view(ch.HEALTHY)) for m in members], []))
+
+    def _check(self):
+        return self.repair.check_now(mock.Mock(), self.cluster,
+                                     manager='redis')
+
+    def test_a_replica_on_a_host_without_a_master_takes_over(self):
+        self.assertEqual(repair.SPREAD_FOLLOW, self._check())
+        # m1's replica is on host-2, which has m3: m2's, on host-3, moves.
+        self.guests[self.members['r2'].id].cluster_failover.\
+            assert_called_once_with()
+        for node in ('r1', 'r3', 'm1', 'm2', 'm3'):
+            self.guests[self.members[node].id].cluster_failover.\
+                assert_not_called()
+        self.assertEqual([repair.EVENT_START, repair.EVENT_END],
+                         self._events())
+        reason = next(c.args[2]['reason']
+                      for c in self.notifier.info.call_args_list
+                      if c.args[1] == repair.EVENT_START)
+        self.assertIn('2 masters on host-1', reason)
+        # The cluster's task is given back.
+        self.assertEqual(ClusterTasks.NONE, DBCluster.find_by(
+            id=self.cluster.id).task_status)
+
+    def test_nothing_when_each_host_has_one_master(self):
+        self.HOSTS = dict(self.HOSTS, m2='host-5')
+        self.assertIsNone(self._check())
+        for guest in self.guests.values():
+            guest.cluster_failover.assert_not_called()
+
+    def test_nothing_when_off_unhealthy_or_a_host_unknown(self):
+        self.patch_conf_property('cluster_redis_spread_masters', False)
+        self.assertIsNone(self._check())
+        self.patch_conf_property('cluster_redis_spread_masters', True)
+        common_health.record(self.cluster.id, ch.combine(
+            [('x', ch.view(ch.DEGRADED, ['y'], 'out'))], []))
+        # Not healthy: looked at again for its health, not spread.
+        self._check()
+        common_health.record(self.cluster.id, ch.combine(
+            [('x', ch.view(ch.HEALTHY))], []))
+        self.nova.servers.get.side_effect = RuntimeError('nova')
+        self.assertIsNone(self._check())
+        for guest in self.guests.values():
+            guest.cluster_failover.assert_not_called()
+
+    def test_not_while_the_cluster_has_a_task(self):
+        # The other task manager took it first.
+        with mock.patch.object(repair.replace.MemberReplacement, '_take',
+                               return_value=False):
+            self.assertIsNone(self._check())
+        for guest in self.guests.values():
+            guest.cluster_failover.assert_not_called()
+
+    def test_a_failed_failover_is_not_tried_again_soon(self):
+        guest = self.guests[self.members['r2'].id]
+        guest.cluster_failover.side_effect = RuntimeError(
+            'no method cluster_failover')
+        self.assertIsNone(self._check())
+        self.assertEqual([repair.EVENT_START, repair.EVENT_ERROR],
+                         self._events())
+        self.assertEqual(ClusterTasks.NONE, DBCluster.find_by(
+            id=self.cluster.id).task_status)
+        self.assertIsNone(self._check())
+        self.assertEqual(1, guest.cluster_failover.call_count)

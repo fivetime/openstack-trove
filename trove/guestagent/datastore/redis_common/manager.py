@@ -170,6 +170,10 @@ class RedisManager(cluster_member.ClusterWatchMixin, manager.Manager):
         LOG.info("Replicating master %s.", master_id)
         self.adm.cluster_replicate(master_id)
 
+    def cluster_failover(self, context):
+        LOG.info("Taking the place of my master (CLUSTER FAILOVER).")
+        self.adm.cluster_failover()
+
     def get_cluster_nodes(self, context):
         return self.adm.cluster_nodes()
 

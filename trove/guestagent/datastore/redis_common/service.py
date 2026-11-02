@@ -888,6 +888,25 @@ class RedisAdmin(object):
     def cluster_replicate(self, master_id):
         self.connection.cluster('REPLICATE', master_id)
 
+    def cluster_failover(self, timeout=60):
+        """This replica takes its master's place: CLUSTER FAILOVER, the
+        manual failover, which has the replica catch up with every write
+        its master acknowledged before it takes the slots over, so none is
+        lost. Returns once this node is a master; raises after ``timeout``
+        seconds.
+        """
+        self.connection.cluster('FAILOVER')
+        deadline = time.time() + timeout
+        while True:
+            role = self.connection.execute_command('ROLE')[0]
+            if (role.decode() if isinstance(role, bytes) else role) == \
+                    'master':
+                return
+            if time.time() >= deadline:
+                raise exception.TroveError(
+                    "Not a master %d s after CLUSTER FAILOVER." % timeout)
+            time.sleep(1)
+
     def cluster_forget(self, node_id):
         """Drop a node from this node's view of the cluster: for a node
         that is gone (``del-node`` loads the cluster from every node that

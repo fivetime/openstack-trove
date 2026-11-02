@@ -151,6 +151,8 @@ class ClusterRepair(object):
         # The members whose database this task manager sees down while
         # their agent is heard: since when, and when it restarted it.
         self.database_down = {}
+        # The clusters whose last spread failover failed, and when.
+        self.spread_failed = {}
         self.replacement = replace.MemberReplacement(notify, now=self._now)
 
     def check_now(self, context, db_cluster, members=None, manager=None):
@@ -191,8 +193,9 @@ class ClusterRepair(object):
         quiet = [m for m in members
                  if m.id in stale and m.compute_instance_id]
         if not quiet:
+            spread_in = self._spread(context, db_cluster, members, manager)
             return _soonest(self._until_stale(db_cluster, members, stale),
-                            down_in)
+                            down_in, spread_in)
         nova = self.nova_factory(context)
         computes = {}
 
@@ -350,6 +353,70 @@ class ClusterRepair(object):
         return (member.task_status == InstanceTasks.REBOOTING and
                 entry is not None and entry.get('restarted') is not None)
 
+    def _spread(self, context, db_cluster, members, manager):
+        """cluster_redis_spread_masters: of a healthy cluster, one member
+        that takes another's place (the datastore plugin's ``spread``
+        picks it), under the cluster's task, so that one task manager of
+        the two that look at a cluster does it. Returns the seconds until
+        the cluster is worth another look, or None.
+        """
+        if not CONF.cluster_redis_spread_masters or not manager:
+            return None
+        plugin = replace.plugin_for(manager)
+        spread = getattr(plugin, 'spread', None)
+        if spread is None or not allows_start(db_cluster):
+            return None
+        if health.status_of(db_cluster.id) != ch.HEALTHY:
+            return None
+        failed = self.spread_failed.get(db_cluster.id)
+        if failed is not None and time.monotonic() - failed < SPREAD_RETRY:
+            return None
+        nova = self.nova_factory(context)
+
+        def host_of(member):
+            try:
+                server = nova.servers.get(member.compute_instance_id)
+            except Exception as err:
+                LOG.debug("Server of member %(member)s not read: %(err)s",
+                          {'member': member.id, 'err': err})
+                return None
+            return getattr(server, 'OS-EXT-SRV-ATTR:host', None)
+
+        try:
+            move = spread(context, db_cluster, members, host_of)
+        except Exception:
+            LOG.exception("Cluster %s: the spread was not worked out.",
+                          db_cluster.id)
+            return None
+        if not move:
+            return None
+        member, reason = move
+        if not replace.MemberReplacement._take(
+                db_cluster, ClusterTasks.UPDATING_CLUSTER):
+            # The other task manager took the cluster first.
+            return None
+        LOG.info("Cluster %s: %s.", db_cluster.id, reason)
+        notify(EVENT_START, db_cluster, member, 'spread', reason)
+        try:
+            plugin.failover(context, member)
+        except Exception as err:
+            # A guest agent from before the call says so each time: not
+            # tried again for SPREAD_RETRY seconds.
+            self.spread_failed[db_cluster.id] = time.monotonic()
+            LOG.warning("Cluster %(cluster)s: member %(member)s did not "
+                        "take its master's place: %(err)s",
+                        {'cluster': db_cluster.id, 'member': member.name,
+                         'err': err})
+            notify(EVENT_ERROR, db_cluster, member, 'spread',
+                   '%s; the failover failed: %s' % (reason, err))
+            return None
+        finally:
+            replace.MemberReplacement._release(db_cluster)
+        self.spread_failed.pop(db_cluster.id, None)
+        notify(EVENT_END, db_cluster, member, 'spread',
+               'it took its master\'s place')
+        return SPREAD_FOLLOW
+
     @staticmethod
     def _until_stale(db_cluster, members, stale):
         """A cluster that is not healthy while none of its members is
@@ -411,6 +478,12 @@ DATABASE_DOWN = frozenset(status._code for status in (
     service_status.ServiceStatuses.UNKNOWN))
 HEALTHY_CODE = service_status.ServiceStatuses.HEALTHY._code
 RESTARTING_CODE = service_status.ServiceStatuses.RESTARTING._code
+
+# How soon a cluster is looked at again after a member took another's
+# place (the next move, if another host has more than one), and how long
+# a failover that failed is not tried again.
+SPREAD_FOLLOW = 60
+SPREAD_RETRY = 3600
 
 # How long after its task last changed a member is not restarted: the
 # other task manager's restart may have ended just now.

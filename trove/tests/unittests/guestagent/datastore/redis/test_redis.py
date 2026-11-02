@@ -279,6 +279,30 @@ class TestRedisClusterApp(trove_testtools.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
+    def test_cluster_failover_returns_once_a_master(self):
+        admin = common_service.RedisAdmin()
+        admin._connection = mock.Mock()
+        admin._connection.execute_command.side_effect = [
+            [b'slave', '10.0.0.4', 6379, 'connected', 10],
+            [b'master', 12, []]]
+        with mock.patch.object(common_service.time, 'sleep') as sleep:
+            admin.cluster_failover()
+        admin._connection.cluster.assert_called_once_with('FAILOVER')
+        self.assertEqual(1, sleep.call_count)
+
+    def test_cluster_failover_gives_up(self):
+        admin = common_service.RedisAdmin()
+        admin._connection = mock.Mock()
+        admin._connection.execute_command.return_value = [b'slave']
+        clock = [100.0]
+        with mock.patch.object(common_service.time, 'time',
+                               side_effect=lambda: clock[0]), \
+                mock.patch.object(common_service.time, 'sleep',
+                                  side_effect=lambda s: clock.__setitem__(
+                                      0, clock[0] + s)):
+            self.assertRaises(exception.TroveError,
+                              admin.cluster_failover, timeout=3)
+
     def test_cluster_nodes(self):
         # As valkey-py parses CLUSTER NODES (seen on Redis 7.2).
         admin = common_service.RedisAdmin()
