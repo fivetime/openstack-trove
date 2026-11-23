@@ -1039,3 +1039,41 @@ class TestDetailInstance(trove_testtools.TestCase):
         self.guest_client_mock.assert_not_called()
         self.assertIsNone(instance.volume_used)
         self.assertIsNone(instance.volume_total)
+
+
+class TestInstanceAddresses(trove_testtools.TestCase):
+    """The addresses of an instance's user ports, IPv6 ones included, the
+    IPv4 ones first.
+    """
+
+    def _addresses(self, fixed_ips, fips=()):
+        port = {'id': 'port-1', 'network_id': 'net-1',
+                'fixed_ips': [{'ip_address': a} for a in fixed_ips]}
+        mgmt = {'id': 'port-0', 'network_id': 'mgmt',
+                'fixed_ips': [{'ip_address': '192.168.254.5'}]}
+        db_info = Mock()
+        self.patch_conf_property('management_networks', ['mgmt'])
+        with patch.object(models.clients, 'create_neutron_client'), \
+                patch.object(models.neutron, 'get_instance_ports',
+                             return_value=[mgmt, port]), \
+                patch.object(models.neutron, 'get_port_fips',
+                             return_value=[{'floating_ip_address': f}
+                                           for f in fips]):
+            models.load_simple_instance_addresses(Mock(), db_info)
+        self.assertEqual(['port-1'], db_info.ports)
+        return [(a['address'], a['type']) for a in db_info.addresses]
+
+    def test_a_dual_stack_port(self):
+        self.assertEqual(
+            [('10.0.0.5', 'private'), ('fd00::5', 'private')],
+            self._addresses(['fd00::5', '10.0.0.5']))
+
+    def test_an_ipv6_only_port(self):
+        self.assertEqual([('fd00::5', 'private')],
+                         self._addresses(['fd00::5']))
+
+    def test_the_floating_ip_last(self):
+        self.assertEqual(
+            [('10.0.0.5', 'private'), ('fd00::5', 'private'),
+             ('172.24.5.10', 'public')],
+            self._addresses(['10.0.0.5', 'fd00::5'], fips=['172.24.5.10']))

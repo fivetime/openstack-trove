@@ -162,16 +162,20 @@ def load_simple_instance_addresses(context, db_info):
                       db_info.id)
 
             user_ports.append(port['id'])
-            for ip in port['fixed_ips']:
-                # TODO(lxkong): IPv6 is not supported
-                if netutils.is_valid_ipv4(ip.get('ip_address')):
-                    addresses.append(
-                        {
-                            'address': ip['ip_address'],
-                            'type': 'private',
-                            'network': port['network_id']
-                        }
-                    )
+            # The IPv4 addresses first: what takes the first address of an
+            # instance (its DNS record, the members of a cluster) keeps
+            # taking the IPv4 one where there is one.
+            fixed = [ip.get('ip_address') for ip in port['fixed_ips']]
+            for address in sorted(
+                    (a for a in fixed if a and netutils.is_valid_ip(a)),
+                    key=lambda a: not netutils.is_valid_ipv4(a)):
+                addresses.append(
+                    {
+                        'address': address,
+                        'type': 'private',
+                        'network': port['network_id']
+                    }
+                )
 
             fips = neutron.get_port_fips(client, port['id'])
             if len(fips) == 0:

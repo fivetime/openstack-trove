@@ -1,0 +1,6 @@
+---
+features:
+  - |
+    An instance shows the IPv6 addresses of its user ports too, after the
+    IPv4 ones, so that what takes the first address of an instance keeps
+    taking the IPv4 one where there is one.
