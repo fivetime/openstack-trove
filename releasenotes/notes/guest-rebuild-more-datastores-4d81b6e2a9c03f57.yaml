@@ -1,0 +1,13 @@
+---
+features:
+  - |
+    MongoDB, Cassandra, CouchDB, Couchbase and Db2 single instances can be
+    rebuilt (a rebuild through the API, or ``instance_repair_rebuild``):
+    the guest starts the database on the data volume and makes again what
+    the old root disk held. The Trove admin of MongoDB and Cassandra gets
+    a new password with the database started once without access control,
+    as after a restore; CouchDB's is written again in the server settings;
+    Couchbase resets it with the node's local token; Db2 takes the
+    instance on the volume up as after an upgrade. A MongoDB data volume
+    of a replica set member is refused. A CouchDB root user, kept in the
+    server settings on the root disk, is lost: enable root again.

@@ -60,6 +60,37 @@ class Manager(manager.Manager):
             self.app.restore_databases()
         self.app.apply_settings()
 
+    def rebuild(self, context, ds_version, config_contents=None,
+                config_overrides=None, properties=None):
+        """Bring the data of the volume back on the new root disk of a
+        rebuilt single instance.
+
+        The volume holds the instance, its databases, its license and the
+        users Trove made; the new container takes them up when it starts.
+        The password of the instance owner was kept on the old root disk:
+        a new one is decided, for the container to be created with. The
+        parameters are told the instance again.
+        """
+        LOG.info("Starting to restore database service")
+        self.status.begin_install()
+        try:
+            self.app.configuration_manager.reset_configuration(
+                config_contents)
+            self.app.update_overrides(config_overrides)
+
+            if not self.app.has_admin():
+                self.app.secure()
+
+            self.app.start_db(ds_version=ds_version)
+            self.app.apply_settings()
+        except Exception as e:
+            LOG.error("Failed to restore database service after rebuild, "
+                      "error: %s", e)
+            self.prepare_error = True
+            raise
+        finally:
+            self.status.end_install(error_occurred=self.prepare_error)
+
     def restart(self, context):
         self.app.restart()
 

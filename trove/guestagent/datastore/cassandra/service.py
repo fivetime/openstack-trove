@@ -769,12 +769,29 @@ class CassandraApp(service.BaseDbApp):
         new name and the hash of a new password into its system tables.
         """
         LOG.info("Applying post-restore updates to the database.")
+        self._take_over_data(backup_info['instance_id'],
+                             ds_version=ds_version)
+
+    def reset_admin_password(self, ds_version=None):
+        """Give the superuser of the data on the volume a new password,
+        the old one being lost with the root disk it was kept on: the
+        data of a rebuilt instance, already under this instance's name.
+        """
+        LOG.info("Resetting the password of the superuser.")
+        self._take_over_data(CONF.guest_id, ds_version=ds_version)
+
+    def _take_over_data(self, cluster_name, ds_version=None):
+        """Start the data once under the cluster name it carries, without
+        authentication and reachable from the instance only, to write
+        this instance's name and the hash of a new superuser password
+        into its system tables.
+        """
         password = utils.generate_random_password()
         salted_hash = bcrypt.hashpw(
             password.encode(), bcrypt.gensalt(10, prefix=b'2a')).decode()
 
         self.configuration_manager.apply_system_override({
-            'cluster_name': backup_info['instance_id'],
+            'cluster_name': cluster_name,
             'authenticator': ALLOW_ALL_AUTHENTICATOR,
             'authorizer': ALLOW_ALL_AUTHORIZER,
             'rpc_address': '127.0.0.1',

@@ -736,6 +736,14 @@ class MongoDBAdmin(object):
                 client.admin.command('createUser', ADMIN_USER, pwd=password,
                                      roles=ADMIN_ROLES)
 
+    def has_replica_set_config(self):
+        """On a server without access control: whether its data is that
+        of a replica set member, which keeps the configuration of its set
+        in the local database.
+        """
+        with self._client(authenticate=False) as client:
+            return client.local.system.replset.find_one() is not None
+
     #########
     # Users
     #########

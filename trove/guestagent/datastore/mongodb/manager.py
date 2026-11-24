@@ -16,6 +16,8 @@ from oslo_log import log as logging
 from oslo_service import periodic_task
 
 from trove.common import cfg
+from trove.common import exception
+from trove.common.i18n import _
 from trove.common.notification import EndNotification
 from trove.guestagent.common import cluster_member
 from trove.guestagent.datastore import manager
@@ -122,6 +124,45 @@ class Manager(cluster_member.ClusterWatchMixin, manager.Manager):
             self.app.reset_admin_password()
         finally:
             self.app.stop_temporary_db()
+
+    def rebuild(self, context, ds_version, config_contents=None,
+                config_overrides=None, properties=None):
+        """Bring the data of the volume back on the new root disk of a
+        rebuilt single instance.
+
+        The password of the admin user was kept on the old root disk and
+        is gone, while the user is in the data: as after a restore, the
+        server is started once without access control to give the admin
+        user a new password, then started as usual.
+        """
+        LOG.info("Starting to restore database service")
+        self.status.begin_install()
+        try:
+            self.app.configuration_manager.reset_configuration(
+                config_contents)
+            self.app.apply_initial_guestagent_configuration()
+            self.app.update_overrides(config_overrides)
+
+            self.app.start_temporary_db(ds_version=ds_version)
+            try:
+                if self.adm.has_replica_set_config():
+                    # Started on its own, a member would take writes the
+                    # rest of its replica set never sees.
+                    raise exception.TroveError(
+                        _("The data volume holds a replica set member; "
+                          "only a single instance can be rebuilt."))
+                self.app.reset_admin_password()
+            finally:
+                self.app.stop_temporary_db()
+
+            self.app.start_db(ds_version=ds_version)
+        except Exception as e:
+            LOG.error("Failed to restore database service after rebuild, "
+                      "error: %s", e)
+            self.prepare_error = True
+            raise
+        finally:
+            self.status.end_install(error_occurred=self.prepare_error)
 
     def restart(self, context):
         LOG.debug("Restarting MongoDB.")

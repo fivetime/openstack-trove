@@ -57,6 +57,36 @@ class Manager(manager.Manager):
 
         self.app.start_db(ds_version=ds_version)
 
+    def rebuild(self, context, ds_version, config_contents=None,
+                config_overrides=None, properties=None):
+        """Bring the data of the volume back on the new root disk of a
+        rebuilt single instance.
+
+        The volume holds the whole server, its cluster of one and its
+        users included; the admin password was kept on the old root disk.
+        As after a restore, a new one is decided and the server is given
+        it with the token of the node when it starts.
+        """
+        LOG.info("Starting to restore database service")
+        self.status.begin_install()
+        try:
+            self.app.configuration_manager.reset_configuration(
+                config_contents)
+            self.app.update_overrides(config_overrides)
+
+            if not self.app.has_admin():
+                self.app.secure()
+
+            # Finds the node initialized and resets the admin password.
+            self.app.start_db(ds_version=ds_version)
+        except Exception as e:
+            LOG.error("Failed to restore database service after rebuild, "
+                      "error: %s", e)
+            self.prepare_error = True
+            raise
+        finally:
+            self.status.end_install(error_occurred=self.prepare_error)
+
     def restart(self, context):
         self.app.restart()
 

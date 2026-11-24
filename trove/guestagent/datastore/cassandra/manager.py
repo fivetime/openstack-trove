@@ -76,6 +76,36 @@ class Manager(cluster_member.ClusterWatchMixin, manager.Manager):
         elif self.adm.is_root_enabled():
             self.status.report_root(context)
 
+    def rebuild(self, context, ds_version, config_contents=None,
+                config_overrides=None, properties=None):
+        """Bring the data of the volume back on the new root disk of a
+        rebuilt single instance.
+
+        The data already carries this instance's cluster name and its
+        superuser, whose password was kept on the old root disk: as after
+        a restore, the server is started once without authentication to
+        give the superuser a new password, then started as usual.
+        """
+        LOG.info("Starting to restore database service")
+        self.status.begin_install()
+        try:
+            self.app.configuration_manager.reset_configuration(
+                config_contents)
+            self.app.apply_initial_guestagent_configuration()
+            self.app.update_overrides(config_overrides)
+            self.app.write_cluster_topology(
+                service.DEFAULT_DATA_CENTER, service.DEFAULT_RACK)
+
+            self.app.reset_admin_password(ds_version=ds_version)
+            self.app.start_db(ds_version=ds_version)
+        except Exception as e:
+            LOG.error("Failed to restore database service after rebuild, "
+                      "error: %s", e)
+            self.prepare_error = True
+            raise
+        finally:
+            self.status.end_install(error_occurred=self.prepare_error)
+
     def restart(self, context):
         self.app.restart()
 
