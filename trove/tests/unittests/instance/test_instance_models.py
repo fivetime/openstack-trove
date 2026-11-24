@@ -240,6 +240,41 @@ class DeleteResourcesTest(trove_testtools.TestCase):
 
         self.instance._volume_client.volumes.list.assert_called_once()
 
+    def test_delete_resources_waits_for_a_kept_volume(self):
+        # A data volume Nova keeps is still attached for a moment after the
+        # server is gone: it is deleted once Cinder has it detached.
+        vol = Mock(id='vol-1', status='in-use')
+        self.instance._volume_client.volumes.list.return_value = [vol]
+        self.instance._volume_client.volumes.get.side_effect = [
+            Mock(status='detaching'), Mock(status='available')]
+
+        with patch.object(models.utils, 'poll_until',
+                          side_effect=lambda f, **kw: (f(), f())):
+            self.instance._delete_resources(Mock())
+
+        self.assertEqual(
+            2, self.instance._volume_client.volumes.get.call_count)
+        vol.delete.assert_called_once_with()
+
+    def test_delete_resources_deletes_a_volume_still_attached(self):
+        vol = Mock(id='vol-1', status='in-use')
+        self.instance._volume_client.volumes.list.return_value = [vol]
+
+        with patch.object(models.utils, 'poll_until',
+                          side_effect=exception.PollTimeOut):
+            self.instance._delete_resources(Mock())
+
+        vol.delete.assert_called_once_with()
+
+    def test_delete_resources_does_not_wait_for_a_free_volume(self):
+        vol = Mock(id='vol-1', status='available')
+        self.instance._volume_client.volumes.list.return_value = [vol]
+
+        self.instance._delete_resources(Mock())
+
+        self.instance._volume_client.volumes.get.assert_not_called()
+        vol.delete.assert_called_once_with()
+
 
 class CreateInstanceTest(trove_testtools.TestCase):
 

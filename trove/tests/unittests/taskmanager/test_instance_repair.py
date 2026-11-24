@@ -206,3 +206,165 @@ class InstanceRepairTest(test_health.HealthTestBase):
                 instance_repair.scan('ctx')
         cls.assert_called_once_with()
         self.assertEqual(2, cls.return_value.check_now.call_count)
+
+
+class InstanceRebuildTest(InstanceRepairTest):
+    """instance_repair_rebuild: a quiet instance whose server is in ERROR
+    or gone is sent to be brought back on its data volume.
+    """
+
+    def setUp(self):
+        super(InstanceRebuildTest, self).setUp()
+        self.patch_conf_property('instance_repair_rebuild', True)
+        self.cinder = mock.Mock()
+        self.cinder.volumes.get.return_value = mock.Mock(status='available')
+        self.task_api = mock.Mock()
+        self.repair = instance_repair.InstanceRepair(
+            nova_factory=lambda context: self.nova, now=lambda: self.now,
+            covered=self.covered,
+            cinder_factory=lambda context: self.cinder,
+            task_api_factory=self.task_api)
+
+    def _instance(self, **kwargs):
+        instance = super(InstanceRebuildTest, self)._instance(**kwargs)
+        # Unchanged for a while: the repair takes only such an instance.
+        with DBInstance.query() as query:
+            query.filter_by(id=instance.id).update(
+                {'updated': timeutils.utcnow() -
+                 datetime.timedelta(seconds=300),
+                 'volume_id': 'volume-1'})
+        return instance
+
+    def _task(self, instance):
+        with DBInstance.query() as query:
+            return query.filter_by(id=instance.id).first().task_id
+
+    def _gone(self):
+        self.nova.servers.get.side_effect = nova_exceptions.NotFound(404)
+
+    def test_a_server_in_error_is_rebuilt(self):
+        instance = self._instance()
+        self.nova.servers.get.return_value = test_repair._server('ERROR')
+        self.repair.check_now(mock.Mock())
+        self.task_api.return_value.repair_instance.assert_called_once_with(
+            instance.id, recreate=False)
+        self.assertEqual(InstanceTasks.BUILDING.code, self._task(instance))
+        self.assertEqual([(instance_repair.EVENT_START, instance.id,
+                           'its server %s is in ERROR' % test_repair.SERVER)],
+                         self._events())
+        self.nova.servers.start.assert_not_called()
+
+    def test_a_server_in_error_on_a_host_that_is_down_is_left(self):
+        self._instance()
+        self.nova.servers.get.return_value = test_repair._server('ERROR')
+        self.nova.services.list.return_value = [test_repair._compute('down')]
+        self.repair.check_now(mock.Mock())
+        self.task_api.return_value.repair_instance.assert_not_called()
+
+    def test_a_server_that_is_gone_is_made_again(self):
+        instance = self._instance()
+        self._gone()
+        self.repair.check_now(mock.Mock())
+        self.task_api.return_value.repair_instance.assert_called_once_with(
+            instance.id, recreate=True)
+        self.cinder.volumes.get.assert_called_once_with('volume-1')
+        self.assertEqual(instance_repair.EVENT_START, self._events()[0][0])
+
+    def test_a_volume_gone_with_its_server_is_told_once(self):
+        instance = self._instance()
+        self._gone()
+        gone = Exception('Volume volume-1 could not be found.')
+        gone.code = 404
+        self.cinder.volumes.get.side_effect = gone
+        self.repair.check_now(mock.Mock())
+        self.repair.check_now(mock.Mock())
+        self.task_api.return_value.repair_instance.assert_not_called()
+        self.assertEqual([(instance_repair.EVENT_ERROR, instance.id,
+                           'its server %s is gone; its data volume volume-1 '
+                           'is gone with it' % test_repair.SERVER)],
+                         self._events())
+        self.assertEqual(InstanceTasks.NONE.code, self._task(instance))
+
+    def test_a_volume_still_detaching_is_waited_for(self):
+        self._instance()
+        self._gone()
+        self.cinder.volumes.get.return_value = mock.Mock(status='detaching')
+        self.repair.check_now(mock.Mock())
+        self.task_api.return_value.repair_instance.assert_not_called()
+        self.assertEqual([], self._events())
+        self.assertEqual({}, self.repair.rebuilds)
+
+    def test_an_instance_with_a_task_is_not_taken(self):
+        instance = self._instance()
+        self._gone()
+        with DBInstance.query() as query:
+            query.filter_by(id=instance.id).update(
+                {'updated': timeutils.utcnow()})
+        self.repair.check_now(mock.Mock())
+        self.task_api.return_value.repair_instance.assert_not_called()
+
+    def test_the_switch(self):
+        self._instance()
+        self._gone()
+        self.patch_conf_property('instance_repair_rebuild', False)
+        self.repair.check_now(mock.Mock())
+        self.task_api.return_value.repair_instance.assert_not_called()
+        self.assertEqual([], self._events())
+
+    def test_given_up_after_the_attempts(self):
+        instance = self._instance()
+        self._gone()
+        self.repair.rebuilds[instance.id] = [0, 1]
+        self.repair.check_now(mock.Mock())
+        self.repair.check_now(mock.Mock())
+        self.task_api.return_value.repair_instance.assert_not_called()
+        self.assertEqual([instance_repair.EVENT_ERROR],
+                         [e[0] for e in self._events()])
+
+    def test_not_tried_again_within_the_interval(self):
+        instance = self._instance()
+        self._gone()
+        self.repair.rebuilds[instance.id] = [instance_repair.time.monotonic()]
+        self.repair.check_now(mock.Mock())
+        self.task_api.return_value.repair_instance.assert_not_called()
+
+    def test_the_end_is_told_when_the_rebuild_is_over(self):
+        instance = self._instance()
+        self._gone()
+        self.repair.check_now(mock.Mock())
+        self.assertIn(instance.id, self.repair.rebuilding)
+        # Still under way: nothing told.
+        self.repair.check_now(mock.Mock())
+        self.assertEqual(1, len(self._events()))
+        with DBInstance.query() as query:
+            query.filter_by(id=instance.id).update(
+                {'task_id': InstanceTasks.NONE.code})
+        with InstanceServiceStatus.query() as query:
+            query.filter_by(instance_id=instance.id).update(
+                {'updated_at': self.now})
+        self.repair.check_now(mock.Mock())
+        self.assertEqual([instance_repair.EVENT_START,
+                          instance_repair.EVENT_END],
+                         [e[0] for e in self._events()])
+        self.assertEqual({}, self.repair.rebuilding)
+        self.assertNotIn(instance.id, self.repair.rebuilds)
+
+    def test_still_quiet_after_the_rebuild_is_told(self):
+        instance = self._instance()
+        self._gone()
+        self.repair.check_now(mock.Mock())
+        with DBInstance.query() as query:
+            query.filter_by(id=instance.id).update(
+                {'task_id': InstanceTasks.NONE.code})
+        self.repair.check_now(mock.Mock())
+        self.assertEqual(instance_repair.EVENT_ERROR, self._events()[1][0])
+        self.assertEqual({}, self.repair.rebuilding)
+
+    def test_a_failed_send_gives_the_task_back(self):
+        instance = self._instance()
+        self._gone()
+        self.task_api.return_value.repair_instance.side_effect = Exception(
+            'boom')
+        self.repair.check_now(mock.Mock())
+        self.assertEqual(InstanceTasks.NONE.code, self._task(instance))
+        self.assertEqual(instance_repair.EVENT_ERROR, self._events()[0][0])

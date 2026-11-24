@@ -781,6 +781,12 @@ class FreshInstanceTasksTest(BaseFreshInstanceTasksTest):
         }
         self.assertEqual(expected, volume_info)
 
+        cfg.CONF.set_override('data_volume_delete_on_termination', False)
+        volume_info = self.freshinstancetasks._build_volume_info(
+            'mysql', volume_size=2, volume_type='volume_type')
+        self.assertFalse(
+            volume_info['block_device'][0]['delete_on_termination'])
+
     @patch.object(BaseInstance, 'update_db')
     @patch.object(taskmanager_models.FreshInstanceTasks, '_create_volume')
     @patch.object(taskmanager_models.FreshInstanceTasks, 'device_path',
@@ -1130,6 +1136,125 @@ class ResizeVolumeFaultTest(trove_testtools.TestCase):
         self.guest.resize_fs.assert_called_once_with(
             device_path=mock.ANY, mount_point=mock.ANY, online=False)
         self.instance.restart.assert_called_once_with()
+
+
+class RepairServerTest(trove_testtools.TestCase):
+    """The repair of a quiet instance's server: rebuilt by Nova when in
+    ERROR, made again on the data volume and the ports when gone.
+    """
+
+    def setUp(self):
+        super(RepairServerTest, self).setUp()
+        self.instance = Mock()
+        self.instance.id = 'instance-1'
+        self.instance.db_info.task_status = InstanceTasks.BUILDING
+        self.instance.flavor_id = 'flavor-1'
+        self.instance.volume_support = True
+        self.instance.volume_id = 'volume-1'
+        self.instance.datastore.name = 'mysql'
+        self.instance.datastore_version.name = '8.4'
+        self.instance.datastore_version.manager = 'mysql'
+        self.instance.server_group = None
+        self.instance.volume_client.volumes.get.return_value = Mock(
+            id='volume-1', size=5, status='available',
+            availability_zone='nova')
+        self.instance.neutron_client.list_ports.return_value = {'ports': [
+            {'id': 'mgmt-port', 'network_id': 'mgmt-net', 'device_id': ''},
+            {'id': 'user-port', 'network_id': 'user-net', 'device_id': ''}]}
+        self.instance.get_injected_files.return_value = {'f': 'c'}
+        # Patched, not overridden: a test of the instance models sets the
+        # attribute itself, which hides any override for the run.
+        self.patch_conf_property('management_networks', ['mgmt-net'])
+        cfg.CONF.set_override('block_device_mapping', 'vdb')
+        cfg.CONF.set_override('data_volume_delete_on_termination', False)
+        cfg.CONF.set_override('enable_volume_az', False)
+        cfg.CONF.set_override('volume_rootdisk_support', False)
+
+    def _recreate(self):
+        action = taskmanager_models.RecreateServerAction(
+            self.instance, 'image-1')
+        with patch.object(taskmanager_models.FreshInstanceTasks,
+                          '_create_server',
+                          return_value=Mock(id='server-2')) as create:
+            action._initiate_nova_action()
+        return action, create
+
+    def test_a_new_server_on_the_data_volume_and_the_ports(self):
+        action, create = self._recreate()
+        args, kwargs = create.call_args
+        self.assertEqual((self.instance, 'flavor-1', 'image-1', 'mysql',
+                          [{'uuid': 'volume-1', 'source_type': 'volume',
+                            'destination_type': 'volume',
+                            'device_name': 'vdb', 'volume_size': 5,
+                            'delete_on_termination': False}],
+                          None,
+                          [{'port-id': 'user-port'},
+                           {'port-id': 'mgmt-port'}]), args)
+        self.assertEqual({'f': 'c'}, kwargs['files'])
+        self.assertIsNone(kwargs['scheduler_hints'])
+        self.instance.get_injected_files.assert_called_once_with(
+            'mysql', '8.4',
+            networks=[{'port-id': 'user-port'}, {'port-id': 'mgmt-port'}])
+        self.instance.update_db.assert_called_once_with(
+            compute_instance_id='server-2')
+        self.assertEqual(['ACTIVE'], action.wait_status)
+
+    def test_the_server_group_and_the_zone_of_the_volume(self):
+        self.instance.server_group = Mock(id='group-1')
+        cfg.CONF.set_override('enable_volume_az', True)
+        _action, create = self._recreate()
+        self.assertEqual('nova', create.call_args.args[5])
+        self.assertEqual({'group': 'group-1'},
+                         create.call_args.kwargs['scheduler_hints'])
+
+    def test_no_new_server_while_a_port_is_bound(self):
+        self.instance.neutron_client.list_ports.return_value = {'ports': [
+            {'id': 'user-port', 'network_id': 'user-net',
+             'device_id': 'server-1'}]}
+        self.assertRaises(exception.TroveError, self._recreate)
+
+    def test_no_new_server_on_a_volume_in_use(self):
+        self.instance.volume_client.volumes.get.return_value.status = \
+            'in-use'
+        self.assertRaises(exception.TroveError, self._recreate)
+
+    def test_no_new_server_without_a_data_volume(self):
+        self.instance.volume_support = False
+        self.assertRaises(exception.TroveError, self._recreate)
+
+    def test_the_quiet_guest_is_not_asked_to_stop(self):
+        action = taskmanager_models.RepairRebuildAction(
+            self.instance, 'image-1')
+        with patch.object(action, '_perform_nova_action') as perform:
+            action.execute()
+        perform.assert_called_once_with()
+        self.instance.guest.stop_db.assert_not_called()
+        self.instance.reset_task_status.assert_called_once_with()
+
+    def test_the_rebuild_does_not_unmount_through_the_guest(self):
+        action = taskmanager_models.RepairRebuildAction(
+            self.instance, 'image-1')
+        self.instance.prepare_userdata.return_value = None
+        self.instance.prepare_cloud_config.return_value = '#cloud-config'
+        action._initiate_nova_action()
+        self.instance.guest.unmount_volume.assert_not_called()
+        self.assertEqual('image-1',
+                         self.instance.server.rebuild.call_args.args[0])
+
+    def test_the_image_of_the_datastore_version(self):
+        image_id = taskmanager_models.BuiltInstanceTasks.repair_image_id
+        task = Mock()
+        task.datastore_version.image_id = 'image-1'
+        self.assertEqual('image-1',
+                         image_id(task))
+        task.datastore_version.image_id = None
+        task.datastore_version.image_tags = ['trove']
+        with patch.object(taskmanager_models, 'create_glance_client'), \
+                patch.object(taskmanager_models.common_glance,
+                             'get_image_id', return_value='image-2') as get:
+            self.assertEqual('image-2',
+                             image_id(task))
+        self.assertEqual(['trove'], get.call_args.args[2])
 
 
 class RebuildActionTest(trove_testtools.TestCase):

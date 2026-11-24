@@ -25,6 +25,19 @@ stays stopped), on a host whose compute service is up, while the
 instance has no task, at most ``cluster_repair_start_attempts`` times
 since the stop, ``cluster_repair_start_interval`` apart.
 
+With ``instance_repair_rebuild`` a quiet standalone instance is also
+brought back on its data volume when its server is lost: one Nova has in
+ERROR, on a host whose compute service is up, is rebuilt by Nova on the
+image of the datastore version; one Nova no longer has is replaced by a
+new server on the data volume and the ports of the instance (which needs
+``data_volume_delete_on_termination`` off: Nova deletes the data volume
+with the server otherwise, and there is nothing to bring back). Either
+way the guest then rebuilds the database on the volume
+(``BuiltInstanceTasks.repair_server``, by a task manager on the RPC
+cast, under the instance's task). A task manager tries an instance
+``instance_repair_rebuild_attempts`` times,
+``instance_repair_rebuild_interval`` apart, and tells when it gives up.
+
 The task manager scans the database every
 ``instance_repair_scan_interval`` seconds for the standalone instances
 whose heartbeat is stale; of them each replica looks at the ones it
@@ -47,11 +60,14 @@ from sqlalchemy.sql import expression
 from trove.common import cfg
 from trove.common import clients
 from trove.common import context as trove_context
+from trove.common.i18n import _
 from trove.common.strategies.cluster.experimental.common import health
 from trove.common.strategies.cluster.experimental.common import repair
 from trove.instance.models import DBInstance
 from trove.instance.models import InstanceServiceStatus
+from trove.instance.tasks import InstanceTasks
 from trove import rpc
+from trove.taskmanager import api as task_api
 from trove.taskmanager import recovery
 
 LOG = logging.getLogger(__name__)
@@ -126,8 +142,18 @@ def notify(event_type, instance, action, reason):
 class InstanceRepair(object):
     """The repair of the standalone instances this replica covers."""
 
-    def __init__(self, nova_factory=None, now=None, covered=None):
+    def __init__(self, nova_factory=None, now=None, covered=None,
+                 cinder_factory=None, task_api_factory=None):
         self.nova_factory = nova_factory or clients.create_nova_client
+        self.cinder_factory = cinder_factory or clients.create_cinder_client
+        self.task_api_factory = task_api_factory or task_api.API
+        # The rebuilds this task manager asked for, by instance: when.
+        self.rebuilds = {}
+        # The instances it gave up on (told once).
+        self.given_up = set()
+        # The instances sent to be rebuilt, until they are heard from:
+        # (instance, when, action).
+        self.rebuilding = {}
         self._now = now or timeutils.utcnow
         # Which of the suspects this replica looks at: by default the
         # recovery hub's share of them.
@@ -141,7 +167,7 @@ class InstanceRepair(object):
         return recovery.hub(context).coordinator.covered(ids)
 
     def check_now(self, context):
-        if not CONF.instance_repair_start:
+        if not (CONF.instance_repair_start or CONF.instance_repair_rebuild):
             return
         stale_before = self._now() - timeutils.datetime.timedelta(
             seconds=CONF.agent_heartbeat_expiry)
@@ -160,10 +186,24 @@ class InstanceRepair(object):
         for instance_id in sorted(covered):
             instance = suspects[instance_id]
             try:
+                server = nova.servers.get(instance.compute_instance_id)
+            except nova_exceptions.NotFound:
+                self.started.pop(instance_id, None)
+                self._rebuild(context, nova, instance, computes, None)
+                continue
+            except Exception as err:
+                LOG.warning("Instance %s not looked at: %s", instance_id,
+                            err)
+                continue
+            if server.status == 'ERROR':
+                self._rebuild(context, nova, instance, computes, server)
+                continue
+            if not CONF.instance_repair_start:
+                continue
+            try:
                 decision = repair.decide_start(nova, instance, computes,
                                                now=self._now)
             except nova_exceptions.NotFound:
-                # Its server is gone: not this repair's to mend.
                 self.started.pop(instance_id, None)
                 continue
             except Exception as err:
@@ -175,6 +215,146 @@ class InstanceRepair(object):
             else:
                 LOG.debug("Instance %s not started: %s", instance_id,
                           decision.reason)
+
+    def _rebuild(self, context, nova, instance, computes, server):
+        """Bring back an instance whose server is in ERROR (``server``)
+        or gone (None), when the operator lets it, at most
+        instance_repair_rebuild_attempts times.
+        """
+        if not CONF.instance_repair_rebuild:
+            LOG.debug("Instance %s has lost its server; "
+                      "instance_repair_rebuild is off.", instance.id)
+            return
+        recreate = server is None
+        action = 'recreate' if recreate else 'rebuild'
+        if recreate:
+            reason = 'its server %s is gone' % instance.compute_instance_id
+        else:
+            reason = 'its server %s is in ERROR' % server.id
+            host = getattr(server, 'OS-EXT-SRV-ATTR:host', None)
+            if host not in computes:
+                computes[host] = repair.compute_up(nova, host)
+            if not computes[host]:
+                # The host's evacuation is the operator's (Masakari).
+                LOG.debug("Instance %s not rebuilt: the compute service of "
+                          "host %s is not up.", instance.id, host)
+                return
+        tries = self.rebuilds.get(instance.id, [])
+        if len(tries) >= CONF.instance_repair_rebuild_attempts:
+            if instance.id not in self.given_up:
+                self.given_up.add(instance.id)
+                LOG.warning("Instance %s: given up after %d tries; %s.",
+                            instance.id, len(tries), reason)
+                notify(EVENT_ERROR, instance, action,
+                       '%s; given up after %d tries' % (reason, len(tries)))
+            return
+        if tries and (time.monotonic() - tries[-1] <
+                      CONF.instance_repair_rebuild_interval):
+            return
+        if recreate:
+            ready, missing = self._volume_ready(context, instance)
+            if not ready and not missing:
+                LOG.debug("Instance %s: its data volume is not detached "
+                          "yet.", instance.id)
+                return
+            if missing:
+                if instance.id not in self.given_up:
+                    self.given_up.add(instance.id)
+                    LOG.warning("Instance %s cannot be brought back: %s; "
+                                "%s.", instance.id, reason, missing)
+                    notify(EVENT_ERROR, instance, action,
+                           '%s; %s' % (reason, missing))
+                return
+        # Only one task manager takes the instance, and only while nothing
+        # else has: the API's own actions take its task as well.
+        if not repair._take_member(instance.id, InstanceTasks.BUILDING):
+            LOG.debug("Instance %s not rebuilt: its task is taken.",
+                      instance.id)
+            return
+        LOG.info("Instance %s (%s): %s; %s.", instance.name, instance.id,
+                 reason, 'a new server on its data volume' if recreate
+                 else 'rebuilding it')
+        tries.append(time.monotonic())
+        self.rebuilds[instance.id] = tries
+        try:
+            self.task_api_factory(self._tenant_context(instance)) \
+                .repair_instance(instance.id, recreate=recreate)
+        except Exception as err:
+            LOG.warning("Instance %s was not sent to be rebuilt: %s",
+                        instance.id, err)
+            repair._take_member(instance.id, InstanceTasks.NONE,
+                                taken=InstanceTasks.BUILDING)
+            notify(EVENT_ERROR, instance, action,
+                   '%s; not sent: %s' % (reason, err))
+            return
+        self.rebuilding[instance.id] = (instance, time.monotonic(), action)
+        notify(EVENT_START, instance, action, reason)
+
+    def _volume_ready(self, context, instance):
+        """Whether the data volume can take a new server, and if it never
+        will, why: (False, None) is not yet (still detaching).
+        """
+        with DBInstance.query() as query:
+            row = query.session.query(DBInstance.volume_id).filter(
+                DBInstance.id == instance.id).first()
+        volume_id = row[0] if row else None
+        if not volume_id:
+            return False, _('the instance has no data volume')
+        try:
+            volume = self.cinder_factory(context).volumes.get(volume_id)
+        except Exception as err:
+            if getattr(err, 'code', None) == 404:
+                return False, (_('its data volume %s is gone with it')
+                               % volume_id)
+            raise
+        if volume.status == 'available':
+            return True, None
+        if volume.status in ('in-use', 'detaching'):
+            # Detached a moment after the server is gone: looked at again
+            # on the next scan.
+            return False, None
+        return False, (_('its data volume %(id)s is %(status)s') %
+                       {'id': volume_id, 'status': volume.status})
+
+    @staticmethod
+    def _tenant_context(instance):
+        return trove_context.TroveContext(project_id=instance.tenant_id,
+                                          is_admin=True)
+
+    def _rebuilt(self, suspects):
+        """The instances sent to be rebuilt whose rebuild is over: their
+        task given back and their heartbeat fresh (told), or quiet again
+        (looked at again by the scan).
+        """
+        if not self.rebuilding:
+            return
+        with DBInstance.query() as query:
+            tasks = dict(query.session.query(
+                DBInstance.id, DBInstance.task_id).filter(
+                DBInstance.id.in_(list(self.rebuilding)),
+                DBInstance.deleted == expression.false()).all())
+        for instance_id in list(self.rebuilding):
+            if tasks.get(instance_id) == InstanceTasks.BUILDING.code:
+                continue
+            instance, since, action = self.rebuilding.pop(instance_id)
+            if instance_id not in tasks:
+                # Deleted meanwhile.
+                self.rebuilds.pop(instance_id, None)
+                continue
+            if instance_id in suspects:
+                LOG.warning("Instance %s is still quiet after its %s.",
+                            instance_id, action)
+                notify(EVENT_ERROR, instance, action,
+                       'still quiet %d s after its %s' %
+                       (time.monotonic() - since, action))
+                continue
+            self.rebuilds.pop(instance_id, None)
+            self.given_up.discard(instance_id)
+            LOG.info("Instance %s is back, %d s after its %s.",
+                     instance.name, time.monotonic() - since, action)
+            notify(EVENT_END, instance, action,
+                   'heard from again %d s after its %s' %
+                   (time.monotonic() - since, action))
 
     def _start(self, nova, instance, reason):
         LOG.info("Starting instance %s (%s): %s.", instance.name,
@@ -193,7 +373,10 @@ class InstanceRepair(object):
         notify(EVENT_START, instance, 'start', reason)
 
     def _ended(self, suspects):
-        """The instances started here that are no longer quiet."""
+        """The instances started or rebuilt here that are no longer
+        quiet.
+        """
+        self._rebuilt(suspects)
         for instance_id in list(self.started):
             if instance_id in suspects:
                 continue

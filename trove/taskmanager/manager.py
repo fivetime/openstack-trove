@@ -30,6 +30,7 @@ from trove.common import server_group as srv_grp
 from trove.common.strategies.cluster import strategy
 from trove.datastore.models import DatastoreVersion
 import trove.extensions.mgmt.instances.models as mgmtmodels
+from trove.instance import models as inst_models
 from trove.instance.tasks import InstanceTasks
 from trove.quota.quota import QUOTAS
 from trove.taskmanager import instance_repair
@@ -305,6 +306,14 @@ class Manager(periodic_task.PeriodicTasks):
     def rebuild(self, context, instance_id, image_id):
         instance_tasks = models.BuiltInstanceTasks.load(context, instance_id)
         instance_tasks.rebuild(image_id)
+
+    @ownership.owning('instance')
+    def repair_instance(self, context, instance_id, recreate=False):
+        # A server that is gone is not loaded.
+        instance_tasks = inst_models.load_instance(
+            models.BuiltInstanceTasks, context, instance_id,
+            needs_server=not recreate)
+        instance_tasks.repair_server(recreate=recreate)
 
     @ownership.owning('instance')
     def delete_instance(self, context, instance_id):

@@ -197,6 +197,13 @@ class API(object):
         self._cast("rebuild", version=version, instance_id=instance_id,
                    image_id=image_id)
 
+    def repair_instance(self, instance_id, recreate=False):
+        LOG.debug("Making async call to repair instance: %s", instance_id)
+        version = self.API_BASE_VERSION
+
+        self._cast("repair_instance", version=version,
+                   instance_id=instance_id, recreate=recreate)
+
     def delete_instance(self, instance_id):
         LOG.debug("Making async call to delete instance: %s", instance_id)
         version = self.API_BASE_VERSION

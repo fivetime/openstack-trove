@@ -34,6 +34,7 @@ from trove.common import cfg
 from trove.common import clients
 from trove.common.clients import create_cinder_client
 from trove.common.clients import create_dns_client
+from trove.common.clients import create_glance_client
 from trove.common.clients import create_guest_client
 from trove.common import constants
 from trove.common import exception
@@ -44,6 +45,7 @@ from trove.common.exception import InvalidModelError
 from trove.common.exception import PollTimeOut
 from trove.common.exception import TroveError
 from trove.common.exception import VolumeCreationFailure
+from trove.common import glance as common_glance
 from trove.common.i18n import _
 from trove.common import neutron
 from trove.common.notification import DBaaSInstanceRestart
@@ -1141,14 +1143,13 @@ class FreshInstanceTasks(FreshInstance, NotifyMixin, ConfigurationMixin):
 
         # use Nova block_device_mapping_v2, referrence:
         # https://docs.openstack.org/api-ref/compute/#create-server
-        # setting the delete_on_terminate instance to true=1
         block_device_v2 = [{
             "uuid": v_ref.id,
             "source_type": "volume",
             "destination_type": "volume",
             "device_name": bdm,
             "volume_size": v_ref.size,
-            "delete_on_termination": True
+            "delete_on_termination": CONF.data_volume_delete_on_termination
         }]
         created_volumes = [{'id': v_ref.id,
                             'size': v_ref.size}]
@@ -1357,6 +1358,30 @@ class BuiltInstanceTasks(Instance, NotifyMixin, ConfigurationMixin):
         LOG.info(f"Rebuilding instance {self.id}, new image {image_id}")
         action = RebuildAction(self, image_id)
         action.execute()
+
+    def repair_server(self, recreate=False):
+        """Bring back a quiet standalone instance on its data volume: its
+        server, in ERROR, rebuilt by Nova on the image of its datastore
+        version; or, its server gone, a new one on the data volume and the
+        ports it had. Either way the guest starts on a new root disk and
+        is told to rebuild (the instance repair, ``instance_repair``).
+        """
+        LOG.info("Repairing instance %s: %s", self.id,
+                 'a new server' if recreate else 'its server rebuilt')
+        if recreate:
+            action_class = RecreateServerAction
+        else:
+            action_class = RepairRebuildAction
+        action_class(self, self.repair_image_id()).execute()
+
+    def repair_image_id(self):
+        """The image of the datastore version, by id or by tags."""
+        ds_version = self.datastore_version
+        if ds_version.image_id:
+            return ds_version.image_id
+        return common_glance.get_image_id(
+            create_glance_client(self.context), ds_version.image_id,
+            ds_version.image_tags)
 
     def create_backup(self, backup_info):
         LOG.info("Initiating backup for instance %s, backup_info: %s", self.id,
@@ -2676,3 +2701,113 @@ def load_cluster_tasks(context, cluster_id):
     task_manager_cluster_tasks_class = strat.task_manager_cluster_tasks_class
     return ClusterTasks.load(context, cluster_id,
                              task_manager_cluster_tasks_class)
+
+
+class RepairRebuildAction(RebuildAction):
+    """The rebuild of a server in ERROR whose guest is quiet: Nova rebuilds
+    it on the image of the datastore version, and the guest is told to
+    rebuild, as for a rebuild asked through the API. The guest is not
+    asked to stop the database or unmount the volume first: it does not
+    answer, and each call would only wait for its timeout.
+    """
+
+    def __init__(self, instance, image_id):
+        super(RepairRebuildAction, self).__init__(instance, image_id)
+        self.action_name = 'repair rebuild'
+
+    def execute(self):
+        try:
+            self._perform_nova_action()
+        finally:
+            if self.instance.db_info.task_status != (
+                    inst_models.InstanceTasks.NONE):
+                self.instance.reset_task_status()
+
+    def _unmount_volume(self):
+        pass
+
+    def _revert_nova_action(self):
+        # A rebuilt server is not reverted.
+        pass
+
+    def _wait_for_revert_nova_action(self):
+        pass
+
+
+class RecreateServerAction(RepairRebuildAction):
+    """A new server for an instance whose server is gone: the image of the
+    datastore version, the flavor, the server group, the data volume and
+    the ports of the instance (Nova keeps a port it was given, and keeps
+    the data volume with data_volume_delete_on_termination off). The guest
+    is then told to rebuild, as on a rebuilt server.
+    """
+
+    def __init__(self, instance, image_id):
+        super(RecreateServerAction, self).__init__(instance, image_id)
+        self.action_name = 'recreate'
+
+    def _nics(self):
+        ports = self.instance.neutron_client.list_ports(
+            name='trove-%s' % self.instance.id).get('ports', [])
+        bound = [p['id'] for p in ports if p.get('device_id')]
+        if bound:
+            raise TroveError(_("The ports %s of the instance are bound.")
+                             % ', '.join(bound))
+        # The user's port first, the management one last, as at creation.
+        user = [p for p in ports
+                if p['network_id'] not in CONF.management_networks]
+        mgmt = [p for p in ports
+                if p['network_id'] in CONF.management_networks]
+        nics = [{'port-id': p['id']} for p in user + mgmt]
+        if not nics:
+            raise TroveError(_("The instance has no ports left."))
+        return nics
+
+    def _data_volume(self):
+        """The block device of the data volume, and its zone."""
+        instance = self.instance
+        if not instance.volume_support or not instance.volume_id:
+            raise TroveError(_("The instance has no data volume."))
+        volume = instance.volume_client.volumes.get(instance.volume_id)
+        if volume.status != 'available':
+            raise TroveError(_("The data volume %(id)s is %(status)s.")
+                             % {'id': volume.id, 'status': volume.status})
+        device = {
+            "uuid": volume.id,
+            "source_type": "volume",
+            "destination_type": "volume",
+            "device_name": CONF.block_device_mapping,
+            "volume_size": volume.size,
+            "delete_on_termination": CONF.data_volume_delete_on_termination
+        }
+        zone = None
+        if CONF.enable_volume_az:
+            zone = getattr(volume, 'availability_zone', None)
+        return device, zone
+
+    def _initiate_nova_action(self):
+        instance = self.instance
+        if CONF.volume_rootdisk_support:
+            raise TroveError(_("An instance whose root disk is a volume "
+                               "is not given a new server."))
+        nics = self._nics()
+        device, zone = self._data_volume()
+        hints = None
+        if instance.server_group:
+            hints = {'group': instance.server_group.id}
+        files = instance.get_injected_files(
+            instance.datastore.name, instance.datastore_version.name,
+            networks=nics)
+        # The server is made as at creation.
+        server = FreshInstanceTasks._create_server(
+            instance, instance.flavor_id, self.image_id,
+            instance.datastore_version.manager, [device], zone, nics,
+            files=files, scheduler_hints=hints)
+        LOG.info("Server %s created for instance %s, on its data volume "
+                 "%s", server.id, instance.id, device['uuid'])
+        instance.update_db(compute_instance_id=server.id)
+        instance.server = server
+        self.wait_status = ['ACTIVE']
+
+    def _assert_nova_action_was_successful(self):
+        pass

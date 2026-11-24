@@ -1,0 +1,27 @@
+---
+features:
+  - |
+    A standalone instance whose server is lost can be brought back on its
+    data volume (``instance_repair_rebuild``, default off). The instance
+    repair of the task manager looks at the standalone instances whose
+    heartbeat is older than ``agent_heartbeat_expiry``: a server that Nova
+    has in ``ERROR``, on a host whose compute service is up, is rebuilt by
+    Nova on the image of the datastore version; a server Nova no longer
+    has is replaced by a new one on the data volume and the ports of the
+    instance. The guest then rebuilds the database on the volume, as for a
+    rebuild asked through the API. A task manager tries an instance
+    ``instance_repair_rebuild_attempts`` times (default 2),
+    ``instance_repair_rebuild_interval`` seconds apart (default 900), and
+    tells the repair as ``trove.instance.repair.start``, ``.end`` and
+    ``.error`` with the action ``rebuild`` or ``recreate``.
+  - |
+    New option ``data_volume_delete_on_termination`` (default true): off,
+    Nova keeps the data volume of an instance when its server is deleted,
+    which a server deleted from under the instance needs to be brought
+    back (``instance_repair_rebuild``). Deleting the instance deletes the
+    volume all the same: Trove waits for it to be detached first.
+upgrade:
+  - |
+    ``data_volume_delete_on_termination`` applies to the servers created
+    from now on; the block device of an existing server keeps what it was
+    created with (Nova's API changes it from microversion 2.85).

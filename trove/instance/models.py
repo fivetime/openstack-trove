@@ -929,6 +929,10 @@ class BaseInstance(SimpleInstance):
             LOG.info(f"Deleting volume {vol.id} for instance {self.id}")
 
             try:
+                # A volume Nova keeps (data_volume_delete_on_termination
+                # off) is detached after the server is gone, and Cinder
+                # refuses to delete it until then.
+                self._wait_volume_detached(vol)
                 vol.delete()
             except Exception as e:
                 LOG.warning(f"Failed to delete volume {vol.id}({vol.status}) "
@@ -941,6 +945,28 @@ class BaseInstance(SimpleInstance):
         ).notify()
 
         LOG.info("Finished to delete resources for instance %s", self.id)
+
+    def _wait_volume_detached(self, vol):
+        if vol.status not in ('in-use', 'detaching', 'attaching',
+                              'reserved'):
+            return
+
+        def detached():
+            try:
+                current = self.volume_client.volumes.get(vol.id)
+            except Exception as e:
+                if getattr(e, 'code', None) == 404:
+                    return True
+                raise
+            return current.status not in ('in-use', 'detaching',
+                                          'attaching', 'reserved')
+
+        try:
+            utils.poll_until(detached, sleep_time=2,
+                             time_out=CONF.volume_time_out)
+        except exception.PollTimeOut:
+            LOG.warning("Volume %s of instance %s is still attached",
+                        vol.id, self.id)
 
     def delete_async(self):
         deleted_at = timeutils.utcnow()

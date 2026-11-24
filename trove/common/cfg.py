@@ -68,6 +68,12 @@ common_opts = [
                 help='Whether to provision a Cinder volume for rootdisk.'),
     cfg.IntOpt('volume_rootdisk_size', default=10,
                help='Size of volume rootdisk for Database instance'),
+    cfg.BoolOpt('data_volume_delete_on_termination', default=True,
+                help='Whether Nova deletes the data volume of an instance '
+                     'with its compute server. Off, the volume outlives a '
+                     'server deleted from under the instance, which can '
+                     'then be brought back on it (instance_repair_rebuild); '
+                     'deleting the instance deletes it all the same.'),
     cfg.ListOpt('admin_roles', default=[],
                 deprecated_for_removal=True,
                 deprecated_reason=_('Use the context_is_admin policy rule'),
@@ -431,6 +437,24 @@ common_opts = [
                      'the starts are tried cluster_repair_start_attempts '
                      'times, cluster_repair_start_interval apart. A server '
                      'stopped through the API stays stopped.'),
+    cfg.BoolOpt('instance_repair_rebuild', default=False,
+                help='Bring back a standalone instance that is quiet to the '
+                     'control plane (its heartbeat older than '
+                     'agent_heartbeat_expiry) on its data volume: a server '
+                     'Nova has in ERROR, on a host whose compute service is '
+                     'up, is rebuilt by Nova on the image of the datastore '
+                     'version; a server Nova no longer has is replaced by a '
+                     'new one on the data volume and the ports of the '
+                     'instance, which needs data_volume_delete_on_termination '
+                     'off. The guest then rebuilds the database on the data '
+                     'volume, as for a rebuild asked through the API.'),
+    cfg.IntOpt('instance_repair_rebuild_attempts', default=2, min=1,
+               help='How many times a task manager tries '
+                    'instance_repair_rebuild on an instance (counted from '
+                    'its start).'),
+    cfg.IntOpt('instance_repair_rebuild_interval', default=900, min=60,
+               help='Seconds between two tries of instance_repair_rebuild '
+                    'on an instance.'),
     cfg.IntOpt('instance_repair_scan_interval', default=120, min=0,
                help='Seconds between two scans of the database for the '
                     'standalone instances whose heartbeat is older than '
