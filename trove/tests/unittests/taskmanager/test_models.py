@@ -613,7 +613,8 @@ class FreshInstanceTasksTest(BaseFreshInstanceTasksTest):
             None, {'group': 'sg-id'}
         )
 
-        mock_create_secgroup.assert_called_with('mysql', [])
+        mock_create_secgroup.assert_called_with(
+            'mysql', [], is_public=False, network_id=None)
         mock_create_port.assert_called_once_with(
             {'net-id': 'fake-net-id'},
             ['fake_security_group_id'],
@@ -838,6 +839,49 @@ class FreshInstanceTasksTest(BaseFreshInstanceTasksTest):
             TroveError, 'Error attaching instance',
             self.freshinstancetasks.attach_replication_slave,
             snapshot, mock_flavor)
+
+
+class SecurityGroupRulesTest(BaseFreshInstanceTasksTest):
+    """The rules of an instance's security group without allowed CIDRs:
+    the database is reachable over IPv4 and IPv6 by default.
+    """
+
+    def _rules(self, allowed_cidrs=None, is_public=False):
+        client = Mock()
+        client.list_subnets.return_value = {'subnets': [
+            {'cidr': '10.0.0.0/24'}, {'cidr': '2001:db8:1::/64'}]}
+        self.freshinstancetasks._neutron_client = client
+        with patch.object(taskmanager_models.neutron,
+                          'create_security_group',
+                          return_value='sg-1'), \
+                patch.object(taskmanager_models.neutron,
+                             'create_security_group_rule') as rule:
+            self.freshinstancetasks._create_secgroup(
+                'mysql', allowed_cidrs or [], is_public=is_public,
+                network_id='user-net')
+        return [call[0][4] for call in rule.call_args_list]
+
+    def test_ipv4_and_ipv6_by_default(self):
+        self.assertEqual([['0.0.0.0/0', '::/0']] * 2, self._rules())
+
+    def test_no_ipv6_rule_when_its_cidr_is_empty(self):
+        cfg.CONF.set_override('trove_security_group_rule_cidr_v6', '')
+        self.assertEqual([['0.0.0.0/0']] * 2, self._rules())
+
+    def test_the_allowed_cidrs_alone(self):
+        self.assertEqual([['10.0.0.0/8']] * 2, self._rules(['10.0.0.0/8']))
+
+    def test_public_only_private_gets_its_ipv6_subnets(self):
+        cfg.CONF.set_override(
+            'trove_security_group_rule_cidr_v6_public_only', True)
+        self.assertEqual([['0.0.0.0/0', '2001:db8:1::/64']] * 2,
+                         self._rules())
+
+    def test_public_only_public_gets_the_ipv6_cidr(self):
+        cfg.CONF.set_override(
+            'trove_security_group_rule_cidr_v6_public_only', True)
+        self.assertEqual([['0.0.0.0/0', '::/0']] * 2,
+                         self._rules(is_public=True))
 
 
 class ResizeVolumeTest(trove_testtools.TestCase):
@@ -1719,6 +1763,39 @@ class BuiltInstanceTasksAccessTest(trove_testtools.TestCase):
                 'is_public': True,
                 'allowed_cidrs': allowed_cidrs
             })
+
+    def test_update_access_renews_default_rules_on_is_public(self):
+        cfg.CONF.set_override(
+            'trove_security_group_rule_cidr_v6_public_only', True)
+        self.instance_task.access = {'is_public': False, 'allowed_cidrs': []}
+        self.instance_task.neutron_client.list_subnets.return_value = {
+            'subnets': [{'cidr': '2001:db8:1::/64'}]}
+
+        self._update_access({'is_public': True})
+
+        self.clear_rules.assert_called_once_with(
+            self.instance_task.neutron_client, 'security-group-id')
+        self.create_rule.assert_has_calls([
+            call(self.instance_task.neutron_client, 'security-group-id',
+                 'tcp', cfg.CONF.get('mysql').tcp_ports,
+                 ['0.0.0.0/0', '::/0'])])
+
+        self.clear_rules.reset_mock()
+        self.create_rule.reset_mock()
+        self.instance_task.access = {'is_public': True, 'allowed_cidrs': []}
+        self._update_access({'is_public': False})
+        self.create_rule.assert_has_calls([
+            call(self.instance_task.neutron_client, 'security-group-id',
+                 'tcp', cfg.CONF.get('mysql').tcp_ports,
+                 ['0.0.0.0/0', '2001:db8:1::/64'])])
+        self.instance_task.neutron_client.list_subnets.assert_called_with(
+            network_id='user-network-id')
+
+    def test_update_access_keeps_rules_on_is_public_by_default(self):
+        self.instance_task.access = {'is_public': False, 'allowed_cidrs': []}
+        self._update_access({'is_public': True})
+        self.clear_rules.assert_not_called()
+        self.create_rule.assert_not_called()
 
     def test_update_access_preserves_is_public(self):
         new_allowed_cidrs = ['198.51.100.0/24']

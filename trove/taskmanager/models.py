@@ -20,6 +20,7 @@ import traceback
 
 from oslo_db import exception as db_exception
 from oslo_log import log as logging
+from oslo_utils import netutils
 from oslo_utils import timeutils as otimeutils
 from oslo_utils import units
 
@@ -76,6 +77,30 @@ from trove import rpc
 
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
+
+
+def default_rule_cidrs(neutron_client, is_public, network_id):
+    """The CIDRs an instance created without allowed CIDRs is let in from.
+
+    trove_security_group_rule_cidr, and over IPv6
+    trove_security_group_rule_cidr_v6; with
+    trove_security_group_rule_cidr_v6_public_only, a private instance gets
+    the IPv6 subnets of its user network in place of the latter.
+    """
+    cidrs = [CONF.trove_security_group_rule_cidr]
+    cidr_v6 = CONF.trove_security_group_rule_cidr_v6
+    if not cidr_v6:
+        return cidrs
+    if is_public or not CONF.trove_security_group_rule_cidr_v6_public_only:
+        return cidrs + [cidr_v6]
+    if not network_id:
+        return cidrs
+    for cidr in neutron.get_subnet_cidrs(neutron_client,
+                                         network_id=network_id):
+        if cidr and netutils.is_valid_ipv6_cidr(cidr) and \
+                cidr not in cidrs:
+            cidrs.append(cidr)
+    return cidrs
 
 
 def secgroup_ports(datastore_manager, cluster_id=None):
@@ -588,9 +613,14 @@ class FreshInstanceTasks(FreshInstance, NotifyMixin, ConfigurationMixin):
         access = access or {}
 
         if CONF.trove_security_groups_support:
+            user_network_id = None
+            if len(networks) > 1 or not CONF.management_networks:
+                user_network_id = (networks[0] or {}).get('network_id')
             security_group = self._create_secgroup(
                 datastore_manager,
-                access.get('allowed_cidrs', [])
+                access.get('allowed_cidrs', []),
+                is_public=access.get('is_public', False),
+                network_id=user_network_id,
             )
             LOG.info(
                 "Security group %s created for instance %s",
@@ -1240,7 +1270,8 @@ class FreshInstanceTasks(FreshInstance, NotifyMixin, ConfigurationMixin):
             LOG.debug("DNS not enabled for instance: %(id)s",
                       {'id': self.id})
 
-    def _create_secgroup(self, datastore_manager, allowed_cidrs):
+    def _create_secgroup(self, datastore_manager, allowed_cidrs,
+                         is_public=False, network_id=None):
         name = "%s-%s" % (CONF.trove_security_group_name_prefix, self.id)
 
         try:
@@ -1249,7 +1280,8 @@ class FreshInstanceTasks(FreshInstance, NotifyMixin, ConfigurationMixin):
             )
 
             if not allowed_cidrs:
-                allowed_cidrs = [CONF.trove_security_group_rule_cidr]
+                allowed_cidrs = default_rule_cidrs(
+                    self.neutron_client, is_public, network_id)
             tcp_ports, udp_ports = secgroup_ports(datastore_manager,
                                                   self.cluster_id)
 
@@ -1594,7 +1626,22 @@ class BuiltInstanceTasks(Instance, NotifyMixin, ConfigurationMixin):
                                                new_is_public, self.tenant_id)
 
         if CONF.trove_security_groups_support:
-            if allowed_cidrs != new_allowed_cidrs:
+            # An instance on the default rules whose is_public changes gets
+            # them again: with trove_security_group_rule_cidr_v6_public_only
+            # they depend on it.
+            rule_cidrs = new_allowed_cidrs
+            renew_defaults = (
+                not allowed_cidrs and not new_allowed_cidrs and
+                is_public != new_is_public and
+                CONF.trove_security_group_rule_cidr_v6_public_only)
+            if renew_defaults:
+                user_network_id = next(
+                    (port['network_id'] for port in ports
+                     if port['network_id'] not in CONF.management_networks),
+                    None)
+                rule_cidrs = default_rule_cidrs(
+                    self.neutron_client, new_is_public, user_network_id)
+            if allowed_cidrs != new_allowed_cidrs or renew_defaults:
                 name = f"{CONF.trove_security_group_name_prefix}-{self.id}"
                 sgs = self.neutron_client.list_security_groups(
                     name=name)['security_groups']
@@ -1606,16 +1653,16 @@ class BuiltInstanceTasks(Instance, NotifyMixin, ConfigurationMixin):
                         self.neutron_client,
                         sg['id'])
 
-                    if new_allowed_cidrs:
+                    if rule_cidrs:
                         tcp_ports, udp_ports = secgroup_ports(
                             self.datastore_version.manager, self.cluster_id)
 
                         neutron.create_security_group_rule(
                             self.neutron_client, sg['id'], 'tcp', tcp_ports,
-                            new_allowed_cidrs)
+                            rule_cidrs)
                         neutron.create_security_group_rule(
                             self.neutron_client, sg['id'], 'udp', udp_ports,
-                            new_allowed_cidrs)
+                            rule_cidrs)
         else:
             LOG.warning('Security group not supported.')
 

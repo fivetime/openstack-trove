@@ -1,0 +1,18 @@
+---
+features:
+  - |
+    The security group of an instance created without allowed CIDRs now
+    lets its database ports in over IPv6 too, from
+    ``trove_security_group_rule_cidr_v6`` (default ``::/0``), next to
+    ``trove_security_group_rule_cidr``. Set it empty to keep IPv6 out.
+    With ``trove_security_group_rule_cidr_v6_public_only`` (default off),
+    only a public instance gets that CIDR; a private one is let in over
+    IPv6 from the IPv6 subnets of its user network, for a cloud whose
+    tenant IPv6 subnets are globally routed. An instance on the default
+    rules whose ``is_public`` changes gets them anew.
+upgrade:
+  - |
+    Instances created from now on without allowed CIDRs are reachable over
+    IPv6 on a network with an IPv6 subnet; set
+    ``trove_security_group_rule_cidr_v6`` empty to keep the former
+    behaviour. The rules of existing instances are not changed.

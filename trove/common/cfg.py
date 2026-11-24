@@ -537,6 +537,21 @@ common_opts = [
                help='Prefix to use when creating Security Groups.'),
     cfg.StrOpt('trove_security_group_rule_cidr', default='0.0.0.0/0',
                help='CIDR to use when creating Security Group Rules.'),
+    cfg.StrOpt('trove_security_group_rule_cidr_v6', default='::/0',
+               help='IPv6 CIDR to use, next to '
+                    'trove_security_group_rule_cidr, when creating the '
+                    'Security Group Rules of an instance created without '
+                    'allowed CIDRs. Empty for none: the database is then '
+                    'not reachable over IPv6 by default.'),
+    cfg.BoolOpt('trove_security_group_rule_cidr_v6_public_only',
+                default=False,
+                help='Give the rules of trove_security_group_rule_cidr_v6 '
+                     'only to a public instance (access is_public). A '
+                     'private one is let in over IPv6 from the IPv6 subnets '
+                     'of its user network instead: on a cloud whose tenant '
+                     'IPv6 subnets are globally routed, ::/0 would put '
+                     'every database on the Internet, where IPv4 needs a '
+                     'floating IP for that.'),
     cfg.IntOpt('trove_api_workers',
                help='Number of workers for the API service. The default will '
                'be the number of CPUs available.'),
