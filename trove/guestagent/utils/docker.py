@@ -160,12 +160,15 @@ def _create_container_with_low_level_api(image: str, param: dict) -> None:
         network_config_kwargs["ipv4_address"] = eth1_config.get("ipv4_address")
     if eth1_config.get("ipv6_address"):
         network_config_kwargs["ipv6_address"] = eth1_config.get("ipv6_address")
-        # The router answers the interface's solicitation with an
-        # advertisement as soon as the interface comes up in the container's
-        # namespace, the kernel installs a default route from it, and
-        # docker's own default route through the gateway then fails with
-        # "file exists". Docker applies these sysctls before it brings the
-        # interface up.
+    if eth1_config.get("ipv6_gateway"):
+        # Docker adds the default route through the gateway itself. The
+        # router answers the interface's solicitation with an advertisement
+        # as soon as the interface comes up in the container's namespace,
+        # the kernel installs a default route from it, and docker's then
+        # fails with "file exists". Docker applies these sysctls before it
+        # brings the interface up. Without a gateway (SLAAC and
+        # dhcpv6-stateless subnets) the advertisement is the only source of
+        # the default route, so it stays on.
         network_config_kwargs["driver_opt"] = {
             constants.DOCKER_ENDPOINT_SYSCTLS:
                 "net.ipv6.conf.IFNAME.accept_ra=0"}

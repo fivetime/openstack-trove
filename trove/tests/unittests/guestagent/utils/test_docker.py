@@ -177,6 +177,30 @@ class TestDockerUtils(trove_testtools.TestCase):
         mock_client().start.assert_called_once()
 
     @mock.patch("docker.APIClient")
+    def test__create_container_with_low_level_api_ipv6_slaac_keeps_ra(
+            self, mock_client):
+        # A SLAAC subnet gives no IPv6 gateway: the router's advertisement
+        # is the only source of the default route, so it stays on.
+        eth1_data = json.dumps({
+            "mac_address": "fa:16:3e:7c:9c:57",
+            "ipv4_address": "10.111.0.8",
+            "ipv4_cidr": "10.111.0.0/26",
+            "ipv4_gateway": "10.111.0.1",
+            "ipv6_address": "2001:db8:1::8",
+            "ipv6_cidr": "2001:db8:1::/64"})
+        mo = mock.mock_open(read_data=eth1_data)
+        param = dict(name="test", restart_policy={"Name": "always"},
+                     privileged=False, detach=True, volumes={}, ports={},
+                     user="test_user", environment={}, command="sleep inf")
+        mock_client().inspect_image.return_value = {'Id': 'sha256:1'}
+        with mock.patch.object(docker_utils, 'open', mo):
+            docker_utils._create_container_with_low_level_api(
+                "busybox", param)
+        mock_client().create_endpoint_config.assert_called_once_with(
+            ipv4_address="10.111.0.8", ipv6_address="2001:db8:1::8")
+        mock_client().start.assert_called_once()
+
+    @mock.patch("docker.APIClient")
     def test__create_container_with_low_level_api_stop_timeout(
             self, mock_client):
         mo = mock.mock_open(read_data=json.dumps({"ipv4_address": "10.1.0.8"}))
