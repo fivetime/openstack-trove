@@ -324,6 +324,18 @@ class FreshInstanceTasksTest(BaseFreshInstanceTasksTest):
 
         self.assertEqual('fake_keypair', server.key_name)
 
+    def test_a_server_made_for_no_user_tells_none(self):
+        # The repair's new server: no user's request behind it, and Nova
+        # refuses a metadata value that is not a string.
+        self.freshinstancetasks.context = trove.common.context.TroveContext(
+            project_id='project-1', is_admin=True)
+        server = self.freshinstancetasks._create_server(
+            None, None, None, None, None, None)
+        self.assertNotIn('trove_user_id', server.meta)
+        self.assertIn('trove_instance_id', server.meta)
+        self.assertFalse([t for t in server.tags
+                          if t.startswith('trove_user_id')])
+
     def test_create_instance_prepare_cloud_config(self):
         files = {"/tmp/fake_file": "fake text"}
         user_data = self.freshinstancetasks.prepare_cloud_config(files)

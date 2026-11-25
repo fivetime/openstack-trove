@@ -1178,6 +1178,11 @@ class FreshInstanceTasks(FreshInstance, NotifyMixin, ConfigurationMixin):
         metadata = {'trove_project_id': self.tenant_id,
                     'trove_user_id': self.context.user_id,
                     'trove_instance_id': self.id}
+        if not metadata['trove_user_id']:
+            # Nova takes strings only. The repair makes a server with no
+            # user's request behind it (a new one for an instance whose
+            # server is gone, which alone told the user): it tells none.
+            del metadata['trove_user_id']
         bdmap_v2 = block_device_mapping_v2
         config_drive = CONF.use_nova_server_config_drive
         key_name = CONF.nova_keypair
