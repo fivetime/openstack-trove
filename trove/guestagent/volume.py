@@ -309,16 +309,21 @@ class VolumeDevice(object):
         self.volume_fs.format(self.device_path, CONF.volume_format_timeout)
 
     def format(self):
-        """Formats the device at device_path and checks the filesystem."""
+        """Formats the device at device_path and checks the filesystem.
+
+        :returns: True when the device was formatted, False when it held a
+                  filesystem already (a volume taken over by a rebuild).
+        """
         self._check_device_exists()
 
         try:
             self._check_format()
             LOG.debug(f"Device {self.device_path} already formatted.")
-            return
+            return False
         except exception.GuestError:
             self._format()
             self._check_format()
+            return True
 
     def mount(self, mount_point, write_to_fstab=True):
         """Mounts, and writes to fstab."""

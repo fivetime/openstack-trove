@@ -284,3 +284,30 @@ class VolumeDeviceResizeTest(testtools.TestCase):
         mock_execute.side_effect = processutils.ProcessExecutionError()
 
         self.assertIsNone(volume.VolumeDevice("/dev/vdb").get_size())
+
+
+class VolumeDeviceFormatTest(testtools.TestCase):
+    """format() tells whether it made the filesystem: the guest gives a
+    volume it formatted to the database service user, and leaves the files
+    of one it found formatted as they are (a rebuild).
+    """
+
+    def _format(self, formatted_already):
+        device = volume.VolumeDevice('/dev/vdb')
+        checks = [None] if formatted_already else [
+            exception.GuestError(original_message='no filesystem'), None]
+        with mock.patch.object(device, '_check_device_exists'), \
+                mock.patch.object(device, '_check_format',
+                                  side_effect=checks), \
+                mock.patch.object(device, '_format') as make:
+            return device.format(), make
+
+    def test_a_new_volume_is_formatted(self):
+        formatted, make = self._format(False)
+        self.assertIs(True, formatted)
+        make.assert_called_once_with()
+
+    def test_a_volume_formatted_already_is_not(self):
+        formatted, make = self._format(True)
+        self.assertIs(False, formatted)
+        make.assert_not_called()

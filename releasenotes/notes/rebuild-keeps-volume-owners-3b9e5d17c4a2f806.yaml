@@ -1,0 +1,9 @@
+---
+fixes:
+  - |
+    The guest agent gives the data volume to the database service user
+    (a recursive chown) only when it has just formatted it. A volume that
+    holds a database already, on a rebuilt server or on the new server the
+    instance repair makes, keeps the owners of its files: a Db2 instance
+    has setuid programs and its ``fencedid`` owned by root under
+    ``sqllib``, and the recursive chown left it unable to start.

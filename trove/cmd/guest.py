@@ -48,6 +48,27 @@ CONF.register_opts([
 LOG = logging.getLogger(__name__)
 
 
+def prepare_storage(device_path, mount_point, uid, gid):
+    """Mount the data volume, formatted if it is new.
+
+    A new volume is given to the database service user. A volume that
+    holds a database already (a rebuild, the instance repair's new server)
+    keeps the owners its files have: the database made them so, and some
+    have to stay root's (Db2's setuid programs and fencedid under sqllib;
+    a recursive chown strips the setuid bits too, and the instance is not
+    started again). Only its top directory is given to the service user.
+    """
+    device = volume.VolumeDevice(device_path)
+    if device.mount_points(device_path):
+        return
+    LOG.info('Preparing the storage for %s, mount path %s',
+             device_path, mount_point)
+    formatted = device.format()
+    device.mount(mount_point)
+    operating_system.chown(
+        mount_point, uid, gid, recursive=formatted, as_root=True)
+
+
 def main():
     log_levels = [
         'docker=WARN',
@@ -103,14 +124,7 @@ def main():
     # mounted.
     device_path = CONF.get(CONF.datastore_manager).device_path
     mount_point = CONF.get(CONF.datastore_manager).mount_point
-    device = volume.VolumeDevice(device_path)
-    if not device.mount_points(device_path):
-        LOG.info('Preparing the storage for %s, mount path %s',
-                 device_path, mount_point)
-        device.format()
-        device.mount(mount_point)
-        operating_system.chown(
-            mount_point, uid, gid, recursive=True, as_root=True)
+    prepare_storage(device_path, mount_point, uid, gid)
 
     # rpc module must be loaded after decision about thread monkeypatching
     # because if thread module is not monkeypatched we can't use eventlet

@@ -101,3 +101,38 @@ class TestUserPortSettled(trove_testtools.TestCase):
         self.assertIn('RemainAfterExit=yes\n', service)
         self.assertIn('ExecStart=-/usr/local/sbin/trove-image-loader\n',
                       service)
+
+
+class TestPrepareStorage(trove_testtools.TestCase):
+    """The files of a volume that holds a database keep their owners: Db2
+    keeps setuid programs and fencedid of root's under sqllib, and a
+    recursive chown on the rebuilt server left the instance unable to
+    start (db2icrt DBI20187E, production 2026-11-25).
+    """
+
+    def _prepare(self, formatted, mounted=False):
+        device = mock.Mock()
+        device.mount_points.return_value = ['/var/lib/db2'] if mounted else []
+        device.format.return_value = formatted
+        with mock.patch.object(guest.volume, 'VolumeDevice',
+                               return_value=device), \
+                mock.patch.object(guest.operating_system, 'chown') as chown:
+            guest.prepare_storage('/dev/vdb', '/var/lib/db2', 1000, 1000)
+        return device, chown
+
+    def test_a_new_volume_is_the_service_users(self):
+        device, chown = self._prepare(formatted=True)
+        device.mount.assert_called_once_with('/var/lib/db2')
+        chown.assert_called_once_with('/var/lib/db2', 1000, 1000,
+                                      recursive=True, as_root=True)
+
+    def test_the_files_of_a_volume_taken_over_keep_their_owners(self):
+        device, chown = self._prepare(formatted=False)
+        device.mount.assert_called_once_with('/var/lib/db2')
+        chown.assert_called_once_with('/var/lib/db2', 1000, 1000,
+                                      recursive=False, as_root=True)
+
+    def test_a_mounted_volume_is_left_alone(self):
+        device, chown = self._prepare(formatted=True, mounted=True)
+        device.format.assert_not_called()
+        chown.assert_not_called()
