@@ -16,10 +16,14 @@
 """Quotas for DB instances and resources."""
 
 from oslo_config import cfg
+from oslo_db import api as oslo_db_api
 from oslo_log import log as logging
 from oslo_utils import importutils
 
 from trove.common import exception
+from trove.common import timeutils
+from trove.common import utils
+from trove.db.sqlalchemy import session as db_session
 from trove.quota.models import Quota
 from trove.quota.models import QuotaUsage
 from trove.quota.models import Reservation
@@ -164,28 +168,85 @@ class DbQuotaDriver(object):
         resources which are too high.  Otherwise, the method returns a
         list of reservation objects which were created.
 
+        The usages are checked and changed under a lock of their rows: read
+        first and saved whole afterwards, two requests of one tenant at a
+        time each wrote back the usage the other had changed in between,
+        and the tenant's in_use and reserved drifted from what it has.
+
         :param tenant_id: The ID of the tenant reserving the resources.
         :param resources: A dictionary of the registered resources.
         :param deltas: A dictionary of the proposed delta changes.
         """
 
-        self.check_quotas(tenant_id, resources, deltas)
-        quota_usages = self.get_all_quota_usages_by_tenant(tenant_id,
-                                                           deltas.keys())
+        unregistered_resources = [delta for delta in deltas
+                                  if delta not in resources]
+        if unregistered_resources:
+            raise exception.QuotaResourceUnknown(
+                unknown=unregistered_resources)
 
-        reservations = []
-        for resource in sorted(deltas):
-            reserved = deltas[resource]
-            usage = quota_usages[resource]
-            usage.reserved += reserved
-            usage.save()
+        quotas = self.get_all_quotas_by_tenant(tenant_id, deltas.keys())
+        # Creates the usages a tenant does not have yet.
+        self.get_all_quota_usages_by_tenant(tenant_id, deltas.keys())
+        return self._reserve(tenant_id, quotas, deltas)
 
-            resv = Reservation.create(usage_id=usage.id,
-                                      delta=reserved,
-                                      status=Reservation.Statuses.RESERVED)
-            reservations.append(resv)
+    @oslo_db_api.wrap_db_retry(max_retries=5, retry_on_deadlock=True)
+    def _reserve(self, tenant_id, quotas, deltas):
+        session = db_session.get_session(expire_on_commit=False)
+        with session.begin():
+            usages = self._locked_usages(
+                session, QuotaUsage.tenant_id == tenant_id,
+                QuotaUsage.resource.in_(list(deltas)))
+            usages = {usage.resource: usage for usage in usages}
 
+            overs = [resource for resource in deltas
+                     if (int(deltas[resource]) > 0 and
+                         quotas[resource].hard_limit >= 0 and
+                         (usages[resource].in_use +
+                          usages[resource].reserved +
+                          int(deltas[resource])) >
+                         quotas[resource].hard_limit)]
+            if overs:
+                raise exception.QuotaExceeded(overs=sorted(overs))
+
+            now = timeutils.utcnow()
+            reservations = []
+            for resource in sorted(deltas):
+                usage = usages[resource]
+                usage.reserved += deltas[resource]
+                usage.updated = now
+                reservation = Reservation(
+                    id=utils.generate_uuid(), created=now, updated=now,
+                    usage_id=usage.id, delta=deltas[resource],
+                    status=Reservation.Statuses.RESERVED)
+                session.add(reservation)
+                reservations.append(reservation)
         return reservations
+
+    @staticmethod
+    def _locked_usages(session, *criteria):
+        # In the order of their ids, so that two requests lock the usages
+        # they share in the same order.
+        return (session.query(QuotaUsage).filter(*criteria)
+                .order_by(QuotaUsage.id).with_for_update().all())
+
+    @oslo_db_api.wrap_db_retry(max_retries=5, retry_on_deadlock=True)
+    def _settle(self, reservations, status, in_use):
+        session = db_session.get_session(expire_on_commit=False)
+        with session.begin():
+            usages = self._locked_usages(
+                session, QuotaUsage.id.in_(
+                    {reservation.usage_id for reservation in reservations}))
+            usages = {usage.id: usage for usage in usages}
+            now = timeutils.utcnow()
+            for reservation in reservations:
+                usage = usages[reservation.usage_id]
+                if in_use:
+                    usage.in_use = max(usage.in_use + reservation.delta, 0)
+                usage.reserved -= reservation.delta
+                usage.updated = now
+                reservation.status = status
+                reservation.updated = now
+                session.merge(reservation)
 
     def commit(self, reservations):
         """Commit reservations.
@@ -194,15 +255,7 @@ class DbQuotaDriver(object):
                              returned by the reserve() method.
         """
 
-        for reservation in reservations:
-            usage = QuotaUsage.find_by(id=reservation.usage_id)
-            usage.in_use += reservation.delta
-            if usage.in_use < 0:
-                usage.in_use = 0
-            usage.reserved -= reservation.delta
-            reservation.status = Reservation.Statuses.COMMITTED
-            usage.save()
-            reservation.save()
+        self._settle(reservations, Reservation.Statuses.COMMITTED, True)
 
     def rollback(self, reservations):
         """Roll back reservations.
@@ -211,12 +264,7 @@ class DbQuotaDriver(object):
                              returned by the reserve() method.
         """
 
-        for reservation in reservations:
-            usage = QuotaUsage.find_by(id=reservation.usage_id)
-            usage.reserved -= reservation.delta
-            reservation.status = Reservation.Statuses.ROLLEDBACK
-            usage.save()
-            reservation.save()
+        self._settle(reservations, Reservation.Statuses.ROLLEDBACK, False)
 
 
 class QuotaEngine(object):

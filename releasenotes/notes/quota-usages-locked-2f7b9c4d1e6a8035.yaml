@@ -1,0 +1,10 @@
+---
+fixes:
+  - |
+    Quota reservations check and change a tenant's usages under a lock of
+    their rows. Each request read the usages first and saved them whole
+    afterwards, so two requests of one tenant at a time wrote back what
+    the other had changed in between, and the tenant's ``in_use`` and
+    ``reserved`` drifted from what it has: a tenant could be refused for
+    instances it no longer has, or be let over its quota. Usages that
+    drifted before are not corrected by this change.

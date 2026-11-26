@@ -27,6 +27,7 @@ from trove.quota.quota import DbQuotaDriver
 from trove.quota.quota import QUOTAS
 from trove.quota.quota import run_with_quotas
 from trove.tests.unittests import trove_testtools
+from trove.tests.unittests.util import util
 """
 Unit tests for the classes and functions in DbQuotaDriver.py.
 """
@@ -423,33 +424,6 @@ class DbQuotaDriverTest(trove_testtools.TestCase):
         self.assertIsNone(self.driver.check_quotas(FAKE_TENANT1, resources,
                                                    delta))
 
-    def test_reserve(self):
-
-        FAKE_QUOTAS = [QuotaUsage(id=1,
-                                  tenant_id=FAKE_TENANT1,
-                                  resource=Resource.INSTANCES,
-                                  in_use=1,
-                                  reserved=2),
-                       QuotaUsage(id=2,
-                                  tenant_id=FAKE_TENANT1,
-                                  resource=Resource.VOLUMES,
-                                  in_use=1,
-                                  reserved=1)]
-
-        self.mock_quota_result.all = Mock(return_value=[])
-        self.mock_usage_result.all = Mock(return_value=FAKE_QUOTAS)
-        QuotaUsage.save = Mock()
-        Reservation.create = Mock()
-
-        # Set up the deltas with the intention that after the reserve call
-        # the deltas should match usage_id + 1 for both instances and volumes
-        delta = {'instances': 2, 'volumes': 3}
-        self.driver.reserve(FAKE_TENANT1, resources, delta)
-
-        for _, kw in Reservation.create.call_args_list:
-            self.assertEqual(kw['usage_id'] + 1, kw['delta'])
-            self.assertEqual(Reservation.Statuses.RESERVED, kw['status'])
-
     def test_reserve_resource_unknown(self):
 
         delta = {'instances': 10, 'volumes': 2000, 'Fake_resource': 123}
@@ -459,196 +433,110 @@ class DbQuotaDriverTest(trove_testtools.TestCase):
                           resources,
                           delta)
 
-    def test_reserve_over_quota(self):
 
-        FAKE_QUOTAS = [QuotaUsage(id=1,
-                                  tenant_id=FAKE_TENANT1,
-                                  resource=Resource.INSTANCES,
-                                  in_use=0,
-                                  reserved=0),
-                       QuotaUsage(id=2,
-                                  tenant_id=FAKE_TENANT1,
-                                  resource=Resource.VOLUMES,
-                                  in_use=0,
-                                  reserved=0)]
+class DbQuotaDriverReservationTest(trove_testtools.TestCase):
+    """Reservations against the usages in the database."""
 
-        self.mock_quota_result.all = Mock(return_value=[])
-        self.mock_usage_result.all = Mock(return_value=FAKE_QUOTAS)
+    def setUp(self):
+        super(DbQuotaDriverReservationTest, self).setUp()
+        util.init_db()
+        self.driver = DbQuotaDriver(resources)
+        self.tenant = 'tenant-%s' % self.id()[-40:]
+        # The quotas read CONF[flag], which patch_conf_property leaves.
+        for flag, value in (('max_instances_per_tenant', 3),
+                            ('max_volumes_per_tenant', 10)):
+            CONF.set_override(flag, value)
+            self.addCleanup(CONF.clear_override, flag)
 
-        delta = {'instances': 1, 'volumes': CONF.max_volumes_per_tenant + 1}
-        self.assertRaises(exception.QuotaExceeded,
-                          self.driver.reserve,
-                          FAKE_TENANT1,
-                          resources,
-                          delta)
+    def _usage(self, resource):
+        return QuotaUsage.find_by(tenant_id=self.tenant, resource=resource)
 
-    def test_reserve_over_quota_with_usage(self):
+    def _set_usage(self, resource, in_use, reserved=0):
+        usage = self.driver.get_quota_usage_by_tenant(self.tenant, resource)
+        usage.update(in_use=in_use, reserved=reserved)
 
-        FAKE_QUOTAS = [QuotaUsage(id=1,
-                                  tenant_id=FAKE_TENANT1,
-                                  resource=Resource.INSTANCES,
-                                  in_use=1,
-                                  reserved=0),
-                       QuotaUsage(id=2,
-                                  tenant_id=FAKE_TENANT1,
-                                  resource=Resource.VOLUMES,
-                                  in_use=0,
-                                  reserved=0)]
+    def test_a_reservation_is_reserved_then_committed(self):
+        reservations = self.driver.reserve(
+            self.tenant, resources, {'instances': 1, 'volumes': 2})
+        self.assertEqual([Reservation.Statuses.RESERVED] * 2,
+                         [r.status for r in reservations])
+        self.assertEqual(1, self._usage('instances').reserved)
+        self.assertEqual(2, self._usage('volumes').reserved)
 
-        self.mock_quota_result.all = Mock(return_value=[])
-        self.mock_usage_result.all = Mock(return_value=FAKE_QUOTAS)
+        self.driver.commit(reservations)
 
-        max_inst = CONF.max_instances_per_tenant
-        delta = {'instances': max_inst, 'volumes': 3}
-        self.assertRaises(exception.QuotaExceeded,
-                          self.driver.reserve,
-                          FAKE_TENANT1,
-                          resources,
-                          delta)
+        for resource, used in (('instances', 1), ('volumes', 2)):
+            usage = self._usage(resource)
+            self.assertEqual((used, 0), (usage.in_use, usage.reserved))
+        for reservation in reservations:
+            self.assertEqual(Reservation.Statuses.COMMITTED,
+                             Reservation.find_by(id=reservation.id).status)
 
-    def test_reserve_over_quota_with_reserved(self):
-
-        FAKE_QUOTAS = [QuotaUsage(id=1,
-                                  tenant_id=FAKE_TENANT1,
-                                  resource=Resource.INSTANCES,
-                                  in_use=1,
-                                  reserved=2),
-                       QuotaUsage(id=2,
-                                  tenant_id=FAKE_TENANT1,
-                                  resource=Resource.VOLUMES,
-                                  in_use=0,
-                                  reserved=0)]
-
-        self.mock_quota_result.all = Mock(return_value=[])
-        self.mock_usage_result.all = Mock(return_value=FAKE_QUOTAS)
-
-        max_inst = CONF.max_instances_per_tenant
-        delta = {'instances': max_inst - 1, 'volumes': 2}
-        self.assertRaises(exception.QuotaExceeded,
-                          self.driver.reserve,
-                          FAKE_TENANT1,
-                          resources,
-                          delta)
-
-    def test_reserve_over_quota_but_can_apply_negative_deltas(self):
-
-        FAKE_QUOTAS = [QuotaUsage(id=1,
-                                  tenant_id=FAKE_TENANT1,
-                                  resource=Resource.INSTANCES,
-                                  in_use=10,
-                                  reserved=0),
-                       QuotaUsage(id=2,
-                                  tenant_id=FAKE_TENANT1,
-                                  resource=Resource.VOLUMES,
-                                  in_use=50,
-                                  reserved=0)]
-
-        self.mock_quota_result.all = Mock(return_value=[])
-        self.mock_usage_result.all = Mock(return_value=FAKE_QUOTAS)
-
-        QuotaUsage.save = Mock()
-        Reservation.create = Mock()
-
-        # Set up the deltas with the intention that after the reserve call
-        # the deltas should match -usage_id for both instances and volumes
-        delta = {'instances': -1, 'volumes': -2}
-        self.driver.reserve(FAKE_TENANT1, resources, delta)
-
-        for _, kw in Reservation.create.call_args_list:
-            self.assertEqual(-kw['usage_id'], kw['delta'])
-            self.assertEqual(Reservation.Statuses.RESERVED, kw['status'])
-
-    def test_commit(self):
-
-        Reservation.save = Mock()
-        QuotaUsage.save = Mock()
-
-        FAKE_QUOTAS = [QuotaUsage(id=1,
-                                  tenant_id=FAKE_TENANT1,
-                                  resource=Resource.INSTANCES,
-                                  in_use=5,
-                                  reserved=2),
-                       QuotaUsage(id=2,
-                                  tenant_id=FAKE_TENANT1,
-                                  resource=Resource.VOLUMES,
-                                  in_use=1,
-                                  reserved=2)]
-
-        FAKE_RESERVATIONS = [Reservation(usage_id=1,
-                                         delta=1,
-                                         status=Reservation.Statuses.RESERVED),
-                             Reservation(usage_id=2,
-                                         delta=2,
-                                         status=Reservation.Statuses.RESERVED)]
-
-        QuotaUsage.find_by = Mock(side_effect=FAKE_QUOTAS)
-        self.driver.commit(FAKE_RESERVATIONS)
-
-        self.assertEqual(6, FAKE_QUOTAS[0].in_use)
-        self.assertEqual(1, FAKE_QUOTAS[0].reserved)
-        self.assertEqual(Reservation.Statuses.COMMITTED,
-                         FAKE_RESERVATIONS[0].status)
-
-        self.assertEqual(3, FAKE_QUOTAS[1].in_use)
-        self.assertEqual(0, FAKE_QUOTAS[1].reserved)
-        self.assertEqual(Reservation.Statuses.COMMITTED,
-                         FAKE_RESERVATIONS[1].status)
-
-    def test_commit_cannot_be_less_than_zero(self):
-
-        Reservation.save = Mock()
-        QuotaUsage.save = Mock()
-
-        FAKE_QUOTAS = [QuotaUsage(id=1,
-                                  tenant_id=FAKE_TENANT1,
-                                  resource=Resource.INSTANCES,
-                                  in_use=0,
-                                  reserved=-1)]
-
-        FAKE_RESERVATIONS = [Reservation(usage_id=1,
-                                         delta=-1,
-                                         status=Reservation.Statuses.RESERVED)]
-
-        QuotaUsage.find_by = Mock(side_effect=FAKE_QUOTAS)
-        self.driver.commit(FAKE_RESERVATIONS)
-
-        self.assertEqual(0, FAKE_QUOTAS[0].in_use)
-        self.assertEqual(0, FAKE_QUOTAS[0].reserved)
-        self.assertEqual(Reservation.Statuses.COMMITTED,
-                         FAKE_RESERVATIONS[0].status)
-
-    def test_rollback(self):
-
-        Reservation.save = Mock()
-        QuotaUsage.save = Mock()
-
-        FAKE_QUOTAS = [QuotaUsage(id=1,
-                                  tenant_id=FAKE_TENANT1,
-                                  resource=Resource.INSTANCES,
-                                  in_use=5,
-                                  reserved=2),
-                       QuotaUsage(id=2,
-                                  tenant_id=FAKE_TENANT1,
-                                  resource=Resource.VOLUMES,
-                                  in_use=1,
-                                  reserved=2)]
-
-        FAKE_RESERVATIONS = [Reservation(usage_id=1,
-                                         delta=1,
-                                         status=Reservation.Statuses.RESERVED),
-                             Reservation(usage_id=2,
-                                         delta=2,
-                                         status=Reservation.Statuses.RESERVED)]
-
-        QuotaUsage.find_by = Mock(side_effect=FAKE_QUOTAS)
-        self.driver.rollback(FAKE_RESERVATIONS)
-
-        self.assertEqual(5, FAKE_QUOTAS[0].in_use)
-        self.assertEqual(1, FAKE_QUOTAS[0].reserved)
+    def test_a_reservation_rolled_back_uses_nothing(self):
+        self._set_usage('instances', 2)
+        reservations = self.driver.reserve(self.tenant, resources,
+                                           {'instances': 1})
+        self.driver.rollback(reservations)
+        usage = self._usage('instances')
+        self.assertEqual((2, 0), (usage.in_use, usage.reserved))
         self.assertEqual(Reservation.Statuses.ROLLEDBACK,
-                         FAKE_RESERVATIONS[0].status)
+                         Reservation.find_by(id=reservations[0].id).status)
 
-        self.assertEqual(1, FAKE_QUOTAS[1].in_use)
-        self.assertEqual(0, FAKE_QUOTAS[1].reserved)
-        self.assertEqual(Reservation.Statuses.ROLLEDBACK,
-                         FAKE_RESERVATIONS[1].status)
+    def test_over_the_limit_counting_what_is_reserved(self):
+        self._set_usage('instances', 1, reserved=1)
+        self.assertRaises(exception.QuotaExceeded, self.driver.reserve,
+                          self.tenant, resources, {'instances': 2})
+        usage = self._usage('instances')
+        self.assertEqual((1, 1), (usage.in_use, usage.reserved))
+
+    def test_a_negative_delta_over_the_limit_is_reserved(self):
+        self._set_usage('instances', 5)
+        reservations = self.driver.reserve(self.tenant, resources,
+                                           {'instances': -1})
+        self.driver.commit(reservations)
+        self.assertEqual(4, self._usage('instances').in_use)
+
+    def test_in_use_does_not_go_below_zero(self):
+        reservations = self.driver.reserve(self.tenant, resources,
+                                           {'instances': -1})
+        self.driver.commit(reservations)
+        usage = self._usage('instances')
+        self.assertEqual((0, 0), (usage.in_use, usage.reserved))
+
+    def test_an_unknown_resource_is_refused(self):
+        self.assertRaises(exception.QuotaResourceUnknown,
+                          self.driver.reserve, self.tenant, resources,
+                          {'instances': 1, 'nothing': 1})
+
+    def test_a_commit_while_reserving_is_kept(self):
+        # Other requests of the tenant commit after this one has looked at
+        # the usages: the old reserve saved back the in_use it had read and
+        # the instances of the other requests were no longer counted.
+        CONF.set_override('max_instances_per_tenant', 10)
+        self._set_usage('instances', 1)
+        read = self.driver.get_all_quota_usages_by_tenant
+        others = []
+
+        busy = []
+
+        def read_then_another_commits(*args):
+            usages = read(*args)
+            if not busy:
+                busy.append(True)
+                other = self.driver.reserve(self.tenant, resources,
+                                            {'instances': 1})
+                others.append(other)
+                self.driver.commit(other)
+                busy.pop()
+            return usages
+
+        with patch.object(self.driver, 'get_all_quota_usages_by_tenant',
+                          side_effect=read_then_another_commits):
+            mine = self.driver.reserve(self.tenant, resources,
+                                       {'instances': 1})
+        self.driver.commit(mine)
+
+        self.assertTrue(others)
+        usage = self._usage('instances')
+        self.assertEqual((1 + len(others) + 1, 0),
+                         (usage.in_use, usage.reserved))
