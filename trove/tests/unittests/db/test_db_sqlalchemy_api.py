@@ -12,13 +12,20 @@
 #
 
 import unittest
-from unittest.mock import Mock, MagicMock
+from unittest.mock import patch
 
 from trove.common import exception
 from trove.db.sqlalchemy import api
 
 
 class TestDbSqlalchemyApi(unittest.TestCase):
+
+    def _patch(self, target, name, **kwargs):
+        # Assigned for good, these replaced the real alembic setup for every
+        # later test: the first util.init_db() after them failed.
+        patcher = patch.object(target, name, **kwargs)
+        self.addCleanup(patcher.stop)
+        return patcher.start()
 
     def test_migrate_legacy_database_scalar_replacement(self):
         """Test _migrate_legacy_database uses scalar()
@@ -46,27 +53,27 @@ class TestDbSqlalchemyApi(unittest.TestCase):
             self.assertEqual(cur_version, 48)
 
     def test_db_sync_alembic(self):
-        api._configure_alembic = MagicMock(return_value=True)
-        api._get_alembic_revision = MagicMock(return_value='head')
-        api.alembic_command.upgrade = Mock()
+        self._patch(api, '_configure_alembic', return_value=True)
+        self._patch(api, '_get_alembic_revision', return_value='head')
+        self._patch(api.alembic_command, 'upgrade')
         api.db_sync({})
         self.assertTrue(api.alembic_command.upgrade.called)
 
     def test_db_sync_sqlalchemy_migrate(self):
-        api._configure_alembic = MagicMock(return_value=False)
+        self._patch(api, '_configure_alembic', return_value=False)
         with self.assertRaises(exception.BadRequest) as ex:
             api.db_sync({})
             self.assertTrue(ex.msg,
                             'sqlalchemy-migrate is no longer supported')
 
     def test_db_upgrade_alembic(self):
-        api._configure_alembic = MagicMock(return_value=True)
-        api.alembic_command.upgrade = Mock()
+        self._patch(api, '_configure_alembic', return_value=True)
+        self._patch(api.alembic_command, 'upgrade')
         api.db_upgrade({})
         self.assertTrue(api.alembic_command.upgrade.called)
 
     def test_db_upgrade_sqlalchemy_migrate(self):
-        api._configure_alembic = MagicMock(return_value=False)
+        self._patch(api, '_configure_alembic', return_value=False)
         with self.assertRaises(exception.BadRequest) as ex:
             api.db_upgrade({})
             self.assertTrue(ex.msg,

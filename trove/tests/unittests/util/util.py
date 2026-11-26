@@ -20,18 +20,24 @@ from trove.db.sqlalchemy import session
 
 CONF = cfg.CONF
 DB_SETUP = None
+# The schema is made once per process: cleanup_db() empties the tables,
+# alembic_version with them, and a second db_sync then found the tables
+# it was about to create.
+DB_SYNCED = False
 LOCK = threading.Lock()
 
 
 def init_db():
     with LOCK:
-        global DB_SETUP
+        global DB_SETUP, DB_SYNCED
         if not DB_SETUP:
             CONF.set_override("connection",
                               "sqlite:///trove_test.sqlite",
                               "database")
-            db_api = get_db_api()
-            db_api.db_sync(CONF)
+            if not DB_SYNCED:
+                db_api = get_db_api()
+                db_api.db_sync(CONF)
+                DB_SYNCED = True
             session.configure_db()
             DB_SETUP = True
 
