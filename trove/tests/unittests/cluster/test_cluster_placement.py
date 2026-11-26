@@ -221,6 +221,65 @@ class ClusterCreateTest(trove_testtools.TestCase):
         self.assertEqual({'group': 'cluster-group'}, self._create(None))
 
 
+class ClusterCreateRefusedTest(trove_testtools.TestCase):
+    """A cluster the strategy refuses leaves no server group behind."""
+
+    def setUp(self):
+        super(ClusterCreateRefusedTest, self).setUp()
+        strategy = mock.patch.object(
+            cluster_models.strategy, 'load_api_strategy').start()
+        self.cluster_class = mock.Mock(SHARD_PLACEMENT=False,
+                                       spec=['SHARD_PLACEMENT', 'create'])
+        self.cluster_class.create.side_effect = exception.BadRequest('no')
+        strategy.return_value.cluster_class = self.cluster_class
+        self.nova = mock.patch.object(srv_grp, 'create_nova_client').start()
+        self.nova.return_value.server_groups.create.return_value = (
+            mock.Mock(id='group-1'))
+        self.nova.return_value.server_groups.get.return_value = (
+            mock.Mock(members=[]))
+        self.recorded = mock.patch.object(
+            cluster_models.DBCluster, 'find_all').start()
+        self.recorded.return_value.count.return_value = 0
+        self.addCleanup(mock.patch.stopall)
+
+    def _create(self):
+        self.assertRaises(
+            exception.BadRequest, cluster_models.Cluster.create,
+            mock.Mock(project_id='tenant-1'), 'c', mock.Mock(),
+            mock.Mock(manager='mongodb'), [], {}, 'anti-affinity', None)
+
+    def test_the_group_of_a_refused_cluster_is_deleted(self):
+        self._create()
+        self.recorded.assert_called_once_with(tenant_id='tenant-1',
+                                              name='c', deleted=False)
+        self.nova.return_value.server_groups.delete.assert_called_once_with(
+            'group-1')
+
+    def test_the_group_of_a_recorded_cluster_is_kept(self):
+        # Its members may be on their way to the group.
+        self.recorded.return_value.count.return_value = 1
+        self._create()
+        self.nova.return_value.server_groups.delete.assert_not_called()
+
+    def test_a_group_with_members_is_kept(self):
+        self.nova.return_value.server_groups.get.return_value = (
+            mock.Mock(members=['server-1']))
+        self._create()
+        self.nova.return_value.server_groups.delete.assert_not_called()
+
+    def test_the_refusal_is_raised_when_the_group_cannot_be_deleted(self):
+        self.nova.return_value.server_groups.delete.side_effect = (
+            RuntimeError('nova'))
+        self._create()
+
+    def test_no_locality_no_group(self):
+        self.assertRaises(
+            exception.BadRequest, cluster_models.Cluster.create,
+            mock.Mock(project_id='tenant-1'), 'c', mock.Mock(),
+            mock.Mock(manager='mongodb'), [], {}, None, None)
+        self.nova.return_value.server_groups.delete.assert_not_called()
+
+
 class RedisClusterPlacementTest(trove_testtools.TestCase):
     """A Redis Cluster's members get the group of their master with its
     replicas.

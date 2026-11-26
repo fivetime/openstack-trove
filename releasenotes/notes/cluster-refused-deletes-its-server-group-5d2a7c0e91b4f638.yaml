@@ -1,0 +1,8 @@
+---
+fixes:
+  - |
+    A cluster create the datastore's strategy refuses, such as one with a
+    bad request or over quota, no longer leaves its empty ``locality_<name>``
+    server group behind. Such groups counted against the server group
+    quota of the project Trove creates servers in, and an empty group of
+    the same name hid the group of the next cluster with that name.

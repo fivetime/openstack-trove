@@ -16,6 +16,7 @@
 import json
 
 from oslo_log import log as logging
+from oslo_utils import excutils
 
 from neutronclient.common import exceptions as neutron_exceptions
 from novaclient import exceptions as nova_exceptions
@@ -319,11 +320,29 @@ class Cluster(object):
         else:
             locality = srv_grp.ServerGroup.build_scheduler_hint(
                 context, locality, name)
-        return api_strategy.cluster_class.create(context, name, datastore,
-                                                 datastore_version, instances,
-                                                 extended_properties,
-                                                 locality, configuration,
-                                                 image_id)
+        try:
+            return api_strategy.cluster_class.create(
+                context, name, datastore, datastore_version, instances,
+                extended_properties, locality, configuration, image_id)
+        except Exception:
+            # The group was made for a cluster the strategy refused (a bad
+            # request, a quota): no cluster will ever delete it, and an
+            # empty group left with this name hides the group of the next
+            # cluster of that name from load_for_cluster. Once a cluster of
+            # this name is recorded, its members may be on their way to the
+            # group, and deleting the cluster deletes the group.
+            with excutils.save_and_reraise_exception():
+                cls._delete_group_of_unrecorded(context, name, locality)
+
+    @staticmethod
+    def _delete_group_of_unrecorded(context, name, locality):
+        try:
+            if not DBCluster.find_all(tenant_id=context.project_id,
+                                      name=name, deleted=False).count():
+                srv_grp.ServerGroup.delete_unused(context, locality)
+        except Exception:
+            LOG.exception("Could not clean up the server group of cluster "
+                          "%s, which was not created", name)
 
     def validate_cluster_available(self, valid_states=[ClusterTasks.NONE]):
         if self.db_info.task_status not in valid_states:

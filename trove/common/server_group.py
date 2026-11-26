@@ -107,6 +107,23 @@ class ServerGroup(object):
                            'members': server_group.members})
 
     @classmethod
+    def delete_unused(cls, context, scheduler_hint):
+        """Delete the group of a scheduler hint while it has no member."""
+        group_id = (scheduler_hint.get('group')
+                    if isinstance(scheduler_hint, dict) else None)
+        if not group_id:
+            return
+        try:
+            client = create_nova_client(context)
+            if client.server_groups.get(group_id).members:
+                return
+            LOG.info("Deleting unused server group %s", group_id)
+            client.server_groups.delete(group_id)
+        except Exception:
+            LOG.exception("Could not delete unused server group %s",
+                          group_id)
+
+    @classmethod
     def convert_to_hint(cls, server_group, hints=None):
         if server_group:
             hints = hints or {}
