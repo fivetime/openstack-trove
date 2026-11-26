@@ -1,0 +1,7 @@
+---
+fixes:
+  - |
+    The management API refuses to rebuild any member of a cluster, not
+    only a member of a Vertica cluster. The guest of a rebuilt member
+    does not bring back what the cluster configured on its old root
+    disk; a member left for dead is replaced by the cluster's repair.

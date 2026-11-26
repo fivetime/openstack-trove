@@ -2028,11 +2028,15 @@ class Instance(BuiltInstance):
 
     def rebuild(self, image_id):
         # The guest of a member does not bring back its place in the
-        # cluster (vertica_cluster.yaml, certificates, the other members).
-        if (self.db_info.cluster_id is not None and
-                self.datastore_version.manager == 'vertica'):
+        # cluster: what the cluster gave it is kept on the old root disk
+        # (the system overrides of Galera, Group Replication and Redis,
+        # vertica_cluster.yaml), a MongoDB member is refused by its guest
+        # only once the server was rebuilt, and a rebuilt Cassandra member
+        # would give the superuser of the whole cluster a new password.
+        # A member left for dead is replaced by the cluster's repair.
+        if self.db_info.cluster_id is not None:
             raise exception.BadRequest(_(
-                "A member of a Vertica cluster cannot be rebuilt."))
+                "A member of a cluster cannot be rebuilt."))
         self.update_db(task_status=InstanceTasks.BUILDING)
         task_api.API(self.context).rebuild(self.id, image_id)
 
